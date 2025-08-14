@@ -1,0 +1,25 @@
+# Desktop Capture Configuration Example
+# This file demonstrates the configuration options for desktop capture
+
+# Display settings
+display_id: ":0"          # X11 display ID
+frame_rate: 30            # Capture frame rate (1-120 fps)
+width: 1920               # Capture width (1-7680 pixels)
+height: 1080              # Capture height (1-4320 pixels)
+
+# Display server settings
+use_wayland: false        # Use Wayland instead of X11
+auto_detect: true         # Auto-detect display server
+
+# Capture options
+show_pointer: false       # Show mouse pointer in capture
+use_damage: false         # Use damage events for optimization
+buffer_size: 10           # Buffer size (1-100)
+quality: "medium"         # Quality preset: low, medium, high
+
+# Optional capture region (comment out to capture full screen)
+capture_region:
+  x: 100                  # X offset
+  y: 100                  # Y offset
+  width: 800              # Region width
+  height: 600             # Region height

@@ -1,0 +1,130 @@
+# BDWind-GStreamer 容器化配置
+# 专门为容器环境优化的配置文件
+
+# Web 服务器配置
+web:
+  port: 8080
+  host: "0.0.0.0"
+  enable_tls: false
+  static_dir: "/app/examples"
+
+# 桌面捕获配置（使用 xvfb 虚拟显示）
+capture:
+  display_id: ":99"
+  frame_rate: 30
+  width: 1920
+  height: 1080
+  quality: "medium"
+  use_wayland: false
+  capture_region:
+    enabled: false
+    x: 0
+    y: 0
+    width: 1920
+    height: 1080
+
+# 视频编码配置
+encoding:
+  codec: "h264"
+  bitrate: 2000  # kbps
+  keyframe_interval: 2  # seconds
+  use_hardware: true
+  hardware_type: "auto"  # auto, nvenc, vaapi, x264
+  preset: "medium"
+  profile: "baseline"
+  rate_control: "cbr"
+  latency: 0  # 0 for zero-latency mode
+
+# 音频配置
+audio:
+  enabled: true
+  channels: 2
+  sample_rate: 48000
+  bitrate: 128  # kbps
+  codec: "opus"
+
+# WebRTC 配置（使用外部 TURN 服务器）
+webrtc:
+  stun_servers:
+    - "stun:stun.l.google.com:19302"
+    - "stun:stun1.l.google.com:19302"
+  
+  # 外部 TURN 服务器配置
+  turn_servers:
+    - url: "turn:your-coturn-server.com:3478"
+      username: "your-turn-username"
+      password: "your-turn-password"
+    # 可以配置多个 TURN 服务器作为备用
+    # - url: "turn:backup-turn-server.com:3478"
+    #   username: "backup-username"
+    #   password: "backup-password"
+
+# 认证配置
+auth:
+  enabled: true
+  default_role: "viewer"
+  admin_users:
+    - "admin"
+  session_timeout: 3600  # seconds
+  token_secret: "change-this-secret-in-production"
+
+# 监控配置（容器化时禁用 Prometheus 和 Grafana）
+monitoring:
+  enabled: false  # 禁用监控
+  metrics_port: 9090
+  collect_system_metrics: false
+  collect_gstreamer_metrics: false
+  collect_webrtc_metrics: false
+
+# 日志配置
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, file
+  file_path: "/app/logs/bdwind.log"
+  max_size: 100  # MB
+  max_files: 5
+  max_age: 30  # days
+
+# 性能调优
+performance:
+  max_clients: 10
+  buffer_size: 1024  # KB
+  worker_threads: 4
+  enable_zero_copy: true
+  memory_limit: 512  # MB
+
+# 安全设置
+security:
+  enable_cors: true
+  cors_origins:
+    - "*"  # 生产环境中应该限制为特定域名
+  enable_rate_limiting: true
+  rate_limit_requests: 100  # requests per minute
+  enable_request_logging: true
+
+# 容器特定配置
+container:
+  # Xvfb 虚拟显示配置
+  virtual_display:
+    enabled: true
+    display_number: 99
+    resolution: "1920x1080x24"
+    dpi: 96
+  
+  # 外部服务依赖
+  external_services:
+    # TURN 服务器配置
+    turn_server:
+      enabled: true
+      host: "your-coturn-server.com"
+      port: 3478
+      username: "your-turn-username"
+      password: "your-turn-password"
+      realm: "your-realm"
+    
+    # 禁用内置监控服务
+    prometheus:
+      enabled: false
+    grafana:
+      enabled: false

@@ -1,0 +1,75 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Documentation
+*.md
+docs/
+.kiro/
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+bdwind-gstreamer
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+test/
+tests/
+
+# Logs
+*.log
+logs/
+dev-logs/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Dependencies (will be downloaded in container)
+vendor/
+
+# Docker files (avoid recursive copying)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Monitoring and data directories
+monitoring/
+data/
+prometheus_data/
+grafana_data/
+
+# Selkies reference project
+selkies-gstreamer/
+
+# Scripts that aren't needed in container
+scripts/
+
+# Configuration that should be mounted
+config/

@@ -1,0 +1,91 @@
+# BDWind-GStreamer Runtime Dockerfile
+# 专门用于运行应用程序的轻量级镜像
+
+FROM docker.io/debian:12
+
+LABEL maintainer="BDWind-GStreamer Team"
+LABEL description="Runtime image for BDWind-GStreamer application (Debian 12)"
+
+# 启用 non-free 仓库以获得完整的硬件支持
+RUN echo "deb http://deb.debian.org/debian bookworm main non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian bookworm-updates main non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb http://security.debian.org/debian-security bookworm-security main non-free-firmware" >> /etc/apt/sources.list
+
+# 安装运行时依赖
+RUN apt-get update && apt-get install -y \
+    # GStreamer 运行时
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    # X11 和 Wayland 支持
+    libx11-6 \
+    libxext6 \
+    libxfixes3 \
+    libxdamage1 \
+    libxcomposite1 \
+    libxrandr2 \
+    libxtst6 \
+    # 虚拟显示支持
+    xvfb \
+    x11-utils \
+    x11-xserver-utils \
+    # 硬件加速
+    vainfo \
+    intel-media-va-driver-non-free \
+    mesa-va-drivers \
+    # 音频支持
+    pulseaudio \
+    alsa-utils \
+    # 网络工具
+    ca-certificates \
+    curl \
+    # 进程管理
+    tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建非 root 用户
+RUN groupadd -r bdwind && useradd -r -g bdwind -s /bin/bash bdwind
+
+# 创建应用目录
+WORKDIR /app
+
+# 从构建镜像复制编译好的二进制文件
+# 注意：这个文件需要从构建镜像中复制，或者通过 docker cp 命令复制
+# COPY --from=build-image /app/bdwind-gstreamer .
+
+# 复制配置文件和脚本
+COPY examples/ ./examples/
+COPY docs/ ./docs/
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+# 设置脚本权限
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# 创建运行时目录
+RUN mkdir -p /app/logs /app/data && \
+    chown -R bdwind:bdwind /app
+
+# 设置环境变量
+ENV DISPLAY=:99
+ENV DISPLAY_NUM=99
+ENV DISPLAY_RESOLUTION=1920x1080x24
+ENV XDG_RUNTIME_DIR=/tmp/runtime-bdwind
+
+# 暴露端口
+EXPOSE 8080
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# 切换到非 root 用户
+USER bdwind
+
+# 使用 tini 作为初始化系统和自定义入口点
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+
+# 默认命令
+CMD ["./bdwind-gstreamer", "-host", "0.0.0.0", "-port", "8080"]

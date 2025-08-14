@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BDWind GStreamer Desktop Capture</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>BDWind GStreamer</h1>
+            <p>高性能桌面流媒体服务器</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="video-section">
+                <h3>桌面流媒体</h3>
+                <div class="video-container" id="video-container">
+                    <video id="video" autoplay playsinline muted style="display: none;" tabindex="0">
+                        您的浏览器不支持视频播放
+                    </video>
+                    <audio id="audio" autoplay playsinline style="display: none;">
+                        您的浏览器不支持音频播放
+                    </audio>
+                    <div id="video-placeholder" class="video-placeholder">
+                        点击"开始捕获"开始桌面共享
+                    </div>
+                    
+                    <!-- 视频控制覆盖层 -->
+                    <div class="video-controls-overlay" id="video-controls" style="display: none;">
+                        <button class="control-btn" onclick="toggleVideoPlay()" title="播放/暂停">
+                            <span id="play-icon">⏸️</span>
+                        </button>
+                        <button class="control-btn" onclick="toggleFullscreen()" title="全屏">
+                            <span id="fullscreen-icon">⛶</span>
+                        </button>
+                        <button class="control-btn" onclick="toggleAudioMute()" title="静音">
+                            <span id="mute-icon">🔊</span>
+                        </button>
+                        <input type="range" id="volume-slider" min="0" max="1" step="0.1" value="1" onchange="setVolume(this.value)" title="音量">
+                    </div>
+                    
+                    <!-- 视频信息覆盖层 -->
+                    <div class="video-info-overlay" id="video-info" style="display: none;">
+                        <div>分辨率: <span id="resolution-info">0x0</span></div>
+                        <div>帧率: <span id="fps-info">0</span> fps</div>
+                        <div>比特率: <span id="bitrate-info">0</span> kbps</div>
+                        <div>延迟: <span id="latency-info">0</span> ms</div>
+                    </div>
+                </div>
+                
+                <div class="controls">
+                    <button class="btn btn-primary" onclick="startCapture()">开始捕获</button>
+                    <button class="btn btn-danger" onclick="stopCapture()">停止捕获</button>
+                    <button class="btn btn-secondary" onclick="toggleFullscreen()">全屏</button>
+                    <button class="btn btn-secondary" onclick="getDisplays()">显示器</button>
+                </div>
+            </div>
+            
+            <div class="sidebar">
+                <div class="panel">
+                    <h3>连接状态</h3>
+                    <div id="connection-status">
+                        <span class="status-indicator status-offline"></span>
+                        <span id="status-text">离线</span>
+                    </div>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-value" id="fps-value">0</div>
+                            <div class="stat-label">FPS</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="bitrate-value">0</div>
+                            <div class="stat-label">Kbps</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="clients-value">0</div>
+                            <div class="stat-label">客户端</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="latency-value">0</div>
+                            <div class="stat-label">延迟(ms)</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="panel">
+                    <h3>系统监控</h3>
+                    
+                    <!-- 系统健康状态 -->
+                    <div id="system-health" class="system-health good">
+                        <div class="health-score">100</div>
+                        <div class="health-status">良好</div>
+                    </div>
+                    
+                    <!-- 监控工具栏 -->
+                    <div class="monitoring-toolbar">
+                        <div class="toolbar-group">
+                            <button class="btn btn-sm btn-secondary" onclick="systemMonitor.exportMonitoringData()">导出数据</button>
+                            <button class="btn btn-sm btn-secondary" onclick="systemMonitor.resetMonitoringData()">重置数据</button>
+                        </div>
+                        <div class="toolbar-group">
+                            <span style="font-size: 12px; color: #666;">运行时间:</span>
+                            <span id="system-uptime" style="font-size: 12px; font-weight: bold;">0:00:00</span>
+                        </div>
+                    </div>
+                    
+                    <div class="monitoring-tabs">
+                        <button class="tab-btn active" onclick="switchMonitoringTab('performance')">性能</button>
+                        <button class="tab-btn" onclick="switchMonitoringTab('resources')">资源</button>
+                        <button class="tab-btn" onclick="switchMonitoringTab('connections')">连接</button>
+                        <button class="tab-btn" onclick="switchMonitoringTab('logs')">日志</button>
+                    </div>
+                    
+                    <!-- 性能监控面板 -->
+                    <div id="performance-panel" class="monitoring-panel active">
+                        <div class="metrics-grid">
+                            <div class="metric-card">
+                                <div class="metric-title">CPU使用率</div>
+                                <div class="metric-value" id="cpu-usage">0%</div>
+                                <div class="metric-chart" id="cpu-chart"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">内存使用</div>
+                                <div class="metric-value" id="memory-usage">0%</div>
+                                <div class="metric-chart" id="memory-chart"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">GPU使用率</div>
+                                <div class="metric-value" id="gpu-usage">N/A</div>
+                                <div class="metric-chart" id="gpu-chart"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">网络流量</div>
+                                <div class="metric-value" id="network-usage">0 KB/s</div>
+                                <div class="metric-chart" id="network-chart"></div>
+                            </div>
+                        </div>
+                        
+                        <!-- 性能统计 -->
+                        <div class="performance-stats">
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="system-load">0.00, 0.00, 0.00</div>
+                                <div class="performance-stat-label">系统负载</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="process-count">0</div>
+                                <div class="performance-stat-label">进程数</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="thread-count">0</div>
+                                <div class="performance-stat-label">线程数</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="file-descriptors">0</div>
+                                <div class="performance-stat-label">文件描述符</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 系统资源面板 -->
+                    <div id="resources-panel" class="monitoring-panel">
+                        <div class="resource-section">
+                            <h4>CPU信息</h4>
+                            <div class="resource-details" id="cpu-details">
+                                <div>核心数: <span id="cpu-cores">-</span></div>
+                                <div>频率: <span id="cpu-frequency">-</span> MHz</div>
+                                <div>温度: <span id="cpu-temperature">-</span>°C</div>
+                                <div>负载: <span id="cpu-load">-</span></div>
+                            </div>
+                        </div>
+                        
+                        <div class="resource-section">
+                            <h4>内存信息</h4>
+                            <div class="resource-details" id="memory-details">
+                                <div>总计: <span id="memory-total">-</span></div>
+                                <div>已用: <span id="memory-used">-</span></div>
+                                <div>可用: <span id="memory-available">-</span></div>
+                                <div>缓存: <span id="memory-cached">-</span></div>
+                            </div>
+                        </div>
+                        
+                        <div class="resource-section">
+                            <h4>GPU信息</h4>
+                            <div class="resource-details" id="gpu-details">
+                                <div>型号: <span id="gpu-name">-</span></div>
+                                <div>显存: <span id="gpu-memory">-</span></div>
+                                <div>温度: <span id="gpu-temperature">-</span>°C</div>
+                                <div>功耗: <span id="gpu-power">-</span>W</div>
+                            </div>
+                        </div>
+                        
+                        <div class="resource-section">
+                            <h4>磁盘信息</h4>
+                            <div class="resource-details" id="disk-details">
+                                <div>总计: <span id="disk-total">-</span></div>
+                                <div>已用: <span id="disk-used">-</span></div>
+                                <div>可用: <span id="disk-available">-</span></div>
+                                <div>使用率: <span id="disk-usage">-</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 连接状态面板 -->
+                    <div id="connections-panel" class="monitoring-panel">
+                        <div class="connection-summary">
+                            <div class="connection-stat">
+                                <div class="stat-value" id="total-connections">0</div>
+                                <div class="stat-label">总连接数</div>
+                            </div>
+                            <div class="connection-stat">
+                                <div class="stat-value" id="active-connections">0</div>
+                                <div class="stat-label">活跃连接</div>
+                            </div>
+                            <div class="connection-stat">
+                                <div class="stat-value" id="avg-rtt">0</div>
+                                <div class="stat-label">平均RTT(ms)</div>
+                            </div>
+                            <div class="connection-stat">
+                                <div class="stat-value" id="total-bandwidth">0 B</div>
+                                <div class="stat-label">总带宽</div>
+                            </div>
+                            <div class="connection-stat">
+                                <div class="stat-value" id="packet-loss-rate">0.00%</div>
+                                <div class="stat-label">丢包率</div>
+                            </div>
+                            <div class="connection-stat">
+                                <div class="stat-value connection-quality" id="connection-quality">优秀</div>
+                                <div class="stat-label">连接质量</div>
+                            </div>
+                        </div>
+                        
+                        <!-- 连接历史图表 -->
+                        <div class="metrics-grid" style="margin-bottom: 15px;">
+                            <div class="metric-card">
+                                <div class="metric-title">连接数历史</div>
+                                <div class="metric-chart" id="connections-chart"></div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">RTT历史</div>
+                                <div class="metric-chart" id="rtt-chart"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="connection-list" id="connection-list">
+                            <div class="connection-header">
+                                <span>客户端ID</span>
+                                <span>状态</span>
+                                <span>RTT</span>
+                                <span>丢包率</span>
+                                <span>操作</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 日志面板 -->
+                    <div id="logs-panel" class="monitoring-panel">
+                        <!-- 日志统计 -->
+                        <div class="performance-stats" style="margin-bottom: 15px;">
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="log-total">0</div>
+                                <div class="performance-stat-label">总计</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="log-errors" style="color: #dc3545;">0</div>
+                                <div class="performance-stat-label">错误</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="log-warnings" style="color: #ffc107;">0</div>
+                                <div class="performance-stat-label">警告</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="log-info" style="color: #28a745;">0</div>
+                                <div class="performance-stat-label">信息</div>
+                            </div>
+                            <div class="performance-stat">
+                                <div class="performance-stat-value" id="log-debug" style="color: #6f42c1;">0</div>
+                                <div class="performance-stat-label">调试</div>
+                            </div>
+                        </div>
+                        
+                        <div class="log-controls">
+                            <div class="control-group">
+                                <label>级别:</label>
+                                <select id="log-level" onchange="filterLogs()">
+                                    <option value="all">所有级别</option>
+                                    <option value="DEBUG">调试</option>
+                                    <option value="INFO">信息</option>
+                                    <option value="WARN">警告</option>
+                                    <option value="ERROR">错误</option>
+                                </select>
+                            </div>
+                            <div class="control-group">
+                                <label>组件:</label>
+                                <select id="log-component" onchange="filterLogs()">
+                                    <option value="all">所有组件</option>
+                                    <option value="capture">捕获</option>
+                                    <option value="encoder">编码器</option>
+                                    <option value="webrtc">WebRTC</option>
+                                    <option value="server">服务器</option>
+                                    <option value="signaling">信令</option>
+                                </select>
+                            </div>
+                            <div class="control-group">
+                                <label>搜索:</label>
+                                <input type="text" id="log-search" placeholder="搜索日志..." onchange="filterLogs()">
+                            </div>
+                            <div class="control-group">
+                                <button class="btn btn-secondary btn-sm" onclick="clearLogs()">清空</button>
+                                <button class="btn btn-secondary btn-sm" onclick="exportLogs()">导出</button>
+                                <button class="btn btn-secondary btn-sm" onclick="refreshLogs()">刷新</button>
+                                <button class="btn btn-secondary btn-sm" onclick="systemMonitor.startLogStream()">实时</button>
+                            </div>
+                        </div>
+                        <div class="log-container" id="log-container">
+                            <div class="log-stats">
+                                <span>正在加载日志...</span>
+                                <span>最后更新: --:--:--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/config.js"></script>
+    <script src="/static/utils.js"></script>
+    <script src="/static/event-bus.js"></script>
+    <script src="/static/input.js"></script>
+    <script src="/static/monitoring.js"></script>
+    <script src="/static/signaling.js"></script>
+    <script src="/static/webrtc.js"></script>
+    <script src="/static/ui.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

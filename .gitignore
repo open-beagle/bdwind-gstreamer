@@ -1,0 +1,5 @@
+/.kiro
+/.tmp
+/.vscode
+/examples/debug_config.yaml
+/selkies-gstreamer

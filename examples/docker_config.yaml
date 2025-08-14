@@ -1,0 +1,101 @@
+# BDWind-GStreamer Docker Configuration Example
+# This configuration is optimized for containerized deployment
+
+# Web server configuration
+web:
+  port: 8080
+  host: "0.0.0.0"
+  enable_tls: false
+  static_dir: "/app/static"
+
+# Desktop capture configuration
+capture:
+  display_id: ":0"
+  frame_rate: 30
+  width: 1920
+  height: 1080
+  quality: "medium"
+  use_wayland: false
+  capture_region:
+    enabled: false
+    x: 0
+    y: 0
+    width: 1920
+    height: 1080
+
+# Video encoding configuration
+encoding:
+  codec: "h264"
+  bitrate: 2000  # kbps
+  keyframe_interval: 2  # seconds
+  use_hardware: true
+  hardware_type: "auto"  # auto, nvenc, vaapi, x264
+  preset: "medium"
+  profile: "baseline"
+  rate_control: "cbr"
+  latency: 0  # 0 for zero-latency mode
+
+# Audio configuration
+audio:
+  enabled: true
+  channels: 2
+  sample_rate: 48000
+  bitrate: 128  # kbps
+  codec: "opus"
+
+# WebRTC configuration
+webrtc:
+  stun_servers:
+    - "stun:stun.l.google.com:19302"
+    - "stun:stun1.l.google.com:19302"
+  
+  turn_servers: []
+  # Example TURN server configuration:
+  # turn_servers:
+  #   - url: "turn:your-turn-server.com:3478"
+  #     username: "your-username"
+  #     password: "your-password"
+
+# Authentication configuration
+auth:
+  enabled: true
+  default_role: "viewer"
+  admin_users:
+    - "admin"
+  session_timeout: 3600  # seconds
+  token_secret: "your-secret-key-change-this-in-production"
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  collect_system_metrics: true
+  collect_gstreamer_metrics: true
+  collect_webrtc_metrics: true
+
+# Logging configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, file
+  file_path: "/app/logs/bdwind.log"
+  max_size: 100  # MB
+  max_files: 5
+  max_age: 30  # days
+
+# Performance tuning
+performance:
+  max_clients: 10
+  buffer_size: 1024  # KB
+  worker_threads: 4
+  enable_zero_copy: true
+  memory_limit: 512  # MB
+
+# Security settings
+security:
+  enable_cors: true
+  cors_origins:
+    - "*"  # Change this in production
+  enable_rate_limiting: true
+  rate_limit_requests: 100  # requests per minute
+  enable_request_logging: true
