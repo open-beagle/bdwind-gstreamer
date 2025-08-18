@@ -20,7 +20,7 @@ echo "✅ 编译成功"
 
 # 设置环境变量
 export DISPLAY=:99
-export GST_DEBUG=2
+export GST_DEBUG=4
 export BDWIND_DEBUG=true
 
 # 停止现有的 Xvfb 进程
@@ -36,6 +36,16 @@ sleep 3
 # 验证虚拟显示
 if xdpyinfo -display :99 >/dev/null 2>&1; then
     echo "✅ 虚拟显示启动成功 (PID: $XVFB_PID)"
+    
+    # 在虚拟显示中启动一个简单的应用程序
+    if command -v xeyes >/dev/null 2>&1; then
+        echo "👀 启动 xeyes 作为测试应用..."
+        xeyes -display :99 &
+        XEYES_PID=$!
+    else
+        echo "⚠️  xeyes 未安装，屏幕上可能没有任何内容可捕获"
+        echo "   请安装 xeyes: sudo apt-get install x11-apps"
+    fi
 else
     echo "❌ 虚拟显示启动失败"
     kill $XVFB_PID 2>/dev/null || true
@@ -71,6 +81,11 @@ cleanup() {
                 sleep 1
             fi
         done
+    fi
+    
+    # 停止 xeyes
+    if [ ! -z "$XEYES_PID" ]; then
+        kill $XEYES_PID 2>/dev/null || true
     fi
     
     # 停止虚拟显示

@@ -265,11 +265,11 @@ var (
 type PipelineState int
 
 const (
-	StateVoidPending PipelineState = -1
-	StateNull        PipelineState = 0
-	StateReady       PipelineState = 1
-	StatePaused      PipelineState = 2
-	StatePlaying     PipelineState = 3
+	StateVoidPending PipelineState = 0
+	StateNull        PipelineState = 1
+	StateReady       PipelineState = 2
+	StatePaused      PipelineState = 3
+	StatePlaying     PipelineState = 4
 )
 
 // StateChangeReturn represents the return value of a state change operation
@@ -346,6 +346,9 @@ type Element interface {
 
 	// ConnectPadAdded connects a pad-added signal handler
 	ConnectPadAdded(callback PadAddedCallback) error
+
+	// GetInternal gets the internal C GstElement pointer
+	GetInternal() *C.GstElement
 }
 
 // Pad represents a GStreamer pad
@@ -925,6 +928,11 @@ func (e *element) ConnectPadAdded(callback PadAddedCallback) error {
 	C.gst_element_connect_pad_added(e.elem, C.gpointer(unsafe.Pointer(uintptr(elemPtr))))
 
 	return nil
+}
+
+// GetInternal gets the internal C GstElement pointer
+func (e *element) GetInternal() *C.GstElement {
+	return e.elem
 }
 
 // Implementation of the Pad interface

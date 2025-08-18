@@ -255,7 +255,7 @@ func (c *Config) String() string {
 
 	encodingInfo := "disabled"
 	if c.GStreamer != nil {
-		encodingInfo = c.GStreamer.Encoding.Codec
+		encodingInfo = string(c.GStreamer.Encoding.Codec)
 	}
 
 	return fmt.Sprintf("Config{WebServer: %s, Capture: %s, Encoding: %s}",
@@ -323,7 +323,8 @@ func convertLegacyConfig(legacy *LegacyConfig) *Config {
 
 	// 转换GStreamer配置
 	config.GStreamer.Capture = legacy.Capture
-	config.GStreamer.Encoding.Codec = legacy.Encoding.Codec
+	// This is a simplification. A more robust conversion would map all legacy fields.
+	config.GStreamer.Encoding.Codec = GetCodecTypeFromString(legacy.Encoding.Codec)
 
 	// 转换Metrics配置
 	config.Metrics.External.Enabled = legacy.Monitoring.Enabled

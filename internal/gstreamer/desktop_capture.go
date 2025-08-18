@@ -1,5 +1,10 @@
 package gstreamer
 
+/*
+#cgo pkg-config: gstreamer-1.0 gstreamer-app-1.0
+#include "desktop_capture.h"
+*/
+import "C"
 import (
 	"errors"
 	"fmt"
@@ -8,10 +13,65 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
+
+// DesktopCapture is a global instance of the desktop capture
+var desktopCapturePtr unsafe.Pointer
+
+//export goHandleAppsinkSample
+func goHandleAppsinkSample(sample *C.GstSample) {
+	if desktopCapturePtr == nil {
+		return
+	}
+	dc := (*desktopCapture)(atomic.LoadPointer(&desktopCapturePtr))
+	if dc == nil || dc.sampleCallback == nil {
+		return
+	}
+
+	buffer := C.gst_sample_get_buffer(sample)
+	if buffer == nil {
+		return
+	}
+
+	var mapInfo C.GstMapInfo
+	if C.gst_buffer_map(buffer, &mapInfo, C.GST_MAP_READ) == 0 {
+		return
+	}
+
+	// Create a Go slice that shares memory with the C buffer
+	data := C.GoBytes(unsafe.Pointer(mapInfo.data), C.int(mapInfo.size))
+
+	// Get caps from sample to extract width and height
+	caps := C.gst_sample_get_caps(sample)
+	var width, height int
+	if caps != nil {
+		s := C.gst_caps_get_structure(caps, 0)
+		if s != nil {
+			var w, h C.gint
+			C.gst_structure_get_int(s, C.CString("width"), &w)
+			C.gst_structure_get_int(s, C.CString("height"), &h)
+			width = int(w)
+			height = int(h)
+		}
+	}
+
+	// Create a new Sample
+	videoSample := NewVideoSample(data, width, height, "raw")
+
+	if err := dc.sampleCallback(videoSample); err != nil {
+		fmt.Printf("Error in sample callback: %v\n", err)
+	}
+
+	dc.statsCollector.recordFrame()
+
+	C.gst_buffer_unmap(buffer, &mapInfo)
+}
+
 
 // CaptureStats contains statistics about the capture
 type CaptureStats struct {
@@ -321,11 +381,17 @@ func (dc *desktopCapture) Start() error {
 	fmt.Printf("Pipeline configuration: %dx%d@%dfps, Quality: %s\n",
 		dc.config.Width, dc.config.Height, dc.config.FrameRate, dc.config.Quality)
 
+	atomic.StorePointer(&desktopCapturePtr, unsafe.Pointer(dc))
+
 	// Start a goroutine to monitor pipeline data flow
 	go dc.monitorDataFlow()
 
-	// Start a goroutine to simulate video data (temporary solution)
-	go dc.simulateVideoData()
+	// After starting the pipeline, set up the appsink callback if it's been configured
+	if dc.sampleCallback != nil {
+		if err := dc.setupAppsinkCallback(); err != nil {
+			return fmt.Errorf("failed to setup appsink callback post-start: %w", err)
+		}
+	}
 
 	return nil
 }
@@ -924,15 +990,7 @@ func (dc *desktopCapture) setupAppsinkCallback() error {
 	if dc.appsinkElem == nil {
 		return fmt.Errorf("appsink element not available")
 	}
-
-	if dc.sampleCallback == nil {
-		return fmt.Errorf("sample callback not set")
-	}
-
-	// TODO: This would need to be implemented with CGO callbacks
-	// For now, we'll simulate frame generation for testing
-	go dc.simulateFrameGeneration()
-
+	C.connect_appsink_callback(dc.appsinkElem.GetInternal())
 	return nil
 }
 
@@ -954,10 +1012,31 @@ func (dc *desktopCapture) simulateFrameGeneration() {
 		case <-ticker.C:
 			frameCount++
 
-			// Create a dummy video sample
+			// Create a test pattern video sample
 			dummyData := make([]byte, dc.config.Width*dc.config.Height*3) // RGB data
-			for i := range dummyData {
-				dummyData[i] = byte((frameCount + i) % 256) // Simple pattern
+
+			// Generate a more visible test pattern
+			for y := 0; y < dc.config.Height; y++ {
+				for x := 0; x < dc.config.Width; x++ {
+					idx := (y*dc.config.Width + x) * 3
+
+					// Create a colorful test pattern that changes over time
+					r := byte((x + frameCount) % 256)
+					g := byte((y + frameCount*2) % 256)
+					b := byte((x + y + frameCount*3) % 256)
+
+					// Add some geometric patterns
+					if (x/50+y/50)%2 == 0 {
+						r = byte(255 - r)
+					}
+					if (x/100)%2 == (y/100)%2 {
+						g = byte(255 - g)
+					}
+
+					dummyData[idx] = r   // Red
+					dummyData[idx+1] = g // Green
+					dummyData[idx+2] = b // Blue
+				}
 			}
 
 			sample := NewVideoSample(dummyData, dc.config.Width, dc.config.Height, "raw")
@@ -983,13 +1062,6 @@ func (dc *desktopCapture) simulateFrameGeneration() {
 	}
 
 	fmt.Printf("Stopped simulated frame generation\n")
-}
-
-// SetSampleCallback sets the callback function for processing video samples
-func (dc *desktopCapture) SetSampleCallback(callback func(*Sample) error) {
-	dc.mu.Lock()
-	defer dc.mu.Unlock()
-	dc.sampleCallback = callback
 }
 
 // GetAppsink returns the appsink element for external processing
@@ -1039,61 +1111,6 @@ func (dc *desktopCapture) monitorDataFlow() {
 	}
 }
 
-// simulateVideoData simulates video data generation for testing
-// This is a temporary solution until we implement proper appsink data extraction
-func (dc *desktopCapture) simulateVideoData() {
-	ticker := time.NewTicker(time.Duration(1000/dc.config.FrameRate) * time.Millisecond)
-	defer ticker.Stop()
-
-	frameCounter := 0
-
-	for {
-		select {
-		case <-ticker.C:
-			if !dc.isRunning {
-				return
-			}
-
-			// Create a simple test pattern (colored rectangle)
-			width := dc.config.Width
-			height := dc.config.Height
-
-			// Create RGB data (3 bytes per pixel)
-			dataSize := width * height * 3
-			data := make([]byte, dataSize)
-
-			// Fill with a simple pattern that changes over time
-			color := byte(frameCounter % 256)
-			for i := 0; i < dataSize; i += 3 {
-				data[i] = color         // Red
-				data[i+1] = 128         // Green
-				data[i+2] = 255 - color // Blue
-			}
-
-			// Create sample
-			sample := NewVideoSample(data, width, height, "RGB")
-			sample.Duration = time.Duration(1000/dc.config.FrameRate) * time.Millisecond
-
-			// Update statistics
-			dc.statsCollector.recordFrame()
-
-			// Call the callback if set
-			if dc.sampleCallback != nil {
-				if err := dc.sampleCallback(sample); err != nil {
-					fmt.Printf("Error in sample callback: %v\n", err)
-				}
-			}
-
-			frameCounter++
-
-		default:
-			if !dc.isRunning {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
 
 // simulateFrameCapture simulates a frame capture event for testing/demo purposes
 // In a real implementation, this would be called by GStreamer callbacks

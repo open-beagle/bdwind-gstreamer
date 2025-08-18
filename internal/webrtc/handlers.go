@@ -192,6 +192,21 @@ func (h *webrtcHandlers) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 转换ICE服务器配置为前端格式
+		iceServers := make([]map[string]interface{}, 0)
+		for _, server := range h.manager.config.WebRTC.ICEServers {
+			iceServer := map[string]interface{}{
+				"urls": server.URLs,
+			}
+			if server.Username != "" {
+				iceServer["username"] = server.Username
+			}
+			if server.Credential != "" {
+				iceServer["credential"] = server.Credential
+			}
+			iceServers = append(iceServers, iceServer)
+		}
+
 		config := map[string]interface{}{
 			"video_enabled": true,
 			"audio_enabled": false,
@@ -200,6 +215,7 @@ func (h *webrtcHandlers) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"video_width":   h.manager.config.GStreamer.Capture.Width,
 			"video_height":  h.manager.config.GStreamer.Capture.Height,
 			"video_fps":     h.manager.config.GStreamer.Capture.FrameRate,
+			"ice_servers":   iceServers,
 		}
 		h.writeJSON(w, config)
 

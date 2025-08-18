@@ -57,6 +57,8 @@ type GStreamerBridge interface {
 
 	// GetStats 获取桥接器统计信息
 	GetStats() BridgeStats
+
+	SetEncodedSampleCallback(callback func(*gstreamer.Sample) error)
 }
 
 // BridgeStats 桥接器统计信息
@@ -94,6 +96,8 @@ type gstreamerBridgeImpl struct {
 	videoTimestamp uint32
 	audioTimestamp uint32
 	startTime      time.Time
+
+	encodedSampleCallback func(*gstreamer.Sample) error
 }
 
 // NewGStreamerBridge 创建新的GStreamer桥接器
@@ -112,6 +116,13 @@ func NewGStreamerBridge(config *GStreamerBridgeConfig) GStreamerBridge {
 		cancel:      cancel,
 		startTime:   time.Now(),
 	}
+}
+
+// SetEncodedSampleCallback sets the callback for encoded samples.
+func (gb *gstreamerBridgeImpl) SetEncodedSampleCallback(callback func(*gstreamer.Sample) error) {
+	gb.mutex.Lock()
+	defer gb.mutex.Unlock()
+	gb.encodedSampleCallback = callback
 }
 
 // Start 启动桥接器

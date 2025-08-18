@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 )
 
 // SignalingMessage 信令消息
@@ -39,38 +40,46 @@ type SignalingEncoderConfig struct {
 
 // SignalingServer 信令服务器
 type SignalingServer struct {
-	clients      map[string]*SignalingClient
-	apps         map[string]map[string]*SignalingClient // appName -> clientID -> client
-	broadcast    chan []byte
-	register     chan *SignalingClient
-	unregister   chan *SignalingClient
-	upgrader     websocket.Upgrader
-	mutex        sync.RWMutex
-	running      bool
-	sdpGenerator *SDPGenerator
-	mediaStream  interface{} // WebRTC 媒体流
-	ctx          context.Context
-	cancel       context.CancelFunc
+	clients               map[string]*SignalingClient
+	apps                  map[string]map[string]*SignalingClient // appName -> clientID -> client
+	broadcast             chan []byte
+	register              chan *SignalingClient
+	unregister            chan *SignalingClient
+	upgrader              websocket.Upgrader
+	mutex                 sync.RWMutex
+	running               bool
+	sdpGenerator          *SDPGenerator
+	mediaStream           interface{} // WebRTC 媒体流
+	peerConnectionManager *PeerConnectionManager
+	ctx                   context.Context
+	cancel                context.CancelFunc
 }
 
 // NewSignalingServer 创建信令服务器
-func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConfig, mediaStream interface{}) *SignalingServer {
+func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConfig, mediaStream interface{}, iceServers []webrtc.ICEServer) *SignalingServer {
 	sdpConfig := &SDPConfig{
 		Codec: encoderConfig.Codec,
 	}
 
 	childCtx, cancel := context.WithCancel(ctx)
 
+	// 创建PeerConnection管理器
+	var pcManager *PeerConnectionManager
+	if ms, ok := mediaStream.(MediaStream); ok {
+		pcManager = NewPeerConnectionManager(ms, iceServers, log.Default())
+	}
+
 	return &SignalingServer{
-		clients:      make(map[string]*SignalingClient),
-		apps:         make(map[string]map[string]*SignalingClient),
-		sdpGenerator: NewSDPGenerator(sdpConfig),
-		mediaStream:  mediaStream,
-		broadcast:    make(chan []byte),
-		register:     make(chan *SignalingClient),
-		unregister:   make(chan *SignalingClient),
-		ctx:          childCtx,
-		cancel:       cancel,
+		clients:               make(map[string]*SignalingClient),
+		apps:                  make(map[string]map[string]*SignalingClient),
+		sdpGenerator:          NewSDPGenerator(sdpConfig),
+		mediaStream:           mediaStream,
+		peerConnectionManager: pcManager,
+		broadcast:             make(chan []byte),
+		register:              make(chan *SignalingClient),
+		unregister:            make(chan *SignalingClient),
+		ctx:                   childCtx,
+		cancel:                cancel,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // 允许跨域
@@ -116,6 +125,11 @@ func (s *SignalingServer) Stop() {
 	// 关闭所有客户端连接
 	for _, client := range s.clients {
 		close(client.Send)
+	}
+
+	// 关闭所有PeerConnection
+	if s.peerConnectionManager != nil {
+		s.peerConnectionManager.Close()
 	}
 
 	// 清空客户端映射
@@ -550,29 +564,76 @@ func (c *SignalingClient) handleMessage(message SignalingMessage) {
 
 // handleOfferRequest 处理offer请求
 func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
-	// 使用SDP生成器生成SDP
-	sdpContent := c.Server.sdpGenerator.GenerateOffer()
-
-	// 验证生成的SDP
-	if err := c.Server.sdpGenerator.ValidateSDP(sdpContent); err != nil {
-		log.Printf("SDP validation failed: %v", err)
-		c.sendError("SDP generation failed")
+	// 获取PeerConnection管理器
+	pcManager := c.Server.peerConnectionManager
+	if pcManager == nil {
+		log.Printf("PeerConnection manager not available")
+		c.sendError("PeerConnection manager not available")
 		return
 	}
 
-	log.Printf("Generated SDP with codec: %s", c.Server.sdpGenerator.GetCodecName())
+	// 为客户端创建PeerConnection
+	pc, err := pcManager.CreatePeerConnection(c.ID)
+	if err != nil {
+		log.Printf("Failed to create peer connection for client %s: %v", c.ID, err)
+		c.sendError("Failed to create peer connection")
+		return
+	}
 
-	offer := SignalingMessage{
+	// 设置ICE候选处理器
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			log.Printf("Generated ICE candidate for client %s", c.ID)
+
+			// 发送ICE候选给客户端
+			candidateMessage := SignalingMessage{
+				Type:   "ice-candidate",
+				PeerID: c.ID,
+				Data: map[string]interface{}{
+					"candidate":     candidate.String(),
+					"sdpMid":        candidate.SDPMid,
+					"sdpMLineIndex": candidate.SDPMLineIndex,
+				},
+			}
+
+			if candidateData, err := json.Marshal(candidateMessage); err == nil {
+				c.Send <- candidateData
+			} else {
+				log.Printf("Failed to marshal ICE candidate: %v", err)
+			}
+		} else {
+			log.Printf("ICE gathering complete for client %s", c.ID)
+		}
+	})
+
+	// 创建offer
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		log.Printf("Failed to create offer for client %s: %v", c.ID, err)
+		c.sendError("Failed to create offer")
+		return
+	}
+
+	// 设置本地描述
+	err = pc.SetLocalDescription(offer)
+	if err != nil {
+		log.Printf("Failed to set local description for client %s: %v", c.ID, err)
+		c.sendError("Failed to set local description")
+		return
+	}
+
+	// 发送offer给客户端
+	offerMessage := SignalingMessage{
 		Type:   "offer",
 		PeerID: c.ID,
 		Data: map[string]interface{}{
 			"type": "offer",
-			"sdp":  sdpContent,
+			"sdp":  offer.SDP,
 		},
 	}
 
 	log.Printf("Sending WebRTC offer to client %s", c.ID)
-	if offerData, err := json.Marshal(offer); err == nil {
+	if offerData, err := json.Marshal(offerMessage); err == nil {
 		c.Send <- offerData
 	} else {
 		log.Printf("Failed to marshal offer: %v", err)
@@ -595,8 +656,52 @@ func (c *SignalingClient) sendError(message string) {
 
 // handleAnswer 处理answer
 func (c *SignalingClient) handleAnswer(message SignalingMessage) {
-	// 这里应该处理WebRTC answer
 	log.Printf("Processing answer from client %s", c.ID)
+
+	// 获取PeerConnection
+	pcManager := c.Server.peerConnectionManager
+	if pcManager == nil {
+		log.Printf("PeerConnection manager not available")
+		c.sendError("PeerConnection manager not available")
+		return
+	}
+
+	pc, exists := pcManager.GetPeerConnection(c.ID)
+	if !exists {
+		log.Printf("PeerConnection not found for client %s", c.ID)
+		c.sendError("PeerConnection not found")
+		return
+	}
+
+	// 解析answer数据
+	answerData, ok := message.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("Invalid answer data format from client %s", c.ID)
+		c.sendError("Invalid answer data format")
+		return
+	}
+
+	sdp, ok := answerData["sdp"].(string)
+	if !ok {
+		log.Printf("Invalid SDP in answer from client %s", c.ID)
+		c.sendError("Invalid SDP in answer")
+		return
+	}
+
+	// 设置远程描述
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  sdp,
+	}
+
+	err := pc.SetRemoteDescription(answer)
+	if err != nil {
+		log.Printf("Failed to set remote description for client %s: %v", c.ID, err)
+		c.sendError("Failed to set remote description")
+		return
+	}
+
+	log.Printf("Successfully processed answer from client %s", c.ID)
 
 	// 发送确认消息
 	ack := SignalingMessage{
@@ -614,8 +719,57 @@ func (c *SignalingClient) handleAnswer(message SignalingMessage) {
 
 // handleIceCandidate 处理ICE候选
 func (c *SignalingClient) handleIceCandidate(message SignalingMessage) {
-	// 这里应该处理ICE候选
 	log.Printf("Processing ICE candidate from client %s", c.ID)
+
+	// 获取PeerConnection
+	pcManager := c.Server.peerConnectionManager
+	if pcManager == nil {
+		log.Printf("PeerConnection manager not available")
+		c.sendError("PeerConnection manager not available")
+		return
+	}
+
+	pc, exists := pcManager.GetPeerConnection(c.ID)
+	if !exists {
+		log.Printf("PeerConnection not found for client %s", c.ID)
+		c.sendError("PeerConnection not found")
+		return
+	}
+
+	// 解析ICE候选数据
+	candidateData, ok := message.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("Invalid ICE candidate data format from client %s", c.ID)
+		c.sendError("Invalid ICE candidate data format")
+		return
+	}
+
+	candidate, ok := candidateData["candidate"].(string)
+	if !ok {
+		log.Printf("Invalid candidate in ICE candidate from client %s", c.ID)
+		c.sendError("Invalid candidate in ICE candidate")
+		return
+	}
+
+	sdpMid, _ := candidateData["sdpMid"].(string)
+	sdpMLineIndex, _ := candidateData["sdpMLineIndex"].(float64)
+
+	// 创建ICE候选
+	iceCandidate := webrtc.ICECandidateInit{
+		Candidate:     candidate,
+		SDPMid:        &sdpMid,
+		SDPMLineIndex: (*uint16)(&[]uint16{uint16(sdpMLineIndex)}[0]),
+	}
+
+	// 添加ICE候选
+	err := pc.AddICECandidate(iceCandidate)
+	if err != nil {
+		log.Printf("Failed to add ICE candidate for client %s: %v", c.ID, err)
+		c.sendError("Failed to add ICE candidate")
+		return
+	}
+
+	log.Printf("Successfully added ICE candidate for client %s", c.ID)
 
 	// 发送确认消息
 	ack := SignalingMessage{

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # BDWind-GStreamer 开发环境安装脚本
-# 适用于 Debian 12 环境
+# 适用于 Debian 12 和 Ubuntu 24.04 环境
 
 set -e
 
@@ -54,8 +54,8 @@ check_environment() {
         . /etc/os-release
         log_info "操作系统: $PRETTY_NAME"
         
-        if [[ "$ID" != "debian" ]]; then
-            log_warning "此脚本专为 Debian 设计，当前系统: $ID"
+        if [[ "$ID" != "debian" && "$ID" != "ubuntu" ]]; then
+            log_warning "此脚本专为 Debian/Ubuntu 设计，当前系统: $ID"
             read -p "是否继续? (y/N): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -70,29 +70,56 @@ check_environment() {
     # 检查架构
     ARCH=$(uname -m)
     log_info "系统架构: $ARCH"
+    
+    # 检查是否为WSL2环境
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        log_info "检测到 WSL2 环境"
+        IS_WSL2=true
+        
+        # 检查WSL版本
+        if command -v wsl.exe >/dev/null 2>&1; then
+            WSL_VERSION=$(wsl.exe --version 2>/dev/null | head -1 || echo "WSL 2")
+            log_info "WSL 版本: $WSL_VERSION"
+        fi
+    else
+        IS_WSL2=false
+    fi
 }
 
 # 更新包管理器
 update_package_manager() {
     log_info "更新包管理器..."
     
-    # 检查 non-free 仓库是否已启用
-    if [ -f "/etc/apt/sources.list.d/debian.sources" ]; then
-        if grep -q "non-free" /etc/apt/sources.list.d/debian.sources; then
-            log_info "non-free 仓库已启用"
+    # 根据系统类型配置软件源
+    if [[ "$ID" == "debian" ]]; then
+        # Debian 系统的 non-free 仓库配置
+        if [ -f "/etc/apt/sources.list.d/debian.sources" ]; then
+            if grep -q "non-free" /etc/apt/sources.list.d/debian.sources; then
+                log_info "non-free 仓库已启用"
+            else
+                log_info "启用 non-free 仓库..."
+                $USE_SUDO sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources
+            fi
+        elif [ -f "/etc/apt/sources.list" ]; then
+            if ! grep -q "non-free" /etc/apt/sources.list; then
+                log_info "启用 non-free 仓库..."
+                $USE_SUDO bash -c 'echo "deb http://deb.debian.org/debian bookworm main non-free-firmware" > /etc/apt/sources.list'
+                $USE_SUDO bash -c 'echo "deb http://deb.debian.org/debian bookworm-updates main non-free-firmware" >> /etc/apt/sources.list'
+                $USE_SUDO bash -c 'echo "deb http://security.debian.org/debian-security bookworm-security main non-free-firmware" >> /etc/apt/sources.list'
+            fi
         else
-            log_info "启用 non-free 仓库..."
-            $USE_SUDO sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources
+            log_warning "未找到标准的软件源配置文件，跳过软件源配置"
         fi
-    elif [ -f "/etc/apt/sources.list" ]; then
-        if ! grep -q "non-free" /etc/apt/sources.list; then
-            log_info "启用 non-free 仓库..."
-            $USE_SUDO bash -c 'echo "deb http://deb.debian.org/debian bookworm main non-free-firmware" > /etc/apt/sources.list'
-            $USE_SUDO bash -c 'echo "deb http://deb.debian.org/debian bookworm-updates main non-free-firmware" >> /etc/apt/sources.list'
-            $USE_SUDO bash -c 'echo "deb http://security.debian.org/debian-security bookworm-security main non-free-firmware" >> /etc/apt/sources.list'
+    elif [[ "$ID" == "ubuntu" ]]; then
+        # Ubuntu 系统检查 universe 和 multiverse 仓库
+        if ! grep -q "universe" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+            log_info "启用 universe 仓库..."
+            $USE_SUDO add-apt-repository universe -y
         fi
-    else
-        log_warning "未找到标准的软件源配置文件，跳过软件源配置"
+        if ! grep -q "multiverse" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+            log_info "启用 multiverse 仓库..."
+            $USE_SUDO add-apt-repository multiverse -y
+        fi
     fi
     
     $USE_SUDO apt-get update
@@ -102,22 +129,15 @@ update_package_manager() {
 install_basic_tools() {
     log_info "安装基础开发工具..."
     
-    $USE_SUDO apt-get install -y \
-        curl \
-        wget \
-        git \
-        vim \
-        nano \
-        htop \
-        tree \
-        jq \
-        unzip \
-        ca-certificates \
-        gnupg \
-        lsb-release \
-        build-essential \
-        pkg-config \
-        lsof
+    # 基础工具包列表
+    BASIC_PACKAGES="curl wget git vim nano htop tree jq unzip ca-certificates gnupg lsb-release build-essential pkg-config lsof"
+    
+    # Ubuntu 24.04 需要额外的软件属性工具
+    if [[ "$ID" == "ubuntu" ]]; then
+        BASIC_PACKAGES="$BASIC_PACKAGES software-properties-common"
+    fi
+    
+    $USE_SUDO apt-get install -y $BASIC_PACKAGES
     
     log_success "基础开发工具安装完成"
 }
@@ -149,7 +169,20 @@ install_golang() {
     if [ "$INSTALL_GO" = true ]; then
         # 下载并安装 Go 1.24 (项目要求版本)
         GO_VERSION="1.24.4"
-        GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
+        
+        # 根据系统架构选择合适的包
+        case "$ARCH" in
+            "x86_64")
+                GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
+                ;;
+            "aarch64"|"arm64")
+                GO_TARBALL="go${GO_VERSION}.linux-arm64.tar.gz"
+                ;;
+            *)
+                log_error "不支持的系统架构: $ARCH"
+                exit 1
+                ;;
+        esac
         
         log_info "下载 Go $GO_VERSION..."
         cd /tmp
@@ -198,7 +231,7 @@ install_gstreamer() {
 install_x11_support() {
     log_info "安装 X11 开发支持..."
     
-    # X11 开发库
+    # X11 开发库和虚拟显示工具
     $USE_SUDO apt-get install -y \
         libx11-dev \
         libxext-dev \
@@ -206,9 +239,14 @@ install_x11_support() {
         libxdamage-dev \
         libxcomposite-dev \
         libxrandr-dev \
-        libxtst-dev
+        libxtst-dev \
+        xvfb \
+        x11-utils \
+        x11-xserver-utils \
+        xauth \
+        mesa-utils
     
-    log_success "X11 开发支持安装完成"
+    log_success "X11 开发支持和虚拟显示工具安装完成"
 }
 
 # 安装音频开发支持
@@ -234,14 +272,71 @@ install_debug_tools() {
         procps \
         psmisc \
         strace \
-        tcpdump
+        tcpdump \
+        net-tools
     
     log_success "调试工具安装完成"
 }
 
+# 配置WSL2 GPU支持
+configure_wsl2_gpu() {
+    if [ "$IS_WSL2" != true ]; then
+        return 0
+    fi
+    
+    log_info "配置 WSL2 GPU 支持..."
+    
+    # 检查GPU驱动支持
+    if [ ! -d "/dev/dri" ]; then
+        log_warning "未检测到 GPU 设备 (/dev/dri)，可能需要在 Windows 端安装最新的 GPU 驱动"
+        log_info "请确保："
+        log_info "1. Windows 端已安装最新的 AMD 驱动程序"
+        log_info "2. WSL2 内核版本 >= 5.10.43.3"
+        log_info "3. 在 Windows 端运行: wsl --update"
+    else
+        log_success "检测到 GPU 设备支持"
+        ls -la /dev/dri/
+    fi
+    
+    # 安装Mesa驱动和OpenGL支持
+    log_info "安装 Mesa 驱动和 OpenGL 支持..."
+    
+    # 根据系统版本选择合适的包名
+    if [[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]]; then
+        # Ubuntu 24.04 的包名
+        MESA_PACKAGES="mesa-va-drivers mesa-vdpau-drivers mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 libegl1-mesa-dev libgles2-mesa-dev vainfo vdpauinfo"
+    else
+        # Debian 或其他版本的包名
+        MESA_PACKAGES="mesa-va-drivers mesa-vdpau-drivers mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 libgl1-mesa-glx libegl1-mesa libgles2-mesa vainfo vdpauinfo"
+    fi
+    
+    # 逐个安装包，跳过不存在的包
+    for package in $MESA_PACKAGES; do
+        if $USE_SUDO apt-get install -y "$package" 2>/dev/null; then
+            log_info "已安装: $package"
+        else
+            log_warning "跳过不存在的包: $package"
+        fi
+    done
+    
+    # 检查OpenGL支持
+    if command -v glxinfo >/dev/null 2>&1; then
+        log_info "OpenGL 信息:"
+        DISPLAY=:99 glxinfo | grep -E "(OpenGL vendor|OpenGL renderer|OpenGL version)" || log_warning "无法获取 OpenGL 信息，可能需要启动虚拟显示"
+    fi
+    
+    # 检查VA-API支持（硬件加速）
+    if command -v vainfo >/dev/null 2>&1; then
+        log_info "检查 VA-API 硬件加速支持..."
+        DISPLAY=:99 vainfo 2>/dev/null | head -5 || log_warning "VA-API 不可用，将使用软件渲染"
+    fi
+    
+    log_success "WSL2 GPU 配置完成"
+}
+
 main() {
     echo "=== BDWind-GStreamer 开发环境安装脚本 ==="
-    echo "适用于 Debian 12 环境"
+    echo "适用于 Debian 12 和 Ubuntu 24.04 环境"
     echo ""
     
     check_root
@@ -256,6 +351,7 @@ main() {
     install_x11_support
     install_audio_support
     install_debug_tools
+    configure_wsl2_gpu
     
     log_success "开发环境安装完成！"
     echo ""
@@ -269,6 +365,17 @@ main() {
     echo ""
     echo "3. 运行项目:"
     echo "   ./bdwind-gstreamer --help"
+    echo ""
+    if [ "$IS_WSL2" = true ]; then
+        echo "=== WSL2 特别说明 ==="
+        echo ""
+        echo "如果遇到 GPU 相关问题，请确保："
+        echo "1. Windows 端安装最新 AMD 驱动: https://www.amd.com/support"
+        echo "2. 更新 WSL2: wsl --update (在 Windows 命令行运行)"
+        echo "3. 重启 WSL2: wsl --shutdown && wsl"
+        echo "4. 检查 GPU 设备: ls -la /dev/dri/"
+        echo ""
+    fi
 }
 
 # 处理参数
@@ -281,7 +388,7 @@ case "${1:-}" in
         echo "选项:"
         echo "  help    显示此帮助信息"
         echo ""
-        echo "此脚本将在 Debian 12 环境中安装所有必要的开发依赖"
+        echo "此脚本将在 Debian 12 或 Ubuntu 24.04 环境中安装所有必要的开发依赖"
         echo "包括 Go、GStreamer、X11 支持等"
         exit 0
         ;;

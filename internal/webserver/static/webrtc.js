@@ -836,13 +836,19 @@ class WebRTCManager {
      */
     async _fetchIceServers() {
         try {
+            Logger.info('WebRTCManager: 正在获取ICE服务器配置...');
             const response = await fetch('/api/webrtc/config');
             if (response.ok) {
                 const config = await response.json();
+                Logger.info('WebRTCManager: 收到服务器配置', config);
                 if (config.ice_servers && config.ice_servers.length > 0) {
                     this.iceServers = config.ice_servers;
                     Logger.info('WebRTCManager: 使用服务器ICE配置', this.iceServers);
+                } else {
+                    Logger.warn('WebRTCManager: 服务器配置中没有ICE服务器，使用默认配置');
                 }
+            } else {
+                Logger.warn('WebRTCManager: 获取配置失败，HTTP状态:', response.status);
             }
         } catch (error) {
             Logger.warn('WebRTCManager: 获取ICE配置失败，使用默认配置', error);
@@ -1079,6 +1085,7 @@ class WebRTCManager {
      */
     _handleAudioTrack() {
         if (!this.audioElement) return;
+        this.audioElement.muted = true;
         
         // 尝试自动播放
         this.audioElement.play().catch(error => {

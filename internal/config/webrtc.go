@@ -161,19 +161,24 @@ func (c *WebRTCConfig) validateICEServerURL(urlStr string) error {
 			parsedURL.Scheme, strings.Join(validSchemes, ", "))
 	}
 
-	// 检查主机名
-	if parsedURL.Host == "" {
+	// 对于STUN/TURN URL，主机名可能在Host或Opaque字段中
+	var hostPart string
+	if parsedURL.Host != "" {
+		hostPart = parsedURL.Host
+	} else if parsedURL.Opaque != "" {
+		hostPart = parsedURL.Opaque
+	} else {
 		return fmt.Errorf("URL must have a host")
 	}
 
 	// 验证主机名和端口
-	host, port, err := net.SplitHostPort(parsedURL.Host)
+	host, port, err := net.SplitHostPort(hostPart)
 	if err != nil {
 		// 如果没有端口，检查主机名
-		if net.ParseIP(parsedURL.Host) == nil {
+		if net.ParseIP(hostPart) == nil {
 			// 不是IP地址，检查是否是有效的域名
-			if len(parsedURL.Host) > 253 {
-				return fmt.Errorf("hostname too long: %s", parsedURL.Host)
+			if len(hostPart) > 253 {
+				return fmt.Errorf("hostname too long: %s", hostPart)
 			}
 		}
 	} else {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/pion/webrtc/v4"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
@@ -84,7 +85,7 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 func (m *Manager) initializeComponents() error {
 	// 1. 创建SDP生成器
 	sdpConfig := &SDPConfig{
-		Codec: m.config.GStreamer.Encoding.Codec,
+		Codec: string(m.config.GStreamer.Encoding.Codec),
 	}
 	m.sdpGen = NewSDPGenerator(sdpConfig)
 	m.logger.Printf("SDP generator created with codec: %s", m.config.GStreamer.Encoding.Codec)
@@ -95,7 +96,7 @@ func (m *Manager) initializeComponents() error {
 		AudioEnabled:    false, // 暂时禁用音频
 		VideoTrackID:    "video",
 		AudioTrackID:    "audio",
-		VideoCodec:      m.config.GStreamer.Encoding.Codec,
+		VideoCodec:      string(m.config.GStreamer.Encoding.Codec),
 		VideoWidth:      m.config.GStreamer.Capture.Width,
 		VideoHeight:     m.config.GStreamer.Capture.Height,
 		VideoFrameRate:  m.config.GStreamer.Capture.FrameRate,
@@ -125,9 +126,12 @@ func (m *Manager) initializeComponents() error {
 
 	// 4. 创建信令服务器
 	signalingConfig := &SignalingEncoderConfig{
-		Codec: m.config.GStreamer.Encoding.Codec,
+		Codec: string(m.config.GStreamer.Encoding.Codec),
 	}
-	m.signaling = NewSignalingServer(m.ctx, signalingConfig, m.mediaStream)
+
+	// 转换配置中的ICE服务器格式
+	iceServers := m.convertICEServers()
+	m.signaling = NewSignalingServer(m.ctx, signalingConfig, m.mediaStream, iceServers)
 	m.logger.Printf("Signaling server created successfully")
 
 	// 5. 创建HTTP处理器
@@ -135,6 +139,47 @@ func (m *Manager) initializeComponents() error {
 	m.logger.Printf("WebRTC handlers created successfully")
 
 	return nil
+}
+
+// convertICEServers 转换配置中的ICE服务器格式
+func (m *Manager) convertICEServers() []webrtc.ICEServer {
+	var iceServers []webrtc.ICEServer
+
+	// 从配置中获取ICE服务器
+	if m.config.WebRTC.ICEServers != nil {
+		for _, server := range m.config.WebRTC.ICEServers {
+			iceServer := webrtc.ICEServer{
+				URLs: server.URLs,
+			}
+
+			// 如果有认证信息，添加用户名和密码
+			if server.Username != "" {
+				iceServer.Username = server.Username
+			}
+			if server.Credential != "" {
+				iceServer.Credential = server.Credential
+			}
+
+			iceServers = append(iceServers, iceServer)
+		}
+	}
+
+	// 如果没有配置ICE服务器，使用默认的
+	if len(iceServers) == 0 {
+		iceServers = []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		}
+		m.logger.Printf("No ICE servers configured, using default Google STUN server")
+	} else {
+		m.logger.Printf("Using %d configured ICE servers", len(iceServers))
+		for i, server := range iceServers {
+			m.logger.Printf("ICE Server %d: %v", i+1, server.URLs)
+		}
+	}
+
+	return iceServers
 }
 
 // Start 启动WebRTC管理器和所有组件

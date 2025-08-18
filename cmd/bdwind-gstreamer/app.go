@@ -60,7 +60,7 @@ func NewBDWindApp(config *config.Config, logger *log.Logger) (*BDWindApp, error)
 
 	// 创建GStreamer管理器
 	gstreamerMgrConfig := &gstreamer.ManagerConfig{
-		Config: &config.GStreamer.Capture,
+		Config: config.GStreamer,
 		Logger: logger,
 	}
 
@@ -129,6 +129,19 @@ func (app *BDWindApp) connectGStreamerToWebRTC() error {
 			return bridge.ProcessAudioSample(sample)
 		}
 
+		return nil
+	})
+
+	app.gstreamerMgr.SetEncodedSampleCallback(func(sample *gstreamer.Sample) error {
+		if sample == nil {
+			return fmt.Errorf("received nil sample")
+		}
+		// Process the sample through WebRTC bridge
+		if sample.IsVideo() {
+			return bridge.ProcessVideoSample(sample)
+		} else if sample.IsAudio() {
+			return bridge.ProcessAudioSample(sample)
+		}
 		return nil
 	})
 

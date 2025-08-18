@@ -76,6 +76,12 @@ type Encoder interface {
 
 	// Cleanup cleans up encoder resources
 	Cleanup() error
+
+	// PushFrame pushes a raw video frame to the encoder
+	PushFrame(sample *Sample) error
+
+	// SetSampleCallback sets the callback function for processing encoded video samples
+	SetSampleCallback(callback func(*Sample) error) error
 }
 
 // BaseEncoder provides common functionality for all encoders
@@ -89,6 +95,8 @@ type BaseEncoder struct {
 
 	// GStreamer element reference (would be actual GStreamer element in real implementation)
 	element interface{}
+	// Callback for encoded samples
+	sampleCallback func(*Sample) error
 }
 
 // NewBaseEncoder creates a new base encoder
@@ -106,6 +114,36 @@ func NewBaseEncoder(config config.EncoderConfig) *BaseEncoder {
 	}
 	encoder.statsCollector = NewEncoderStatsCollector(encoder)
 	return encoder
+}
+
+// PushFrame pushes a raw video frame to the encoder (placeholder implementation)
+func (e *BaseEncoder) PushFrame(sample *Sample) error {
+	// This is a placeholder. In a real implementation, this method would
+	// send the sample to the GStreamer element for encoding.
+	// For now, we'll just log that a frame was received.
+	fmt.Printf("BaseEncoder: Received frame with size %d\n", len(sample.Data))
+
+	// Simulate encoding by updating stats
+	e.statsCollector.RecordFrameEncoded(false, 10, 0.9, e.config.Bitrate)
+
+	e.mutex.RLock()
+	callback := e.sampleCallback
+	e.mutex.RUnlock()
+
+	if callback != nil {
+		// For now, just pass the raw sample through. This will be replaced with actual encoded data.
+		return callback(sample)
+	}
+
+	return nil
+}
+
+// SetSampleCallback sets the callback function for processing encoded video samples
+func (e *BaseEncoder) SetSampleCallback(callback func(*Sample) error) error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.sampleCallback = callback
+	return nil
 }
 
 // GetStats returns current encoder statistics (thread-safe)

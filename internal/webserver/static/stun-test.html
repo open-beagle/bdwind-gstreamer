@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>STUN服务器测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .server { margin: 10px 0; padding: 10px; border: 1px solid #ccc; border-radius: 5px; }
+        .testing { background-color: #fff3cd; }
+        .success { background-color: #d4edda; }
+        .failed { background-color: #f8d7da; }
+        button { padding: 10px; margin: 5px; }
+        pre { background: #f8f9fa; padding: 10px; border-radius: 3px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>STUN服务器连通性测试</h1>
+    
+    <button onclick="testAllServers()">测试所有服务器</button>
+    <button onclick="clearResults()">清空结果</button>
+    
+    <div id="results"></div>
+
+    <script>
+        const stunServers = [
+            'stun:stun.qq.com:3478',
+            'stun:stun.miwifi.com:3478',
+            'stun:stun1.l.google.com:19302',
+            'stun:stun2.l.google.com:19302',
+            'stun:turn.cloudflare.com:3478',
+            'stun:stun.ali.wodcloud.com:3478'
+        ];
+
+        function clearResults() {
+            document.getElementById('results').innerHTML = '';
+        }
+
+        async function testStunServer(stunUrl) {
+            const resultsDiv = document.getElementById('results');
+            const serverDiv = document.createElement('div');
+            serverDiv.className = 'server testing';
+            serverDiv.innerHTML = `
+                <h3>${stunUrl}</h3>
+                <p>测试中...</p>
+            `;
+            resultsDiv.appendChild(serverDiv);
+
+            try {
+                const pc = new RTCPeerConnection({
+                    iceServers: [{ urls: stunUrl }]
+                });
+
+                return new Promise((resolve) => {
+                    let resolved = false;
+                    const timeout = setTimeout(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            pc.close();
+                            serverDiv.className = 'server failed';
+                            serverDiv.innerHTML = `
+                                <h3>${stunUrl}</h3>
+                                <p>❌ 连接超时 (10秒)</p>
+                            `;
+                            resolve(false);
+                        }
+                    }, 10000);
+
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            const candidate = event.candidate.candidate;
+                            if (candidate.includes('srflx') || candidate.includes('relay')) {
+                                if (!resolved) {
+                                    resolved = true;
+                                    clearTimeout(timeout);
+                                    pc.close();
+                                    serverDiv.className = 'server success';
+                                    serverDiv.innerHTML = `
+                                        <h3>${stunUrl}</h3>
+                                        <p>✅ 连接成功</p>
+                                        <pre>候选者: ${candidate}</pre>
+                                    `;
+                                    resolve(true);
+                                }
+                            }
+                        }
+                    };
+
+                    pc.onicegatheringstatechange = () => {
+                        if (pc.iceGatheringState === 'complete' && !resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            pc.close();
+                            serverDiv.className = 'server failed';
+                            serverDiv.innerHTML = `
+                                <h3>${stunUrl}</h3>
+                                <p>❌ 无法获取外部IP (可能被阻止)</p>
+                            `;
+                            resolve(false);
+                        }
+                    };
+
+                    // 创建offer来触发ICE收集
+                    pc.createOffer().then(offer => {
+                        return pc.setLocalDescription(offer);
+                    }).catch(error => {
+                        if (!resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            pc.close();
+                            serverDiv.className = 'server failed';
+                            serverDiv.innerHTML = `
+                                <h3>${stunUrl}</h3>
+                                <p>❌ 创建offer失败: ${error.message}</p>
+                            `;
+                            resolve(false);
+                        }
+                    });
+                });
+            } catch (error) {
+                serverDiv.className = 'server failed';
+                serverDiv.innerHTML = `
+                    <h3>${stunUrl}</h3>
+                    <p>❌ 错误: ${error.message}</p>
+                `;
+                return false;
+            }
+        }
+
+        async function testAllServers() {
+            clearResults();
+            
+            const results = [];
+            for (const server of stunServers) {
+                const result = await testStunServer(server);
+                results.push({ server, success: result });
+                // 等待一下再测试下一个
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            
+            // 显示总结
+            const summaryDiv = document.createElement('div');
+            summaryDiv.style.marginTop = '20px';
+            summaryDiv.style.padding = '15px';
+            summaryDiv.style.backgroundColor = '#e9ecef';
+            summaryDiv.style.borderRadius = '5px';
+            
+            const successful = results.filter(r => r.success);
+            summaryDiv.innerHTML = `
+                <h3>测试总结</h3>
+                <p>成功: ${successful.length}/${results.length}</p>
+                <p>可用的服务器:</p>
+                <ul>
+                    ${successful.map(r => `<li>${r.server}</li>`).join('')}
+                </ul>
+            `;
+            
+            document.getElementById('results').appendChild(summaryDiv);
+        }
+
+        // 页面加载时自动开始测试
+        window.onload = () => {
+            console.log('STUN服务器测试页面加载完成');
+        };
+    </script>
+</body>
+</html>

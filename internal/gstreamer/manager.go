@@ -15,23 +15,26 @@ import (
 
 // ManagerConfig GStreamer管理器配置
 type ManagerConfig struct {
-	Config *config.DesktopCaptureConfig
+	Config *config.GStreamerConfig
 	Logger *log.Logger
 }
 
 // Manager GStreamer管理器，统一管理所有GStreamer相关业务
 type Manager struct {
-	config *config.DesktopCaptureConfig
+	config *config.GStreamerConfig
 	logger *log.Logger
 
 	// GStreamer组件
 	capture DesktopCapture
+	encoder Encoder
 
 	// HTTP处理器
 	handlers *gstreamerHandlers
 
 	// 外部进程管理
 	xvfbCmd *exec.Cmd
+
+	encodedSampleCallback func(*Sample) error
 
 	// 状态管理
 	running   bool
@@ -54,7 +57,7 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 	}
 
 	if cfg.Config == nil {
-		return nil, fmt.Errorf("desktop capture config is required")
+		return nil, fmt.Errorf("gstreamer config is required")
 	}
 
 	logger := cfg.Logger
@@ -85,7 +88,7 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 func (m *Manager) initializeComponents() error {
 	// 1. 创建桌面捕获
 	var err error
-	m.capture, err = NewDesktopCapture(*m.config)
+	m.capture, err = NewDesktopCapture(m.config.Capture)
 	if err != nil {
 		m.logger.Printf("Failed to create desktop capture: %v", err)
 		// 不返回错误，允许在没有桌面捕获的情况下运行
@@ -94,7 +97,22 @@ func (m *Manager) initializeComponents() error {
 		m.logger.Printf("Desktop capture created successfully")
 	}
 
-	// 2. 创建HTTP处理器
+	// 2. 创建编码器
+	encoderFactory := NewEncoderFactory()
+	m.encoder, err = encoderFactory.CreateEncoder(m.config.Encoding)
+	if err != nil {
+		m.logger.Printf("Failed to create encoder: %v", err)
+		// Depending on requirements, you might want to handle this more gracefully
+		return err
+	}
+	m.logger.Printf("Encoder created successfully")
+
+	// Set the callback for encoded samples from the encoder
+	if m.encoder != nil {
+		m.encoder.SetSampleCallback(m.processEncodedSample)
+	}
+
+	// 3. 创建HTTP处理器
 	m.handlers = newGStreamerHandlers(m)
 	m.logger.Printf("GStreamer handlers created successfully")
 
@@ -155,9 +173,28 @@ func (m *Manager) processSample(sample *Sample) error {
 	m.logger.Printf("Received video sample: size=%d bytes, format=%s, dimensions=%dx%d, timestamp=%v",
 		sample.Size(), sample.Format.Codec, sample.Format.Width, sample.Format.Height, sample.Timestamp)
 
-	// TODO: 这里应该将sample传递给WebRTC bridge
-	// 目前只是记录日志来验证数据流是否正常工作
+	if m.encoder != nil {
+		if err := m.encoder.PushFrame(sample); err != nil {
+			m.logger.Printf("Error pushing frame to encoder: %v", err)
+			return err
+		}
+	}
 
+	return nil
+}
+
+// processEncodedSample is the callback for receiving encoded samples from the encoder
+func (m *Manager) processEncodedSample(sample *Sample) error {
+	m.mutex.RLock()
+	callback := m.encodedSampleCallback
+	m.mutex.RUnlock()
+
+	if callback != nil {
+		if err := callback(sample); err != nil {
+			m.logger.Printf("Error in encoded sample callback: %v", err)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -220,6 +257,13 @@ func (m *Manager) GetCapture() DesktopCapture {
 	return m.capture
 }
 
+// SetEncodedSampleCallback sets the callback function for processing encoded video samples
+func (m *Manager) SetEncodedSampleCallback(callback func(*Sample) error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.encodedSampleCallback = callback
+}
+
 // GetStats 获取GStreamer管理器统计信息
 func (m *Manager) GetStats() map[string]interface{} {
 	m.mutex.RLock()
@@ -260,7 +304,7 @@ func (m *Manager) GetContext() context.Context {
 }
 
 // GetConfig 获取配置信息
-func (m *Manager) GetConfig() *config.DesktopCaptureConfig {
+func (m *Manager) GetConfig() *config.GStreamerConfig {
 	return m.config
 }
 
