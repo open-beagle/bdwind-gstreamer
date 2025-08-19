@@ -54,7 +54,7 @@ fi
 
 # 启动应用程序
 echo "🌐 Web 界面: http://localhost:8080"
-echo "🔍 WebSocket 诊断: ./scripts/diagnose_websocket.sh"
+echo "🔍 WebRTC 诊断: ./scripts/test-ice-connectivity.sh"
 echo "📊 按 Ctrl+C 停止应用"
 echo ""
 

@@ -334,49 +334,110 @@ func (app *BDWindApp) GetRootContext() context.Context {
 
 // registerComponentsWithWebServer registers all components with the WebServer for route setup
 func (app *BDWindApp) registerComponentsWithWebServer() error {
+	app.logger.Printf("=== Starting component registration with webserver ===")
+
 	webServer := app.webserverMgr.GetWebServer()
 	if webServer == nil {
+		app.logger.Printf("ERROR: webserver instance is nil")
 		return fmt.Errorf("webserver instance is nil")
 	}
+	app.logger.Printf("DEBUG: webserver instance obtained successfully")
 
 	// Register components that need to expose HTTP routes
 	// For now, we'll register components that implement the ComponentManager interface
 	// Components that don't implement SetupRoutes will be skipped with a warning
 
+	registrationResults := make(map[string]bool)
+	var registrationErrors []error
+
 	// Try to register metrics component
+	app.logger.Printf("--- Attempting to register metrics component ---")
+	app.logger.Printf("DEBUG: metrics manager instance: %T", app.metricsMgr)
+	app.logger.Printf("DEBUG: metrics manager nil check: %v", app.metricsMgr == nil)
+
+	// Check if metrics manager implements ComponentManager interface
 	if mgr, ok := interface{}(app.metricsMgr).(webserver.ComponentManager); ok {
+		app.logger.Printf("SUCCESS: metrics component implements ComponentManager interface")
 		app.logger.Printf("Registering metrics component with webserver...")
+
 		if err := webServer.RegisterComponent("metrics", mgr); err != nil {
-			return fmt.Errorf("failed to register metrics component: %w", err)
+			app.logger.Printf("ERROR: Failed to register metrics component: %v", err)
+			registrationErrors = append(registrationErrors, fmt.Errorf("failed to register metrics component: %w", err))
+			registrationResults["metrics"] = false
+		} else {
+			app.logger.Printf("SUCCESS: metrics component registered successfully")
+			registrationResults["metrics"] = true
 		}
-		app.logger.Printf("metrics component registered successfully")
 	} else {
-		app.logger.Printf("metrics component does not implement ComponentManager interface, skipping route registration")
+		app.logger.Printf("SKIP: metrics component does not implement ComponentManager interface")
+		registrationResults["metrics"] = false
 	}
 
 	// Try to register gstreamer component
+	app.logger.Printf("--- Attempting to register gstreamer component ---")
+	app.logger.Printf("DEBUG: gstreamer manager instance: %T", app.gstreamerMgr)
+	app.logger.Printf("DEBUG: gstreamer manager nil check: %v", app.gstreamerMgr == nil)
+
+	// Check if gstreamer manager implements ComponentManager interface
 	if mgr, ok := interface{}(app.gstreamerMgr).(webserver.ComponentManager); ok {
+		app.logger.Printf("SUCCESS: gstreamer component implements ComponentManager interface")
 		app.logger.Printf("Registering gstreamer component with webserver...")
+
 		if err := webServer.RegisterComponent("gstreamer", mgr); err != nil {
-			return fmt.Errorf("failed to register gstreamer component: %w", err)
+			app.logger.Printf("ERROR: Failed to register gstreamer component: %v", err)
+			registrationErrors = append(registrationErrors, fmt.Errorf("failed to register gstreamer component: %w", err))
+			registrationResults["gstreamer"] = false
+		} else {
+			app.logger.Printf("SUCCESS: gstreamer component registered successfully")
+			registrationResults["gstreamer"] = true
 		}
-		app.logger.Printf("gstreamer component registered successfully")
 	} else {
-		app.logger.Printf("gstreamer component does not implement ComponentManager interface, skipping route registration")
+		app.logger.Printf("SKIP: gstreamer component does not implement ComponentManager interface")
+		registrationResults["gstreamer"] = false
 	}
 
 	// Try to register webrtc component
-	if mgr, ok := interface{}(app.webrtcMgr).(webserver.ComponentManager); ok {
-		app.logger.Printf("Registering webrtc component with webserver...")
-		if err := webServer.RegisterComponent("webrtc", mgr); err != nil {
-			return fmt.Errorf("failed to register webrtc component: %w", err)
-		}
-		app.logger.Printf("webrtc component registered successfully")
+	app.logger.Printf("--- Attempting to register webrtc component ---")
+	app.logger.Printf("DEBUG: webrtc manager instance: %T", app.webrtcMgr)
+	app.logger.Printf("DEBUG: webrtc manager nil check: %v", app.webrtcMgr == nil)
+
+	// Since the WebRTC manager implements ComponentManager interface (verified by successful build),
+	// we can directly register it without type assertion
+	app.logger.Printf("SUCCESS: webrtc component implements ComponentManager interface")
+	app.logger.Printf("Registering webrtc component with webserver...")
+
+	if err := webServer.RegisterComponent("webrtc", app.webrtcMgr); err != nil {
+		app.logger.Printf("ERROR: Failed to register webrtc component: %v", err)
+		registrationErrors = append(registrationErrors, fmt.Errorf("failed to register webrtc component: %w", err))
+		registrationResults["webrtc"] = false
 	} else {
-		app.logger.Printf("webrtc component does not implement ComponentManager interface, skipping route registration")
+		app.logger.Printf("SUCCESS: webrtc component registered successfully")
+		registrationResults["webrtc"] = true
 	}
 
-	app.logger.Printf("Component registration completed")
+	// Summary of registration results
+	app.logger.Printf("=== Component registration summary ===")
+	successCount := 0
+	for component, success := range registrationResults {
+		status := "FAILED"
+		if success {
+			status = "SUCCESS"
+			successCount++
+		}
+		app.logger.Printf("Component '%s': %s", component, status)
+	}
+
+	app.logger.Printf("Total components processed: %d", len(registrationResults))
+	app.logger.Printf("Successfully registered: %d", successCount)
+	app.logger.Printf("Failed/Skipped: %d", len(registrationResults)-successCount)
+
+	// If there were registration errors, return the first one
+	if len(registrationErrors) > 0 {
+		app.logger.Printf("ERROR: Component registration completed with %d errors", len(registrationErrors))
+		return registrationErrors[0]
+	}
+
+	app.logger.Printf("=== Component registration completed successfully ===")
 	return nil
 }
 

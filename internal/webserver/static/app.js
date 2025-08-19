@@ -805,6 +805,60 @@ class ApplicationManager {
       this.errorHandler.resetRetryCounter("media", "video-decode-error");
     });
 
+    // 添加配置相关事件处理
+    this.core.eventBus.on("config:webrtc-fetch-failed", (data) => {
+      Logger.warn("ApplicationManager: WebRTC配置获取失败", data);
+      
+      if (this.modules.ui) {
+        this.modules.ui.updateConnectionStatus("error", {
+          error: `配置获取失败: ${data.error.message}`,
+          suggestion: "使用默认配置，可能影响连接质量"
+        });
+      }
+    });
+
+    this.core.eventBus.on("config:webrtc-validation-warnings", (data) => {
+      Logger.warn("ApplicationManager: WebRTC配置验证警告", data);
+      
+      if (this.modules.ui) {
+        this.modules.ui.showConfigWarning({
+          warnings: data.warnings,
+          message: "服务器配置存在问题，已使用修正后的配置"
+        });
+      }
+    });
+
+    this.core.eventBus.on("webrtc:config-updated", (data) => {
+      Logger.info("ApplicationManager: WebRTC配置已更新", data);
+      
+      if (this.modules.ui) {
+        this.modules.ui.updateConnectionStatus("connecting", {
+          message: "配置已更新，连接中..."
+        });
+      }
+    });
+
+    this.core.eventBus.on("webrtc:config-changed-reconnect-suggested", (data) => {
+      Logger.info("ApplicationManager: 配置变更，建议重连", data);
+      
+      if (this.modules.ui) {
+        this.modules.ui.showReconnectSuggestion({
+          reason: "配置已更新",
+          message: "检测到配置变更，建议重新连接以获得最佳体验"
+        });
+      }
+    });
+
+    this.core.eventBus.on("webrtc:config-error-recovery", (data) => {
+      Logger.info("ApplicationManager: WebRTC配置错误恢复", data);
+      
+      if (this.modules.ui) {
+        this.modules.ui.updateConnectionStatus("connecting", {
+          message: "配置错误已恢复，重新尝试连接..."
+        });
+      }
+    });
+
     // 添加连接监控事件处理
     this.core.eventBus.on("webrtc:health-check-completed", (healthData) => {
       Logger.debug("ApplicationManager: 连接健康检查完成", healthData);
@@ -1961,19 +2015,13 @@ class ApplicationManager {
 
       Logger.info("ApplicationManager: 正在启动桌面捕获...");
 
-      const response = await fetch("/api/capture/start", { method: "POST" });
-      const result = await response.json();
-
-      if (response.ok) {
+      // 直接启动WebRTC连接，不需要调用服务器API
+      if (this.modules.webrtc) {
+        await this.modules.webrtc.startCapture();
         this.state.isCapturing = true;
         Logger.info("ApplicationManager: 桌面捕获已启动");
-
-        // 请求WebRTC offer
-        if (this.modules.signaling) {
-          await this.modules.signaling.send("request-offer", {});
-        }
       } else {
-        throw new Error(result.error || "启动失败");
+        throw new Error("WebRTC模块不可用");
       }
     } catch (error) {
       if (this.modules.ui) {
@@ -1991,12 +2039,10 @@ class ApplicationManager {
     try {
       Logger.info("ApplicationManager: 正在停止桌面捕获...");
 
-      // 清理WebRTC连接
+      // 停止WebRTC连接
       if (this.modules.webrtc) {
-        await this.modules.webrtc.cleanup();
+        this.modules.webrtc.stopCapture();
       }
-
-      const response = await fetch("/api/capture/stop", { method: "POST" });
 
       this.state.isCapturing = false;
 
@@ -2043,6 +2089,24 @@ const appManager = new ApplicationManager();
 document.addEventListener("DOMContentLoaded", async function () {
   try {
     await appManager.start();
+    
+    // 初始化调试面板（在开发模式或调试模式下）
+    if (window.DebugPanel && (window.location.hostname === 'localhost' || 
+        window.location.search.includes('debug=true') || 
+        localStorage.getItem('debug-panel-enabled') === 'true')) {
+      
+      const debugPanel = new DebugPanel(appManager.core.eventBus, {
+        position: 'right',
+        enableAutoRefresh: true,
+        maxLogEntries: 200
+      });
+      
+      // 将调试面板添加到全局访问
+      window.debugPanel = debugPanel;
+      
+      Logger.info('ApplicationManager: 调试面板已启用');
+    }
+    
   } catch (error) {
     console.error("应用启动失败:", error);
 
@@ -2113,6 +2177,28 @@ function stopCapture() {
     window.appManager.stopCapture().catch((error) => {
       Logger.error("停止捕获失败:", error);
     });
+  }
+}
+
+function stopReconnecting() {
+  if (window.appManager && window.appManager.modules.webrtc) {
+    Logger.info("用户手动停止重连");
+    window.appManager.modules.webrtc.stopReconnecting();
+    
+    // 隐藏停止重连按钮
+    const stopBtn = document.getElementById('stop-reconnect-btn');
+    if (stopBtn) {
+      stopBtn.style.display = 'none';
+    }
+    
+    // 显示用户反馈
+    if (window.appManager.modules.ui && window.appManager.modules.ui.userFeedback) {
+      window.appManager.modules.ui.userFeedback.showToast({
+        type: 'info',
+        title: '重连已停止',
+        message: '自动重连已被手动停止，您可以点击"开始捕获"重新连接'
+      });
+    }
   }
 }
 

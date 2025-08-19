@@ -7,6 +7,10 @@ class UIManager {
         this.eventBus = eventBus;
         this.config = config;
         
+        // 增强的错误处理和用户反馈系统
+        this.errorHandler = null;
+        this.userFeedback = null;
+        
         // UI元素
         this.elements = {
             statusIndicator: null,
@@ -72,6 +76,42 @@ class UIManager {
     }
 
     /**
+     * 初始化增强的错误处理和用户反馈系统
+     * @private
+     */
+    _initializeEnhancedSystems() {
+        try {
+            // 初始化增强的错误处理器
+            if (typeof EnhancedErrorHandler !== 'undefined') {
+                this.errorHandler = new EnhancedErrorHandler(this.eventBus, {
+                    showDetailedErrors: this.config?.get('ui.showDetailedErrors', false),
+                    autoHideDelay: this.config?.get('ui.errorAutoHideDelay', 5000),
+                    enableSuggestions: this.config?.get('ui.enableSuggestions', true),
+                    enableNetworkQuality: this.config?.get('ui.enableNetworkQuality', true)
+                });
+                Logger.info('UIManager: 增强错误处理器已初始化');
+            }
+            
+            // 初始化用户反馈管理器
+            if (typeof UserFeedbackManager !== 'undefined') {
+                this.userFeedback = new UserFeedbackManager(this.eventBus, {
+                    maxToasts: this.config?.get('ui.maxToasts', 5),
+                    toastDuration: this.config?.get('ui.toastDuration', 5000),
+                    enableSuggestions: this.config?.get('ui.enableSuggestions', true),
+                    enableSounds: this.config?.get('ui.enableSounds', false),
+                    enableHaptics: this.config?.get('ui.enableHaptics', false)
+                });
+                Logger.info('UIManager: 用户反馈管理器已初始化');
+            }
+            
+            // 网络质量监控已移除
+            
+        } catch (error) {
+            Logger.error('UIManager: 初始化增强系统失败', error);
+        }
+    }
+
+    /**
      * 设置事件监听器
      * @private
      */
@@ -80,11 +120,27 @@ class UIManager {
             // 监听状态变化事件
             this.eventBus.on('signaling:connected', () => this.updateStatus('online', '已连接'));
             this.eventBus.on('signaling:disconnected', () => this.updateStatus('offline', '已断开'));
-            this.eventBus.on('signaling:reconnecting', (data) => this.updateStatus('connecting', `重连中 (${data.attempt}/${data.maxAttempts})`));
+            this.eventBus.on('signaling:reconnecting', (data) => {
+                this.updateStatus('connecting', `重连中 (${data.attempt}/${data.maxAttempts})`);
+                this.showStopReconnectButton();
+            });
             
-            this.eventBus.on('webrtc:connected', () => this.updateStatus('online', '视频流媒体中'));
-            this.eventBus.on('webrtc:disconnected', () => this.updateStatus('offline', '视频已断开'));
-            this.eventBus.on('webrtc:connection-failed', () => this.updateStatus('offline', '连接失败'));
+            this.eventBus.on('webrtc:connected', () => {
+                this.updateStatus('online', '视频流媒体中');
+                this.hideStopReconnectButton();
+            });
+            this.eventBus.on('webrtc:disconnected', () => {
+                this.updateStatus('offline', '视频已断开');
+                this.hideStopReconnectButton();
+            });
+            this.eventBus.on('webrtc:connection-failed', () => {
+                this.updateStatus('offline', '连接失败');
+                this.hideStopReconnectButton();
+            });
+            this.eventBus.on('webrtc:reconnection-stopped', () => {
+                this.updateStatus('offline', '重连已停止');
+                this.hideStopReconnectButton();
+            });
             
             // 监听日志事件
             this.eventBus.on('logger:entry', (entry) => this.addLogEntry(entry));
@@ -102,6 +158,11 @@ class UIManager {
             this.eventBus.on('webrtc:video-metadata-loaded', (data) => this.updateVideoInfo(data));
             this.eventBus.on('webrtc:video-playing', () => this.onVideoPlay());
             this.eventBus.on('webrtc:video-error', (data) => this.onVideoError(data.error));
+            
+            // 监听增强系统的请求事件
+            this.eventBus.on('ui:request-video-play', () => this.toggleVideoPlay());
+            this.eventBus.on('ui:request-permissions', () => this._requestPermissions());
+            this.eventBus.on('ui:user-action-needed', (data) => this._handleUserActionNeeded(data));
         }
     }
 
@@ -125,6 +186,9 @@ class UIManager {
         
         // 应用主题
         this._applyTheme();
+        
+        // 初始化增强的错误处理和用户反馈系统
+        this._initializeEnhancedSystems();
         
         Logger.info('UIManager: 用户界面初始化完成');
         this.eventBus?.emit('ui:initialized');
@@ -1534,6 +1598,164 @@ class UIManager {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+    
+    /**
+     * 显示配置警告
+     */
+    showConfigWarning(data) {
+        if (this.userFeedback) {
+            this.userFeedback.showSuggestion(
+                '配置警告',
+                data.message || '服务器配置存在问题',
+                data.warnings || []
+            );
+        } else {
+            // 回退到基本的错误显示
+            this.showErrorMessage(`配置警告: ${data.message}`);
+        }
+    }
+    
+    /**
+     * 显示重连建议
+     */
+    showReconnectSuggestion(data) {
+        if (this.userFeedback) {
+            this.userFeedback.showModal({
+                title: '建议重新连接',
+                message: data.message || '检测到配置变更，建议重新连接',
+                type: 'suggestion',
+                actions: [
+                    { type: 'retry', text: '重新连接', primary: true },
+                    { type: 'dismiss', text: '稍后' }
+                ]
+            });
+        }
+    }
+    
+    /**
+     * 处理需要用户操作的情况
+     * @private
+     */
+    _handleUserActionNeeded(data) {
+        if (this.userFeedback) {
+            // 让用户反馈管理器处理
+            this.eventBus?.emit('ui:user-action-needed', data);
+        } else {
+            // 回退处理
+            switch (data.action) {
+                case 'enable-autoplay':
+                    this.showPlayButton();
+                    break;
+                case 'grant-permissions':
+                    this.showErrorMessage('需要摄像头和麦克风权限');
+                    break;
+            }
+        }
+    }
+    
+    /**
+     * 请求权限
+     * @private
+     */
+    async _requestPermissions() {
+        try {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                
+                if (this.userFeedback) {
+                    this.userFeedback.showToast('权限已授予', '摄像头和麦克风权限已获得', 'success');
+                }
+                
+                this.eventBus?.emit('ui:permissions-granted');
+            }
+        } catch (error) {
+            Logger.error('UIManager: 权限请求失败', error);
+            
+            if (this.userFeedback) {
+                this.userFeedback.showToast('权限被拒绝', '无法获得摄像头和麦克风权限', 'error');
+            }
+            
+            this.eventBus?.emit('ui:permissions-denied', { error });
+        }
+    }
+    
+    // 网络质量监控方法已移除
+    
+    /**
+     * 获取增强系统的统计信息
+     */
+    getEnhancedSystemsStats() {
+        const stats = {};
+        
+        if (this.errorHandler) {
+            stats.errorHandler = this.errorHandler.getErrorStats();
+        }
+        
+        if (this.userFeedback) {
+            stats.userFeedback = this.userFeedback.getFeedbackStats();
+        }
+        
+        // 网络质量统计已移除
+        
+        return stats;
+    }
+    
+    /**
+     * 显示停止重连按钮
+     */
+    showStopReconnectButton() {
+        const stopBtn = document.getElementById('stop-reconnect-btn');
+        if (stopBtn) {
+            stopBtn.style.display = 'inline-block';
+            Logger.debug('UIManager: 显示停止重连按钮');
+        }
+    }
+
+    /**
+     * 隐藏停止重连按钮
+     */
+    hideStopReconnectButton() {
+        const stopBtn = document.getElementById('stop-reconnect-btn');
+        if (stopBtn) {
+            stopBtn.style.display = 'none';
+            Logger.debug('UIManager: 隐藏停止重连按钮');
+        }
+    }
+
+    /**
+     * 销毁UI管理器
+     */
+    destroy() {
+        // 销毁增强系统
+        if (this.errorHandler) {
+            this.errorHandler.destroy();
+            this.errorHandler = null;
+        }
+        
+        if (this.userFeedback) {
+            this.userFeedback.destroy();
+            this.userFeedback = null;
+        }
+        
+        // 网络质量监控器销毁已移除
+        
+        // 清理定时器
+        if (this.controlsTimer) {
+            clearTimeout(this.controlsTimer);
+        }
+        
+        if (this.errorMessageTimer) {
+            clearTimeout(this.errorMessageTimer);
+        }
+        
+        // 移除事件监听器
+        if (this._handleResize) {
+            window.removeEventListener('resize', this._handleResize);
+            window.removeEventListener('orientationchange', this._handleResize);
+        }
+        
+        Logger.info('UIManager: UI管理器已销毁');
     }
 }
 

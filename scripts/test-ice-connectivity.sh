@@ -174,16 +174,16 @@ EOF
     echo
 }
 
-# 备用解析方法（改进的文本匹配）
+# 备用解析方法（简化且准确的文本匹配）
 fallback_parse() {
     echo -e "${YELLOW}使用备用文本解析方法...${NC}"
     
+    # 直接从配置文件中提取所有ICE服务器URL
     local in_ice_servers=false
-    local current_urls=()
     local current_username=""
     local current_credential=""
+    local server_block=""
     
-    # 逐行解析配置文件
     while IFS= read -r line; do
         # 检查是否进入 ice_servers 部分
         if [[ $line =~ ice_servers: ]]; then
@@ -196,26 +196,26 @@ fallback_parse() {
             continue
         fi
         
-        # 检查是否退出 ice_servers 部分（下一个顶级配置）
+        # 检查是否退出 ice_servers 部分
         if [[ $line =~ ^[a-zA-Z] ]] && [[ ! $line =~ ^[[:space:]] ]]; then
             in_ice_servers=false
-            continue
+            break
         fi
         
-        # 如果遇到新的服务器条目，先处理之前的条目
+        # 收集服务器块信息
         if [[ $line =~ ^[[:space:]]*-[[:space:]]*urls: ]]; then
-            # 处理之前收集的服务器信息
-            process_server_entry
+            # 处理之前的服务器块
+            if [[ -n "$server_block" ]]; then
+                process_server_block "$server_block" "$current_username" "$current_credential"
+            fi
             
-            # 重置当前服务器信息
-            current_urls=()
+            # 开始新的服务器块
+            server_block="$line"
             current_username=""
             current_credential=""
-        fi
-        
-        # 提取 URLs
-        if [[ $line =~ urls:.*\[\"([^\"]+)\"\] ]]; then
-            current_urls+=("${BASH_REMATCH[1]}")
+        elif [[ $line =~ ^[[:space:]]+username: ]] || [[ $line =~ ^[[:space:]]+credential: ]] || [[ $line =~ ^[[:space:]]*# ]]; then
+            # 添加到当前服务器块
+            server_block="$server_block"$'\n'"$line"
         fi
         
         # 提取用户名和密码
@@ -227,15 +227,23 @@ fallback_parse() {
         
     done < "$CONFIG_FILE"
     
-    # 处理最后一个服务器条目
-    process_server_entry
+    # 处理最后一个服务器块
+    if [[ -n "$server_block" ]]; then
+        process_server_block "$server_block" "$current_username" "$current_credential"
+    fi
 }
 
-# 处理单个服务器条目
-process_server_entry() {
-    for url in "${current_urls[@]}"; do
-        parse_single_url "$url" "$current_username" "$current_credential"
-    done
+# 处理单个服务器块
+process_server_block() {
+    local block="$1"
+    local username="$2"
+    local credential="$3"
+    
+    # 从服务器块中提取URL
+    if [[ $block =~ urls:[[:space:]]*\[\"([^\"]+)\"\] ]]; then
+        local url="${BASH_REMATCH[1]}"
+        parse_single_url "$url" "$username" "$credential"
+    fi
 }
 
 # 解析单个URL
@@ -366,30 +374,12 @@ test_turn_servers() {
         fi
         echo
         
-        # TURN 分配测试（减少分配次数和时间）
-        echo "3. TURN 分配测试 (3次分配，快速测试):"
-        if timeout 30s turnutils_uclient -c 3 -n 3 -T -u "$username" -w "$password" -p "$port" "$host"; then
-            echo -e "${GREEN}✓ TURN 分配测试成功${NC}"
+        # TURN 分配测试（使用正确的参数）
+        echo "3. TURN 分配测试 (UDP模式):"
+        if timeout 20s turnutils_uclient -n 3 -u "$username" -w "$password" -p "$port" -y "$host"; then
+            echo -e "${GREEN}✓ TURN UDP 分配测试成功${NC}"
         else
-            echo -e "${RED}✗ TURN 分配测试失败${NC}"
-        fi
-        echo
-        
-        # TURN UDP 传输测试（简化参数）
-        echo "4. TURN UDP 传输测试 (简单模式):"
-        if timeout 15s turnutils_uclient -n 2 -u "$username" -w "$password" -p "$port" "$host"; then
-            echo -e "${GREEN}✓ TURN UDP 传输测试成功${NC}"
-        else
-            echo -e "${RED}✗ TURN UDP 传输测试失败${NC}"
-        fi
-        echo
-        
-        # 额外的简单连通性测试
-        echo "5. TURN 简单连通性测试:"
-        if timeout 10s turnutils_uclient -n 1 -l 50 -u "$username" -w "$password" -p "$port" "$host"; then
-            echo -e "${GREEN}✓ TURN 简单连通性测试成功${NC}"
-        else
-            echo -e "${RED}✗ TURN 简单连通性测试失败${NC}"
+            echo -e "${RED}✗ TURN UDP 分配测试失败${NC}"
         fi
         echo
         
