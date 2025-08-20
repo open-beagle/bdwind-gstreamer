@@ -81,6 +81,13 @@ const Logger = {
     },
 
     /**
+     * 检查是否处于调试模式
+     */
+    isDebugMode() {
+        return this._debugMode;
+    },
+
+    /**
      * 推入上下文
      */
     pushContext(context) {

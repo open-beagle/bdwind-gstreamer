@@ -14,13 +14,14 @@ type ConfigModule interface {
 
 // WebServerConfig Web服务器配置模块
 type WebServerConfig struct {
-	Host       string     `yaml:"host" json:"host"`
-	Port       int        `yaml:"port" json:"port"`
-	EnableTLS  bool       `yaml:"enable_tls" json:"enable_tls"`
-	TLS        TLSConfig  `yaml:"tls" json:"tls"`
-	StaticDir  string     `yaml:"static_dir" json:"static_dir"`
-	EnableCORS bool       `yaml:"enable_cors" json:"enable_cors"`
-	Auth       AuthConfig `yaml:"auth" json:"auth"`
+	Host        string     `yaml:"host" json:"host"`
+	Port        int        `yaml:"port" json:"port"`
+	EnableTLS   bool       `yaml:"enable_tls" json:"enable_tls"`
+	TLS         TLSConfig  `yaml:"tls" json:"tls"`
+	StaticDir   string     `yaml:"static_dir" json:"static_dir"`
+	DefaultFile string     `yaml:"default_file" json:"default_file"`
+	EnableCORS  bool       `yaml:"enable_cors" json:"enable_cors"`
+	Auth        AuthConfig `yaml:"auth" json:"auth"`
 }
 
 // TLSConfig TLS配置
@@ -50,6 +51,7 @@ func (c *WebServerConfig) SetDefaults() {
 	c.Port = 8080
 	c.EnableTLS = false
 	c.StaticDir = "web/dist"
+	c.DefaultFile = "index.html"
 	c.EnableCORS = true
 
 	// TLS默认配置
@@ -92,6 +94,11 @@ func (c *WebServerConfig) Validate() error {
 	// 验证静态文件目录
 	if c.StaticDir == "" {
 		return fmt.Errorf("static directory cannot be empty")
+	}
+
+	// 验证默认文件
+	if c.DefaultFile == "" {
+		return fmt.Errorf("default file cannot be empty")
 	}
 
 	// 验证认证配置
@@ -149,6 +156,9 @@ func (c *WebServerConfig) Merge(other ConfigModule) error {
 	}
 	if otherConfig.StaticDir != "" && otherConfig.StaticDir != "web/dist" {
 		c.StaticDir = otherConfig.StaticDir
+	}
+	if otherConfig.DefaultFile != "" && otherConfig.DefaultFile != "index.html" {
+		c.DefaultFile = otherConfig.DefaultFile
 	}
 	if otherConfig.EnableCORS {
 		c.EnableCORS = otherConfig.EnableCORS

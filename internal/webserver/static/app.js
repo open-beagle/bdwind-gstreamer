@@ -154,6 +154,16 @@ class ApplicationManager {
   async initializeCore() {
     console.log("ApplicationManager: 初始化核心模块...");
 
+    // 验证 WebRTC Adapter 是否可用
+    if (typeof verifyWebRTCAdapter === 'function') {
+      const adapterAvailable = verifyWebRTCAdapter();
+      if (!adapterAvailable) {
+        throw new Error('WebRTC Adapter 未正确加载，无法继续初始化');
+      }
+    } else {
+      console.warn('⚠️ WebRTC Adapter 验证函数不可用，可能影响 WebRTC 功能');
+    }
+
     // 创建事件总线
     this.core.eventBus = new EventBus();
 
@@ -1074,7 +1084,7 @@ class ApplicationManager {
     try {
       const [statusRes, statsRes] = await Promise.all([
         fetch("/api/status"),
-        fetch("/api/stats"),
+        fetch("/api/system/stats"),
       ]);
 
       if (statusRes.ok && statsRes.ok) {
@@ -2182,6 +2192,23 @@ class ApplicationManager {
    * 业务方法 - 开始捕获
    */
   async startCapture() {
+    const methodName = "startCapture";
+    const startTime = Date.now();
+    
+    // 调试模式下记录方法调用详细信息 (需求 4.4)
+    if (Logger.isDebugMode()) {
+      Logger.debug(`ApplicationManager: ${methodName}() 调用开始`, {
+        timestamp: new Date().toISOString(),
+        currentState: {
+          phase: this.state.phase,
+          isCapturing: this.state.isCapturing,
+          moduleStates: this._getModuleStates()
+        },
+        webrtcModuleAvailable: !!this.modules.webrtc,
+        uiModuleAvailable: !!this.modules.ui
+      });
+    }
+
     try {
       if (this.modules.ui) {
         this.modules.ui.updateStatus("connecting", "正在启动...");
@@ -2189,19 +2216,111 @@ class ApplicationManager {
 
       Logger.info("ApplicationManager: 正在启动桌面捕获...");
 
-      // 直接启动WebRTC连接，不需要调用服务器API
-      if (this.modules.webrtc) {
-        await this.modules.webrtc.startCapture();
-        this.state.isCapturing = true;
-        Logger.info("ApplicationManager: 桌面捕获已启动");
-      } else {
+      // 检查WebRTC模块状态 (需求 4.3)
+      if (!this.modules.webrtc) {
+        const errorDetails = {
+          error: "WebRTC模块不可用",
+          moduleStates: this._getModuleStates(),
+          availableModules: Object.keys(this.modules).filter(key => this.modules[key]),
+          timestamp: new Date().toISOString()
+        };
+        
+        Logger.error("ApplicationManager: WebRTC模块检查失败", errorDetails);
         throw new Error("WebRTC模块不可用");
       }
-    } catch (error) {
-      if (this.modules.ui) {
-        this.modules.ui.updateStatus("offline", "启动失败");
+
+      // 记录WebRTC模块状态信息 (需求 4.3)
+      const webrtcState = this._getWebRTCModuleState();
+      Logger.info("ApplicationManager: WebRTC模块状态检查", webrtcState);
+
+      // 调试模式下记录WebRTC方法调用参数 (需求 4.4)
+      if (Logger.isDebugMode()) {
+        Logger.debug("ApplicationManager: 调用 webrtc.connect()", {
+          method: "webrtc.connect",
+          parameters: {},
+          webrtcState: webrtcState,
+          timestamp: new Date().toISOString()
+        });
       }
-      Logger.error("ApplicationManager: 启动捕获失败", error);
+
+      // 直接启动WebRTC连接，不需要调用服务器API
+      await this.modules.webrtc.connect();
+      this.state.isCapturing = true;
+      
+      const executionTime = Date.now() - startTime;
+      Logger.info("ApplicationManager: 桌面捕获已启动", {
+        executionTime: `${executionTime}ms`,
+        finalState: {
+          isCapturing: this.state.isCapturing,
+          phase: this.state.phase
+        }
+      });
+
+      // 调试模式下记录成功完成信息 (需求 4.4)
+      if (Logger.isDebugMode()) {
+        Logger.debug(`ApplicationManager: ${methodName}() 成功完成`, {
+          executionTime: `${executionTime}ms`,
+          finalWebrtcState: this._getWebRTCModuleState(),
+          timestamp: new Date().toISOString()
+        });
+      }
+
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      
+      // 详细的错误信息和调用堆栈记录 (需求 4.1, 4.2)
+      const errorDetails = {
+        method: methodName,
+        error: {
+          message: error.message,
+          name: error.name,
+          stack: error.stack
+        },
+        context: {
+          executionTime: `${executionTime}ms`,
+          currentState: {
+            phase: this.state.phase,
+            isCapturing: this.state.isCapturing
+          },
+          moduleStates: this._getModuleStates(),
+          webrtcState: this._getWebRTCModuleState(),
+          timestamp: new Date().toISOString()
+        },
+        troubleshooting: {
+          suggestions: [
+            "检查WebRTC模块是否正确初始化",
+            "验证网络连接状态",
+            "确认信令服务器连接正常",
+            "检查浏览器WebRTC支持"
+          ],
+          commonCauses: [
+            "WebRTC模块未初始化",
+            "信令连接失败",
+            "网络连接问题",
+            "浏览器权限限制"
+          ]
+        }
+      };
+
+      Logger.error("ApplicationManager: 启动捕获失败", errorDetails);
+
+      // 更新UI状态并提供有用的错误消息 (需求 4.2)
+      if (this.modules.ui) {
+        const userFriendlyMessage = this._getUserFriendlyErrorMessage(error, "startCapture");
+        this.modules.ui.updateStatus("offline", userFriendlyMessage);
+      }
+
+      // 调试模式下记录额外的调试信息 (需求 4.4)
+      if (Logger.isDebugMode()) {
+        Logger.debug(`ApplicationManager: ${methodName}() 异常终止`, {
+          errorType: error.constructor.name,
+          errorCode: error.code,
+          executionTime: `${executionTime}ms`,
+          browserInfo: this._getBrowserInfo(),
+          timestamp: new Date().toISOString()
+        });
+      }
+
       throw error;
     }
   }
@@ -2210,12 +2329,45 @@ class ApplicationManager {
    * 业务方法 - 停止捕获
    */
   async stopCapture() {
+    const methodName = "stopCapture";
+    const startTime = Date.now();
+    
+    // 调试模式下记录方法调用详细信息 (需求 4.4)
+    if (Logger.isDebugMode()) {
+      Logger.debug(`ApplicationManager: ${methodName}() 调用开始`, {
+        timestamp: new Date().toISOString(),
+        currentState: {
+          phase: this.state.phase,
+          isCapturing: this.state.isCapturing,
+          moduleStates: this._getModuleStates()
+        },
+        webrtcModuleAvailable: !!this.modules.webrtc,
+        uiModuleAvailable: !!this.modules.ui
+      });
+    }
+
     try {
       Logger.info("ApplicationManager: 正在停止桌面捕获...");
 
+      // 记录当前连接状态信息 (需求 4.3)
+      const webrtcState = this._getWebRTCModuleState();
+      Logger.info("ApplicationManager: 停止前WebRTC状态", webrtcState);
+
+      // 调试模式下记录WebRTC方法调用参数 (需求 4.4)
+      if (Logger.isDebugMode()) {
+        Logger.debug("ApplicationManager: 调用 webrtc.disconnect()", {
+          method: "webrtc.disconnect",
+          parameters: {},
+          webrtcState: webrtcState,
+          timestamp: new Date().toISOString()
+        });
+      }
+
       // 停止WebRTC连接
       if (this.modules.webrtc) {
-        this.modules.webrtc.stopCapture();
+        await this.modules.webrtc.disconnect();
+      } else {
+        Logger.warn("ApplicationManager: WebRTC模块不可用，跳过disconnect调用");
       }
 
       this.state.isCapturing = false;
@@ -2224,14 +2376,88 @@ class ApplicationManager {
         this.modules.ui.updateStatus("offline", "已停止");
       }
 
-      Logger.info("ApplicationManager: 桌面捕获已停止");
+      const executionTime = Date.now() - startTime;
+      Logger.info("ApplicationManager: 桌面捕获已停止", {
+        executionTime: `${executionTime}ms`,
+        finalState: {
+          isCapturing: this.state.isCapturing,
+          phase: this.state.phase
+        }
+      });
+
+      // 调试模式下记录成功完成信息 (需求 4.4)
+      if (Logger.isDebugMode()) {
+        Logger.debug(`ApplicationManager: ${methodName}() 成功完成`, {
+          executionTime: `${executionTime}ms`,
+          finalWebrtcState: this._getWebRTCModuleState(),
+          timestamp: new Date().toISOString()
+        });
+      }
+
     } catch (error) {
-      Logger.error("ApplicationManager: 停止捕获失败", error);
+      const executionTime = Date.now() - startTime;
+      
+      // 详细的错误信息和调用堆栈记录 (需求 4.1, 4.2)
+      const errorDetails = {
+        method: methodName,
+        error: {
+          message: error.message,
+          name: error.name,
+          stack: error.stack
+        },
+        context: {
+          executionTime: `${executionTime}ms`,
+          currentState: {
+            phase: this.state.phase,
+            isCapturing: this.state.isCapturing
+          },
+          moduleStates: this._getModuleStates(),
+          webrtcState: this._getWebRTCModuleState(),
+          timestamp: new Date().toISOString()
+        },
+        troubleshooting: {
+          suggestions: [
+            "检查WebRTC连接是否已建立",
+            "验证disconnect方法是否可用",
+            "确认模块状态正常",
+            "检查是否存在资源清理问题"
+          ],
+          commonCauses: [
+            "WebRTC连接已断开",
+            "模块状态异常",
+            "资源清理失败",
+            "并发调用冲突"
+          ]
+        }
+      };
+
+      Logger.error("ApplicationManager: 停止捕获失败", errorDetails);
+      
+      // 确保状态一致性
       this.state.isCapturing = false;
 
+      // 更新UI状态并提供有用的错误消息 (需求 4.2)
       if (this.modules.ui) {
-        this.modules.ui.updateStatus("offline", "停止时出错");
+        const userFriendlyMessage = this._getUserFriendlyErrorMessage(error, "stopCapture");
+        this.modules.ui.updateStatus("offline", userFriendlyMessage);
       }
+
+      // 调试模式下记录额外的调试信息 (需求 4.4)
+      if (Logger.isDebugMode()) {
+        Logger.debug(`ApplicationManager: ${methodName}() 异常终止`, {
+          errorType: error.constructor.name,
+          errorCode: error.code,
+          executionTime: `${executionTime}ms`,
+          stateAfterError: {
+            isCapturing: this.state.isCapturing,
+            phase: this.state.phase
+          },
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 注意：stopCapture不重新抛出错误，因为停止操作应该尽力完成
+      // 即使出现错误，也要确保状态被正确重置
     }
   }
 
@@ -2253,6 +2479,142 @@ class ApplicationManager {
       Logger.error("ApplicationManager: 获取显示器列表失败", error);
       throw error;
     }
+  }
+
+  /**
+   * 获取所有模块的状态信息 (需求 4.3)
+   * @private
+   */
+  _getModuleStates() {
+    const moduleStates = {};
+    
+    // 核心模块状态
+    moduleStates.core = {
+      eventBus: !!this.core.eventBus,
+      config: !!this.core.config,
+      logger: !!this.core.logger
+    };
+
+    // 功能模块状态
+    for (const [moduleName, moduleInstance] of Object.entries(this.modules)) {
+      if (moduleInstance) {
+        const stateInfo = this.state.modules.get(moduleName);
+        moduleStates[moduleName] = {
+          available: true,
+          status: stateInfo?.status || 'unknown',
+          loadTime: stateInfo?.loadTime || null,
+          error: stateInfo?.error || null
+        };
+      } else {
+        moduleStates[moduleName] = {
+          available: false,
+          status: 'not_loaded',
+          loadTime: null,
+          error: null
+        };
+      }
+    }
+
+    return moduleStates;
+  }
+
+  /**
+   * 获取WebRTC模块的详细状态信息 (需求 4.3)
+   * @private
+   */
+  _getWebRTCModuleState() {
+    if (!this.modules.webrtc) {
+      return {
+        available: false,
+        connectionState: null,
+        iceConnectionState: null,
+        signalingState: null,
+        hasLocalDescription: false,
+        hasRemoteDescription: false
+      };
+    }
+
+    try {
+      // 尝试获取WebRTC连接状态
+      const peerConnection = this.modules.webrtc.peerConnection;
+      
+      return {
+        available: true,
+        connectionState: peerConnection?.connectionState || null,
+        iceConnectionState: peerConnection?.iceConnectionState || null,
+        signalingState: peerConnection?.signalingState || null,
+        hasLocalDescription: !!peerConnection?.localDescription,
+        hasRemoteDescription: !!peerConnection?.remoteDescription,
+        iceGatheringState: peerConnection?.iceGatheringState || null,
+        canTrickleIceCandidates: peerConnection?.canTrickleIceCandidates || null
+      };
+    } catch (error) {
+      return {
+        available: true,
+        error: error.message,
+        connectionState: 'error',
+        iceConnectionState: 'error',
+        signalingState: 'error'
+      };
+    }
+  }
+
+  /**
+   * 生成用户友好的错误消息 (需求 4.2)
+   * @private
+   */
+  _getUserFriendlyErrorMessage(error, methodName) {
+    const errorMessage = error.message || error.toString();
+    
+    // 根据错误类型和方法名提供用户友好的消息
+    if (methodName === "startCapture") {
+      if (errorMessage.includes("WebRTC模块不可用")) {
+        return "启动失败：WebRTC功能未就绪";
+      } else if (errorMessage.includes("connect")) {
+        return "启动失败：无法建立连接";
+      } else if (errorMessage.includes("permission")) {
+        return "启动失败：权限不足";
+      } else if (errorMessage.includes("network")) {
+        return "启动失败：网络连接问题";
+      } else {
+        return "启动失败：请检查网络连接";
+      }
+    } else if (methodName === "stopCapture") {
+      if (errorMessage.includes("disconnect")) {
+        return "停止时出错：连接断开失败";
+      } else if (errorMessage.includes("cleanup")) {
+        return "停止时出错：资源清理失败";
+      } else {
+        return "停止时出错：但已强制停止";
+      }
+    }
+    
+    return `操作失败：${errorMessage}`;
+  }
+
+  /**
+   * 获取浏览器信息用于调试 (需求 4.4)
+   * @private
+   */
+  _getBrowserInfo() {
+    return {
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      language: navigator.language,
+      cookieEnabled: navigator.cookieEnabled,
+      onLine: navigator.onLine,
+      webrtcSupported: !!(window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection),
+      webrtcAdapterVersion: typeof adapter !== 'undefined' ? adapter.browserDetails : null,
+      screenResolution: {
+        width: screen.width,
+        height: screen.height,
+        colorDepth: screen.colorDepth
+      },
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      }
+    };
   }
 }
 

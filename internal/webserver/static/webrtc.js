@@ -1,528 +1,87 @@
 /**
- * 智能重试管理器
- * 区分初始连接失败和网络中断，提供不同的重试策略
+ * WebRTC Adapter 验证
+ * 验证 webrtc-adapter 库是否正确加载
+ * 优化：缓存验证结果，避免重复检查
  */
-class RetryManager {
-  constructor() {
-    // 重试配置
-    this.initialConnectionRetries = 0; // 初始连接不重试
-    this.networkInterruptionRetries = 2; // 网络中断重试2次
-    this.currentRetries = 0;
-    
-    // 连接状态跟踪
-    this.connectionEstablished = false;
-    this.retryType = "initial"; // 'initial' | 'network-interruption'
-    
-    // 重试延迟配置
-    this.baseDelay = 2000; // 基础延迟2秒
-    this.maxDelay = 30000; // 最大延迟30秒
-    this.backoffMultiplier = 2; // 退避倍数
-    
-    // 状态历史
-    this.retryHistory = [];
-    
-    console.log("🔄 RetryManager初始化完成");
-  }
-
-  /**
-   * 标记连接已建立
-   * 当WebRTC连接成功建立并开始传输视频流时调用
-   */
-  markConnectionEstablished() {
-    this.connectionEstablished = true;
-    this.retryType = "network-interruption";
-    this.currentRetries = 0;
-    
-    console.log("🔗 连接已建立，启用网络中断重试机制 (最多2次重试)");
-    
-    // 记录连接建立事件
-    this._recordRetryEvent("connection-established", {
-      previousRetryType: this.retryType,
-      newRetryType: "network-interruption"
+let _adapterVerified = null;
+function verifyWebRTCAdapter() {
+  if (_adapterVerified !== null) return _adapterVerified;
+  if (typeof adapter !== "undefined") {
+    console.log("✅ WebRTC Adapter 已加载:", {
+      version: adapter.browserDetails?.version || "unknown",
+      browser: adapter.browserDetails?.browser || "unknown",
+      adapterVersion: "9.0.1",
     });
-  }
 
-  /**
-   * 检查是否可以重试
-   * @param {string} errorType - 错误类型 ('connection-failed', 'network-interruption', 'ice-failed', etc.)
-   * @returns {boolean} 是否可以重试
-   */
-  canRetry(errorType = "unknown") {
-    const maxRetries = this.connectionEstablished 
-      ? this.networkInterruptionRetries 
-      : this.initialConnectionRetries;
+    // 验证关键功能是否可用
+    const hasRTCPeerConnection = typeof RTCPeerConnection !== "undefined";
+    const hasGetUserMedia =
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function";
 
-    const canRetry = this.currentRetries < maxRetries;
-    
-    console.log(`🔍 重试检查: ${this.retryType} 模式, 当前重试: ${this.currentRetries}/${maxRetries}, 可以重试: ${canRetry}`);
-    
-    if (!canRetry) {
-      console.log(`🛑 达到最大重试次数 (${maxRetries})，停止重试`);
-      this._recordRetryEvent("max-retries-reached", {
-        errorType,
-        maxRetries,
-        retryType: this.retryType
-      });
-    }
+    console.log("🔍 WebRTC API 可用性检查:", {
+      RTCPeerConnection: hasRTCPeerConnection,
+      getUserMedia: hasGetUserMedia,
+      adapter: true,
+    });
 
-    return canRetry;
-  }
-
-  /**
-   * 执行重试
-   * @param {string} errorType - 错误类型
-   * @returns {Object} 重试信息
-   */
-  executeRetry(errorType = "unknown") {
-    this.currentRetries++;
-    
-    const retryInfo = {
-      attempt: this.currentRetries,
-      type: this.retryType,
-      maxRetries: this.connectionEstablished 
-        ? this.networkInterruptionRetries 
-        : this.initialConnectionRetries,
-      delay: this.calculateRetryDelay(),
-      errorType,
-      timestamp: Date.now()
-    };
-
-    console.log(`🔄 执行第${this.currentRetries}次重试 (${this.retryType} 模式), 延迟: ${retryInfo.delay}ms`);
-    
-    this._recordRetryEvent("retry-executed", retryInfo);
-    
-    return retryInfo;
-  }
-
-  /**
-   * 计算重试延迟
-   * 使用指数退避策略，但区分初始连接和网络中断
-   * @returns {number} 延迟时间（毫秒）
-   */
-  calculateRetryDelay() {
-    if (this.retryType === "initial") {
-      // 初始连接失败不重试，但如果调用了这个方法，返回0延迟
-      return 0;
-    }
-    
-    // 网络中断使用指数退避
-    const delay = Math.min(
-      this.baseDelay * Math.pow(this.backoffMultiplier, this.currentRetries - 1),
-      this.maxDelay
+    _adapterVerified = true;
+    return true;
+  } else {
+    console.error(
+      "❌ WebRTC Adapter 未加载！请检查 webrtc-adapter-9.0.1.min.js 是否正确引入"
     );
-    
-    return delay;
+    _adapterVerified = false;
+    return false;
+  }
+}
+
+// 立即验证 adapter 是否可用
+verifyWebRTCAdapter();
+
+/**
+ * 性能监控工具
+ */
+class PerformanceMonitor {
+  static startTimer(name) {
+    if (!window._perfTimers) window._perfTimers = {};
+    window._perfTimers[name] = performance.now();
   }
 
-  /**
-   * 重置重试计数
-   * 在连接成功或手动重置时调用
-   */
-  reset() {
-    const previousRetries = this.currentRetries;
-    this.currentRetries = 0;
-    
-    if (previousRetries > 0) {
-      console.log(`🔄 重试计数已重置 (之前: ${previousRetries})`);
-      this._recordRetryEvent("retry-reset", {
-        previousRetries,
-        retryType: this.retryType
-      });
+  static endTimer(name) {
+    if (!window._perfTimers || !window._perfTimers[name]) return 0;
+    const duration = performance.now() - window._perfTimers[name];
+    delete window._perfTimers[name];
+    return duration;
+  }
+
+  static logTiming(name, duration) {
+    if (duration > 100) { // 只记录超过100ms的操作
+      console.log(`⏱️ ${name}: ${duration.toFixed(2)}ms`);
     }
-  }
-
-  /**
-   * 完全重置重试管理器
-   * 重置到初始状态，用于新的连接会话
-   */
-  fullReset() {
-    console.log("🔄 RetryManager完全重置");
-    
-    this._recordRetryEvent("full-reset", {
-      previousState: {
-        connectionEstablished: this.connectionEstablished,
-        retryType: this.retryType,
-        currentRetries: this.currentRetries
-      }
-    });
-    
-    this.connectionEstablished = false;
-    this.retryType = "initial";
-    this.currentRetries = 0;
-    this.retryHistory = [];
-  }
-
-  /**
-   * 获取当前重试状态
-   * @returns {Object} 重试状态信息
-   */
-  getRetryStatus() {
-    return {
-      connectionEstablished: this.connectionEstablished,
-      retryType: this.retryType,
-      currentRetries: this.currentRetries,
-      maxRetries: this.connectionEstablished 
-        ? this.networkInterruptionRetries 
-        : this.initialConnectionRetries,
-      canRetry: this.canRetry(),
-      nextRetryDelay: this.calculateRetryDelay(),
-      retryHistory: this.retryHistory.slice(-5) // 最近5次记录
-    };
-  }
-
-  /**
-   * 检查是否应该启用重试
-   * 根据错误类型和连接状态决定重试策略
-   * @param {string} errorType - 错误类型
-   * @param {Object} context - 错误上下文
-   * @returns {Object} 重试决策
-   */
-  shouldRetry(errorType, context = {}) {
-    const status = this.getRetryStatus();
-    
-    // 初始连接阶段的特殊处理
-    if (!this.connectionEstablished) {
-      console.log("🚫 初始连接阶段，不启用重试机制");
-      return {
-        shouldRetry: false,
-        reason: "初始连接失败不重试，避免无效重试循环",
-        retryType: "initial",
-        maxRetries: 0
-      };
-    }
-    
-    // 网络中断阶段的重试处理
-    if (this.connectionEstablished && this.canRetry(errorType)) {
-      return {
-        shouldRetry: true,
-        reason: "连接已建立，启用网络中断重试机制",
-        retryType: "network-interruption",
-        maxRetries: this.networkInterruptionRetries,
-        nextDelay: this.calculateRetryDelay()
-      };
-    }
-    
-    return {
-      shouldRetry: false,
-      reason: "已达到最大重试次数或不符合重试条件",
-      retryType: this.retryType,
-      maxRetries: status.maxRetries
-    };
-  }
-
-  /**
-   * 记录重试事件
-   * @param {string} eventType - 事件类型
-   * @param {Object} data - 事件数据
-   */
-  _recordRetryEvent(eventType, data = {}) {
-    const event = {
-      type: eventType,
-      timestamp: Date.now(),
-      retryType: this.retryType,
-      currentRetries: this.currentRetries,
-      connectionEstablished: this.connectionEstablished,
-      data
-    };
-    
-    this.retryHistory.push(event);
-    
-    // 保持历史记录在合理范围内
-    if (this.retryHistory.length > 50) {
-      this.retryHistory = this.retryHistory.slice(-30);
-    }
-  }
-
-  /**
-   * 获取重试统计信息
-   * @returns {Object} 统计信息
-   */
-  getRetryStats() {
-    const totalRetries = this.retryHistory.filter(e => e.type === "retry-executed").length;
-    const initialRetries = this.retryHistory.filter(e => 
-      e.type === "retry-executed" && e.retryType === "initial"
-    ).length;
-    const networkRetries = this.retryHistory.filter(e => 
-      e.type === "retry-executed" && e.retryType === "network-interruption"
-    ).length;
-    
-    return {
-      totalRetries,
-      initialRetries,
-      networkRetries,
-      connectionEstablishedCount: this.retryHistory.filter(e => 
-        e.type === "connection-established"
-      ).length,
-      maxRetriesReachedCount: this.retryHistory.filter(e => 
-        e.type === "max-retries-reached"
-      ).length,
-      currentStatus: this.getRetryStatus()
-    };
   }
 }
 
 /**
- * 连接状态验证器
- * 提供PeerConnection状态全面检查和验证功能
- */
-class ConnectionStateValidator {
-  /**
-   * 验证PeerConnection状态
-   * @param {RTCPeerConnection} pc - PeerConnection实例
-   * @returns {Object} 验证结果 {valid: boolean, reason?: string, state?: Object}
-   */
-  static validatePeerConnectionState(pc) {
-    if (!pc) {
-      return { 
-        valid: false, 
-        reason: "PeerConnection不存在",
-        state: null
-      };
-    }
-
-    const state = {
-      signaling: pc.signalingState,
-      connection: pc.connectionState,
-      ice: pc.iceConnectionState,
-      gathering: pc.iceGatheringState
-    };
-
-    // 检查是否处于已关闭状态
-    if (pc.signalingState === "closed") {
-      return { 
-        valid: false, 
-        reason: "连接已关闭", 
-        state 
-      };
-    }
-
-    // 检查连接状态是否异常
-    if (pc.connectionState === "failed") {
-      return { 
-        valid: false, 
-        reason: "连接状态为failed", 
-        state 
-      };
-    }
-
-    // 检查ICE连接状态是否异常
-    if (pc.iceConnectionState === "failed") {
-      return { 
-        valid: false, 
-        reason: "ICE连接状态为failed", 
-        state 
-      };
-    }
-
-    return { 
-      valid: true, 
-      state 
-    };
-  }
-
-  /**
-   * 检查是否可以设置远程描述
-   * @param {RTCPeerConnection} pc - PeerConnection实例
-   * @returns {boolean} 是否可以设置远程描述
-   */
-  static canSetRemoteDescription(pc) {
-    if (!pc) {
-      return false;
-    }
-
-    // 可以设置远程描述的状态：stable 或 have-local-offer
-    return (
-      pc.signalingState === "stable" ||
-      pc.signalingState === "have-local-offer"
-    );
-  }
-
-  /**
-   * 检查是否可以设置本地描述
-   * @param {RTCPeerConnection} pc - PeerConnection实例
-   * @returns {boolean} 是否可以设置本地描述
-   */
-  static canSetLocalDescription(pc) {
-    if (!pc) {
-      return false;
-    }
-
-    // 可以设置本地描述的状态：have-remote-offer 或 stable
-    return (
-      pc.signalingState === "have-remote-offer" ||
-      pc.signalingState === "stable"
-    );
-  }
-
-  /**
-   * 验证状态转换的有效性
-   * @param {string} fromState - 当前状态
-   * @param {string} toState - 目标状态
-   * @param {string} operation - 操作类型 ('setRemoteDescription', 'setLocalDescription', 'createOffer', 'createAnswer')
-   * @returns {Object} 验证结果 {valid: boolean, reason?: string}
-   */
-  static validateStateTransition(fromState, toState, operation) {
-    const validTransitions = {
-      'setRemoteDescription': {
-        'stable': ['have-remote-offer'],
-        'have-local-offer': ['stable', 'have-remote-pranswer']
-      },
-      'setLocalDescription': {
-        'have-remote-offer': ['stable'],
-        'stable': ['have-local-offer'],
-        'have-remote-pranswer': ['stable']
-      },
-      'createOffer': {
-        'stable': ['have-local-offer']
-      },
-      'createAnswer': {
-        'have-remote-offer': ['have-remote-offer'] // 状态不变，但创建answer
-      }
-    };
-
-    const allowedStates = validTransitions[operation]?.[fromState];
-    
-    if (!allowedStates) {
-      return {
-        valid: false,
-        reason: `操作 ${operation} 在状态 ${fromState} 下不被允许`
-      };
-    }
-
-    if (!allowedStates.includes(toState)) {
-      return {
-        valid: false,
-        reason: `从状态 ${fromState} 到 ${toState} 的转换在操作 ${operation} 下无效`
-      };
-    }
-
-    return { valid: true };
-  }
-
-  /**
-   * 检查连接是否需要重置
-   * @param {RTCPeerConnection} pc - PeerConnection实例
-   * @returns {Object} 检查结果 {needsReset: boolean, reason?: string, state?: Object}
-   */
-  static checkIfResetNeeded(pc) {
-    const validation = this.validatePeerConnectionState(pc);
-    
-    if (!validation.valid) {
-      return {
-        needsReset: true,
-        reason: validation.reason,
-        state: validation.state
-      };
-    }
-
-    // 检查是否处于不一致状态
-    if (pc.signalingState === "stable" && 
-        pc.connectionState === "new" && 
-        pc.iceConnectionState === "new") {
-      return {
-        needsReset: false,
-        reason: "连接处于初始状态",
-        state: validation.state
-      };
-    }
-
-    // 检查是否处于异常的稳定状态（可能需要重新协商）
-    if (pc.signalingState === "stable" && 
-        (pc.connectionState === "disconnected" || 
-         pc.iceConnectionState === "disconnected")) {
-      return {
-        needsReset: true,
-        reason: "连接处于异常的稳定状态，需要重新协商",
-        state: validation.state
-      };
-    }
-
-    return {
-      needsReset: false,
-      state: validation.state
-    };
-  }
-
-  /**
-   * 获取状态诊断信息
-   * @param {RTCPeerConnection} pc - PeerConnection实例
-   * @returns {Object} 诊断信息
-   */
-  static getDiagnosticInfo(pc) {
-    if (!pc) {
-      return {
-        available: false,
-        reason: "PeerConnection不存在"
-      };
-    }
-
-    const state = {
-      signaling: pc.signalingState,
-      connection: pc.connectionState,
-      ice: pc.iceConnectionState,
-      gathering: pc.iceGatheringState
-    };
-
-    const validation = this.validatePeerConnectionState(pc);
-    const resetCheck = this.checkIfResetNeeded(pc);
-
-    return {
-      available: true,
-      state,
-      validation,
-      resetCheck,
-      capabilities: {
-        canSetRemoteDescription: this.canSetRemoteDescription(pc),
-        canSetLocalDescription: this.canSetLocalDescription(pc)
-      },
-      timestamp: Date.now()
-    };
-  }
-
-  /**
-   * 记录状态变化历史
-   * @param {RTCPeerConnection} pc - PeerConnection实例
-   * @param {string} operation - 触发状态变化的操作
-   * @param {Object} context - 上下文信息
-   */
-  static logStateChange(pc, operation, context = {}) {
-    const diagnostic = this.getDiagnosticInfo(pc);
-    
-    console.log(`🔍 状态验证 [${operation}]:`, {
-      operation,
-      state: diagnostic.state,
-      validation: diagnostic.validation,
-      capabilities: diagnostic.capabilities,
-      context,
-      timestamp: new Date().toISOString()
-    });
-
-    return diagnostic;
-  }
-}
-
-/**
- * WebRTC管理器 - 简化版本
- * 基于selkies-gstreamer最佳实践的简单可靠实现
+ * 简化的 WebRTC 管理器
+ * 基于 webrtc-adapter 的标准化实现，移除复杂的重试和状态验证逻辑
+ * 优化版本：减少内存使用，提高连接速度，简化错误处理
  */
 class WebRTCManager {
   constructor(eventBus, config) {
+    // 核心依赖
     this.eventBus = eventBus;
     this.config = config;
+    this.logger = window.EnhancedLogger || console;
 
-    // 核心组件
+    // WebRTC 核心组件
     this.pc = null;
     this.signalingManager = null;
 
-    // 智能重试管理器
-    this.retryManager = new RetryManager();
-
-    // 状态管理
+    // 连接状态管理
     this.connectionState = "disconnected"; // disconnected, connecting, connected, failed
     this.iceConnectionState = "closed";
     this.signalingState = "closed";
-    this.connectionAttempts = 0;
-    this.maxConnectionAttempts = 0;
 
     // 媒体元素
     this.videoElement = null;
@@ -530,61 +89,114 @@ class WebRTCManager {
     this.remoteStream = null;
 
     // 数据通道
-    this._send_channel = null;
-    this._receive_channel = null;
+    this.sendChannel = null;
+    this.receiveChannel = null;
 
-    // 配置 - 将在_loadConfig中从服务器获取
+    // 配置参数（优化：减少超时时间）
     this.iceServers = [];
-
-    // 超时设置
-    this.connectionTimeout = 30000;
-    this.iceTimeout = 15000;
+    this.connectionTimeout = 15000; // 减少到15秒
+    this.maxRetryAttempts = 2; // 减少重试次数
+    this.retryDelay = 1500; // 减少重试延迟
 
     // 定时器
     this.connectionTimer = null;
-    this.iceTimer = null;
-    this.reconnectTimer = null;
-    this.statsTimer = null;
+    this.retryTimer = null;
 
-    // ICE候选缓存
-    this.pendingIceCandidates = [];
+    // 重试状态（简化版）
+    this.retryCount = 0;
+    this.connectionEstablished = false;
+    this.lastError = null;
+    this.errorHistory = [];
 
-    // ICE状态跟踪
-    this._previousIceState = null;
-
-    // 状态管理标志
-    this._resetScheduled = false;
-
-    // 统计
+    // 统计信息（增强版）
     this.connectionStats = {
       connectTime: null,
       disconnectTime: null,
-      bytesReceived: 0,
-      packetsLost: 0,
       totalConnections: 0,
       reconnectAttempts: 0,
-      // ICE相关统计
-      iceGatheringCompleteTime: null,
-      iceCompletedTime: null,
-      iceFailureCount: 0,
-      iceDisconnectCount: 0,
-      iceCandidateErrors: 0,
-      localIceCandidates: 0,
-      remoteIceCandidates: 0,
-      iceStateHistory: [],
+      // 新增的详细统计
+      connectionDuration: 0,
+      bytesReceived: 0,
+      bytesSent: 0,
+      packetsReceived: 0,
+      packetsSent: 0,
+      packetsLost: 0,
+      jitter: 0,
+      roundTripTime: 0,
+      availableIncomingBitrate: 0,
+      availableOutgoingBitrate: 0,
+      currentRoundTripTime: 0,
+      totalRoundTripTime: 0,
+      roundTripTimeMeasurements: 0,
+      // 连接质量指标
+      connectionQuality: "unknown", // excellent, good, fair, poor, unknown
+      qualityScore: 0, // 0-100
+      // 媒体流统计
+      videoStats: {
+        framesReceived: 0,
+        framesDecoded: 0,
+        framesDropped: 0,
+        frameWidth: 0,
+        frameHeight: 0,
+        frameRate: 0,
+        bitrate: 0,
+      },
+      audioStats: {
+        samplesReceived: 0,
+        samplesDecoded: 0,
+        audioLevel: 0,
+        bitrate: 0,
+      },
+      // 网络统计
+      networkStats: {
+        candidatePairs: 0,
+        selectedCandidatePair: null,
+        localCandidateType: "unknown",
+        remoteCandidateType: "unknown",
+        transportType: "unknown",
+      },
     };
 
+    // 统计收集定时器（优化：减少频率）
+    this.statsCollectionTimer = null;
+    this.statsCollectionInterval = 2000; // 2秒收集一次统计，减少CPU使用
+    this.lastStatsTimestamp = 0;
+    this._lastBytes = 0;
+
+    // 错误分类常量
+    this.ERROR_TYPES = {
+      CONNECTION: "connection",
+      MEDIA: "media",
+      NETWORK: "network",
+      CONFIG: "config",
+      SIGNALING: "signaling",
+      TIMEOUT: "timeout",
+    };
+
+    // 错误严重级别
+    this.ERROR_LEVELS = {
+      WARNING: "warning",
+      ERROR: "error",
+      FATAL: "fatal",
+    };
+
+    // 初始化
     this._loadConfig();
-    
-    // 初始化调试验证 (任务 8)
-    this._initializeDebugging();
+    this._initializeLogging();
+
+    this.logger.info("WebRTC", "WebRTCManager 初始化完成", {
+      adapterVersion: typeof adapter !== "undefined" ? "9.0.1" : "not-loaded",
+      browserDetails:
+        typeof adapter !== "undefined" ? adapter.browserDetails : null,
+    });
   }
 
   /**
    * 加载配置
+   * @private
    */
   _loadConfig() {
-    // 设置默认ICE服务器（如果没有从服务器获取到配置）
+    // 设置默认 ICE 服务器
     const defaultIceServers = [{ urls: "stun:stun.ali.wodcloud.com:3478" }];
 
     if (this.config) {
@@ -592,14 +204,106 @@ class WebRTCManager {
       this.iceServers = webrtcConfig.iceServers || defaultIceServers;
       this.connectionTimeout =
         webrtcConfig.connectionTimeout || this.connectionTimeout;
-      this.maxConnectionAttempts =
-        webrtcConfig.maxRetryAttempts || this.maxConnectionAttempts;
+      this.maxRetryAttempts =
+        webrtcConfig.maxRetryAttempts || this.maxRetryAttempts;
+      this.retryDelay = webrtcConfig.retryDelay || this.retryDelay;
     } else {
       this.iceServers = defaultIceServers;
     }
 
-    // 打印ICE服务器配置
-    console.log("🧊 本地配置ICE服务器:", this.iceServers);
+    this.logger.info("WebRTC", "配置加载完成", {
+      iceServersCount: this.iceServers.length,
+      connectionTimeout: this.connectionTimeout,
+      maxRetryAttempts: this.maxRetryAttempts,
+    });
+  }
+
+  /**
+   * 初始化日志记录
+   * @private
+   */
+  _initializeLogging() {
+    // 设置日志级别
+    if (this.config) {
+      const logLevel = this.config.get("ui.logLevel", "info");
+      if (this.logger.setLevel) {
+        this.logger.setLevel(logLevel);
+      }
+    }
+
+    this.logger.info("WebRTC", "日志系统初始化完成");
+  }
+
+  /**
+   * 初始化 WebRTC 管理器
+   */
+  async initialize() {
+    try {
+      this.logger.info("WebRTC", "开始初始化 WebRTC 管理器");
+
+      // 验证 webrtc-adapter 是否可用
+      if (!verifyWebRTCAdapter()) {
+        throw new Error("WebRTC Adapter 未正确加载");
+      }
+
+      // 从服务器获取最新配置
+      await this._fetchServerConfig();
+
+      this.logger.info("WebRTC", "WebRTC 管理器初始化完成", {
+        iceServersCount: this.iceServers.length,
+        adapterReady: typeof adapter !== "undefined",
+      });
+
+      // 触发初始化完成事件
+      this.eventBus?.emit("webrtc:initialized", {
+        iceServers: this.iceServers,
+        config: this._getPublicConfig(),
+      });
+
+      return Promise.resolve();
+    } catch (error) {
+      this.logger.error("WebRTC", "初始化失败", error);
+      this.eventBus?.emit("webrtc:initialization-failed", { error });
+      throw error;
+    }
+  }
+
+  /**
+   * 从服务器获取配置
+   * @private
+   */
+  async _fetchServerConfig() {
+    try {
+      this.logger.info("WebRTC", "从服务器获取 WebRTC 配置");
+
+      if (this.config && typeof this.config.fetchWebRTCConfig === "function") {
+        const serverConfig = await this.config.fetchWebRTCConfig(true);
+
+        if (
+          serverConfig &&
+          serverConfig.iceServers &&
+          Array.isArray(serverConfig.iceServers)
+        ) {
+          this.iceServers = serverConfig.iceServers;
+          this.logger.info("WebRTC", "服务器配置更新成功", {
+            iceServersCount: this.iceServers.length,
+          });
+
+          // 触发配置更新事件
+          this.eventBus?.emit("webrtc:config-updated", {
+            source: "server",
+            iceServers: this.iceServers,
+          });
+        } else {
+          this.logger.warn("WebRTC", "服务器配置无效，使用默认配置");
+        }
+      } else {
+        this.logger.warn("WebRTC", "配置管理器不可用，使用当前配置");
+      }
+    } catch (error) {
+      this.logger.error("WebRTC", "获取服务器配置失败", error);
+      // 继续使用当前配置，不抛出错误
+    }
   }
 
   /**
@@ -608,750 +312,1619 @@ class WebRTCManager {
   setSignalingManager(signalingManager) {
     this.signalingManager = signalingManager;
     this._setupSignalingEvents();
+    this.logger.info("WebRTC", "信令管理器已设置");
   }
 
   /**
    * 设置媒体元素
+   * 增强版本，支持更好的错误处理和跨浏览器兼容性
    */
   setMediaElements(videoElement, audioElement) {
-    this.videoElement = videoElement;
-    this.audioElement = audioElement;
-    Logger.info("WebRTC: 媒体元素已设置");
-  }
-
-  /**
-   * 初始化WebRTC管理器（仅准备配置，不自动连接）
-   */
-  async initialize() {
-    // 首先从服务器获取最新的ICE配置
-    await this._fetchServerConfig();
-
-    // 打印最终使用的ICE服务器配置
-    console.log("🚀 WebRTC初始化完成，将使用以下ICE服务器配置:");
-    this._printICEServerConfig();
-
-    console.log("⏳ WebRTC已准备就绪，等待用户开始捕获...");
-
-    // 不自动连接，等待用户手动触发
-    return Promise.resolve();
-  }
-
-  /**
-   * 从服务器获取配置
-   */
-  async _fetchServerConfig() {
     try {
-      console.log("🔄 从服务器获取WebRTC配置...");
-
-      if (this.config && typeof this.config.fetchWebRTCConfig === "function") {
-        const serverConfig = await this.config.fetchWebRTCConfig(true); // 强制刷新
-
-        console.log("🔍 服务器返回的完整配置:", serverConfig);
-
-        if (
-          serverConfig &&
-          serverConfig.iceServers &&
-          Array.isArray(serverConfig.iceServers)
-        ) {
-          console.log("🔍 服务器返回的ICE服务器配置:", serverConfig.iceServers);
-
-          // 直接使用服务器返回的ICE服务器配置
-          this.iceServers = serverConfig.iceServers;
-          console.log(
-            "✅ 已更新ICE服务器配置，共",
-            this.iceServers.length,
-            "个服务器"
-          );
-
-          // 详细打印每个ICE服务器
-          this.iceServers.forEach((server, index) => {
-            console.log(`  服务器 #${index + 1}:`, {
-              urls: server.urls,
-              username: server.username ? "***" : undefined,
-              credential: server.credential ? "***" : undefined,
-            });
-          });
-        } else {
-          console.warn("⚠️ 服务器配置中没有有效的ICE服务器数组，保持当前配置");
-        }
-      } else {
-        console.warn("⚠️ 配置管理器不可用，使用当前ICE服务器配置");
-      }
-    } catch (error) {
-      console.error("❌ 获取服务器配置失败，使用当前配置:", error);
-    }
-  }
-
-  /**
-   * 开始捕获（用户主动触发WebRTC连接）
-   */
-  async startCapture() {
-    console.log("🎬 用户开始捕获，启动WebRTC连接...");
-    return this.connect();
-  }
-
-  /**
-   * 停止捕获
-   */
-  stopCapture() {
-    console.log("⏹️ 用户停止捕获，断开WebRTC连接...");
-    this.disconnect();
-  }
-
-  /**
-   * 开始连接
-   */
-  async connect() {
-    if (
-      this.connectionState === "connecting" ||
-      this.connectionState === "connected"
-    ) {
-      Logger.warn("WebRTC: 连接已在进行中或已连接");
-      return;
-    }
-
-    this._setState("connecting");
-    this.connectionAttempts++;
-
-    Logger.info(`WebRTC: 开始连接 (第 ${this.connectionAttempts} 次尝试)`);
-
-    // 打印连接开始信息
-    console.log("🚀 开始WebRTC连接，ICE服务器配置已准备就绪");
-
-    try {
-      await this._createPeerConnection();
-      await this._startConnection();
-    } catch (error) {
-      Logger.error("WebRTC: 连接失败", error);
-      this._handleConnectionError(error);
-    }
-  }
-
-  /**
-   * 打印ICE服务器配置信息
-   */
-  _printICEServerConfig() {
-    if (!Array.isArray(this.iceServers)) {
-      console.error("❌ ICE服务器配置不是数组格式:", this.iceServers);
-      return;
-    }
-
-    if (this.iceServers.length === 0) {
-      console.warn("⚠️ 没有配置ICE服务器");
-      return;
-    }
-
-    console.log(
-      `📊 配置了 ${this.iceServers.length} 个ICE服务器，WebRTC将自动选择最佳连接路径:`
-    );
-
-    this.iceServers.forEach((server, index) => {
-      if (!server || !server.urls) {
-        console.error(`❌ 服务器 #${index + 1} 配置无效:`, server);
-        return;
+      // 验证媒体元素
+      if (videoElement && !(videoElement instanceof HTMLVideoElement)) {
+        throw new Error("提供的视频元素不是有效的 HTMLVideoElement");
       }
 
-      // 处理urls可能是字符串或数组的情况
-      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      if (audioElement && !(audioElement instanceof HTMLAudioElement)) {
+        throw new Error("提供的音频元素不是有效的 HTMLAudioElement");
+      }
 
-      urls.forEach((url) => {
-        const serverType = this._getServerType(url);
-        const serverHost = this._extractHost(url);
-        const serverPort = this._extractPort(url);
+      // 清理之前的媒体元素事件监听器
+      this._cleanupMediaElementEvents();
 
-        console.log(`   ${serverType} 服务器: ${serverHost}:${serverPort}`);
+      // 设置新的媒体元素
+      this.videoElement = videoElement;
+      this.audioElement = audioElement;
 
-        if (server.username) {
-          console.log(`     用户名: ${server.username}`);
-          console.log(
-            `     密码: ${"*".repeat(server.credential?.length || 0)}`
-          );
-        }
+      // 设置媒体元素事件监听器
+      this._setupMediaElementEvents();
+
+      // 如果已有远程流，立即应用到新的媒体元素
+      if (this.remoteStream) {
+        this._applyRemoteStreamToElements(this.remoteStream);
+      }
+
+      this.logger.info("WebRTC", "媒体元素已设置", {
+        hasVideo: !!videoElement,
+        hasAudio: !!audioElement,
+        videoElementType: videoElement ? videoElement.constructor.name : null,
+        audioElementType: audioElement ? audioElement.constructor.name : null,
       });
+
+      // 触发媒体元素设置事件
+      this.eventBus?.emit("webrtc:media-elements-set", {
+        hasVideo: !!videoElement,
+        hasAudio: !!audioElement,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "设置媒体元素失败", error);
+      this._handleMediaError("MEDIA_ELEMENT_SETUP_FAILED", error);
+      throw error;
+    }
+  }
+
+  /**
+   * 获取连接状态
+   */
+  getConnectionState() {
+    return {
+      connectionState: this.connectionState,
+      iceConnectionState: this.iceConnectionState,
+      signalingState: this.signalingState,
+      connectionEstablished: this.connectionEstablished,
+      retryCount: this.retryCount,
+    };
+  }
+
+  /**
+   * 获取连接统计信息（增强版）
+   */
+  getConnectionStats() {
+    const currentTime = Date.now();
+    const uptime = this.connectionStats.connectTime
+      ? currentTime - this.connectionStats.connectTime
+      : 0;
+
+    return {
+      // 基础统计信息
+      ...this.connectionStats,
+      currentState: this.getConnectionState(),
+      uptime: uptime,
+      uptimeFormatted: this._formatDuration(uptime),
+      errorStats: this._getErrorStats(),
+
+      // 连接质量评估
+      qualityAssessment: this._assessConnectionQuality(),
+
+      // 性能指标
+      performanceMetrics: {
+        averageRtt:
+          this.connectionStats.roundTripTimeMeasurements > 0
+            ? this.connectionStats.totalRoundTripTime /
+              this.connectionStats.roundTripTimeMeasurements
+            : 0,
+        packetLossRate:
+          this.connectionStats.packetsSent > 0
+            ? (this.connectionStats.packetsLost /
+                this.connectionStats.packetsSent) *
+              100
+            : 0,
+        jitterMs: this.connectionStats.jitter,
+        bitrateMbps: {
+          incoming: (
+            this.connectionStats.availableIncomingBitrate / 1000000
+          ).toFixed(2),
+          outgoing: (
+            this.connectionStats.availableOutgoingBitrate / 1000000
+          ).toFixed(2),
+        },
+      },
+
+      // 数据传输统计
+      dataTransfer: {
+        totalBytesReceived: this.connectionStats.bytesReceived,
+        totalBytesSent: this.connectionStats.bytesSent,
+        totalBytesReceivedFormatted: this._formatBytes(
+          this.connectionStats.bytesReceived
+        ),
+        totalBytesSentFormatted: this._formatBytes(
+          this.connectionStats.bytesSent
+        ),
+        packetsReceived: this.connectionStats.packetsReceived,
+        packetsSent: this.connectionStats.packetsSent,
+        packetsLost: this.connectionStats.packetsLost,
+      },
+
+      // 媒体流统计
+      media: {
+        video: {
+          ...this.connectionStats.videoStats,
+          resolution: `${this.connectionStats.videoStats.frameWidth}x${this.connectionStats.videoStats.frameHeight}`,
+          bitrateFormatted: this._formatBitrate(
+            this.connectionStats.videoStats.bitrate
+          ),
+        },
+        audio: {
+          ...this.connectionStats.audioStats,
+          bitrateFormatted: this._formatBitrate(
+            this.connectionStats.audioStats.bitrate
+          ),
+        },
+      },
+
+      // 网络信息
+      network: {
+        ...this.connectionStats.networkStats,
+        connectionType: this._getConnectionType(),
+      },
+
+      // 时间戳
+      lastUpdated: currentTime,
+      lastUpdatedFormatted: new Date(currentTime).toLocaleString(),
+    };
+  }
+
+  /**
+   * 获取错误统计信息
+   * @private
+   */
+  _getErrorStats() {
+    const errorCounts = {};
+    const errorLevelCounts = {};
+
+    // 统计错误类型和级别
+    this.errorHistory.forEach((error) => {
+      errorCounts[error.type] = (errorCounts[error.type] || 0) + 1;
+      errorLevelCounts[error.level] = (errorLevelCounts[error.level] || 0) + 1;
     });
 
-    console.log("🔄 让WebRTC自动处理ICE候选收集和连接建立...");
+    return {
+      totalErrors: this.errorHistory.length,
+      errorCounts,
+      errorLevelCounts,
+      lastError: this.lastError,
+      recentErrors: this.errorHistory.slice(-3), // 最近3个错误
+    };
   }
 
   /**
-   * 获取服务器类型
+   * 获取详细的错误信息
    */
-  _getServerType(url) {
-    if (url.startsWith("stun:")) return "STUN";
-    if (url.startsWith("turn:")) return "TURN";
-    if (url.startsWith("turns:")) return "TURNS";
-    return "UNKNOWN";
+  getErrorInfo() {
+    return {
+      lastError: this.lastError,
+      errorHistory: [...this.errorHistory],
+      errorStats: this._getErrorStats(),
+      retryInfo: {
+        currentRetryCount: this.retryCount,
+        maxRetryAttempts: this.maxRetryAttempts,
+        totalReconnectAttempts: this.connectionStats.reconnectAttempts,
+      },
+    };
   }
 
   /**
-   * 提取主机名
+   * 获取实时 WebRTC 统计信息
+   * 从 PeerConnection 获取详细的统计数据
    */
-  _extractHost(url) {
-    const match = url.match(/:\/\/([^:/?]+)/);
-    if (match) return match[1];
-
-    const hostMatch = url.match(/:([^:/?]+):/);
-    if (hostMatch) return hostMatch[1];
-
-    return url.replace(/^[^:]+:/, "").split(":")[0];
-  }
-
-  /**
-   * 提取端口号
-   */
-  _extractPort(url) {
-    const match = url.match(/:(\d+)/);
-    return match ? match[1] : "3478";
-  }
-
-  /**
-   * 断开连接
-   */
-  disconnect() {
-    Logger.info("WebRTC: 断开连接");
-
-    this._clearTimers();
-    this._setState("disconnected");
-
-    // 重置重试管理器
-    this.retryManager.fullReset();
-
-    // 清理数据通道
-    this._cleanupDataChannel();
-
-    if (this.pc) {
-      this.pc.close();
-      this.pc = null;
+  async getRealTimeStats() {
+    if (!this.pc || this.pc.connectionState !== "connected") {
+      return null;
     }
 
-    // 清理缓存的ICE候选
-    this.pendingIceCandidates = [];
+    try {
+      const stats = await this.pc.getStats();
+      const parsedStats = this._parseWebRTCStats(stats);
 
-    this.connectionAttempts = 0;
-    this.connectionStats.disconnectTime = Date.now();
+      // 更新内部统计信息
+      this._updateInternalStats(parsedStats);
+
+      return parsedStats;
+    } catch (error) {
+      this.logger.error("WebRTC", "获取实时统计信息失败", error);
+      return null;
+    }
   }
 
   /**
-   * 清理连接
+   * 解析 WebRTC 统计信息
+   * @private
+   */
+  _parseWebRTCStats(stats) {
+    const parsedStats = {
+      timestamp: Date.now(),
+      connection: {},
+      inbound: {},
+      outbound: {},
+      candidate: {},
+      transport: {},
+    };
+
+    stats.forEach((report) => {
+      switch (report.type) {
+        case "inbound-rtp":
+          if (report.mediaType === "video") {
+            parsedStats.inbound.video = {
+              bytesReceived: report.bytesReceived || 0,
+              packetsReceived: report.packetsReceived || 0,
+              packetsLost: report.packetsLost || 0,
+              framesReceived: report.framesReceived || 0,
+              framesDecoded: report.framesDecoded || 0,
+              framesDropped: report.framesDropped || 0,
+              frameWidth: report.frameWidth || 0,
+              frameHeight: report.frameHeight || 0,
+              framesPerSecond: report.framesPerSecond || 0,
+              jitter: report.jitter || 0,
+              totalDecodeTime: report.totalDecodeTime || 0,
+            };
+          } else if (report.mediaType === "audio") {
+            parsedStats.inbound.audio = {
+              bytesReceived: report.bytesReceived || 0,
+              packetsReceived: report.packetsReceived || 0,
+              packetsLost: report.packetsLost || 0,
+              jitter: report.jitter || 0,
+              audioLevel: report.audioLevel || 0,
+              totalAudioEnergy: report.totalAudioEnergy || 0,
+              totalSamplesDuration: report.totalSamplesDuration || 0,
+            };
+          }
+          break;
+
+        case "outbound-rtp":
+          if (report.mediaType === "video") {
+            parsedStats.outbound.video = {
+              bytesSent: report.bytesSent || 0,
+              packetsSent: report.packetsSent || 0,
+              framesEncoded: report.framesEncoded || 0,
+              frameWidth: report.frameWidth || 0,
+              frameHeight: report.frameHeight || 0,
+              framesPerSecond: report.framesPerSecond || 0,
+              totalEncodeTime: report.totalEncodeTime || 0,
+            };
+          } else if (report.mediaType === "audio") {
+            parsedStats.outbound.audio = {
+              bytesSent: report.bytesSent || 0,
+              packetsSent: report.packetsSent || 0,
+            };
+          }
+          break;
+
+        case "candidate-pair":
+          if (report.state === "succeeded" || report.nominated) {
+            parsedStats.candidate = {
+              state: report.state,
+              nominated: report.nominated,
+              bytesReceived: report.bytesReceived || 0,
+              bytesSent: report.bytesSent || 0,
+              currentRoundTripTime: report.currentRoundTripTime || 0,
+              totalRoundTripTime: report.totalRoundTripTime || 0,
+              responsesReceived: report.responsesReceived || 0,
+              availableIncomingBitrate: report.availableIncomingBitrate || 0,
+              availableOutgoingBitrate: report.availableOutgoingBitrate || 0,
+              localCandidateId: report.localCandidateId,
+              remoteCandidateId: report.remoteCandidateId,
+            };
+          }
+          break;
+
+        case "local-candidate":
+          if (report.id === parsedStats.candidate.localCandidateId) {
+            parsedStats.transport.local = {
+              candidateType: report.candidateType,
+              protocol: report.protocol,
+              address: report.address,
+              port: report.port,
+            };
+          }
+          break;
+
+        case "remote-candidate":
+          if (report.id === parsedStats.candidate.remoteCandidateId) {
+            parsedStats.transport.remote = {
+              candidateType: report.candidateType,
+              protocol: report.protocol,
+              address: report.address,
+              port: report.port,
+            };
+          }
+          break;
+
+        case "transport":
+          parsedStats.transport.info = {
+            bytesReceived: report.bytesReceived || 0,
+            bytesSent: report.bytesSent || 0,
+            dtlsState: report.dtlsState,
+            selectedCandidatePairId: report.selectedCandidatePairId,
+          };
+          break;
+      }
+    });
+
+    return parsedStats;
+  }
+
+  /**
+   * 更新内部统计信息（优化版）
+   * @private
+   */
+  _updateInternalStats(parsedStats) {
+    const currentTime = Date.now();
+
+    // 优化：只更新关键统计信息
+    if (parsedStats.candidate) {
+      this.connectionStats.bytesReceived = parsedStats.candidate.bytesReceived || 0;
+      this.connectionStats.bytesSent = parsedStats.candidate.bytesSent || 0;
+      this.connectionStats.currentRoundTripTime = parsedStats.candidate.currentRoundTripTime || 0;
+      this.connectionStats.availableIncomingBitrate = parsedStats.candidate.availableIncomingBitrate || 0;
+      this.connectionStats.availableOutgoingBitrate = parsedStats.candidate.availableOutgoingBitrate || 0;
+
+      // 优化：减少RTT计算频率
+      if (parsedStats.candidate.currentRoundTripTime > 0 && this.connectionStats.roundTripTimeMeasurements % 5 === 0) {
+        this.connectionStats.totalRoundTripTime += parsedStats.candidate.currentRoundTripTime;
+        this.connectionStats.roundTripTimeMeasurements++;
+        this.connectionStats.roundTripTime = parsedStats.candidate.currentRoundTripTime;
+      }
+    }
+
+    // 更新视频统计
+    if (parsedStats.inbound.video) {
+      const video = parsedStats.inbound.video;
+      this.connectionStats.videoStats = {
+        framesReceived: video.framesReceived,
+        framesDecoded: video.framesDecoded,
+        framesDropped: video.framesDropped,
+        frameWidth: video.frameWidth,
+        frameHeight: video.frameHeight,
+        frameRate: video.framesPerSecond,
+        bitrate: this._calculateBitrate(video.bytesReceived, currentTime),
+      };
+
+      this.connectionStats.packetsReceived += video.packetsReceived || 0;
+      this.connectionStats.packetsLost += video.packetsLost || 0;
+      this.connectionStats.jitter = video.jitter || 0;
+    }
+
+    // 更新音频统计
+    if (parsedStats.inbound.audio) {
+      const audio = parsedStats.inbound.audio;
+      this.connectionStats.audioStats = {
+        samplesReceived: audio.packetsReceived || 0,
+        samplesDecoded: audio.packetsReceived || 0, // 近似值
+        audioLevel: audio.audioLevel || 0,
+        bitrate: this._calculateBitrate(audio.bytesReceived, currentTime),
+      };
+    }
+
+    // 更新网络统计
+    if (parsedStats.transport) {
+      this.connectionStats.networkStats = {
+        candidatePairs: 1, // 当前活跃的候选对
+        selectedCandidatePair: parsedStats.candidate,
+        localCandidateType:
+          parsedStats.transport.local?.candidateType || "unknown",
+        remoteCandidateType:
+          parsedStats.transport.remote?.candidateType || "unknown",
+        transportType: parsedStats.transport.local?.protocol || "unknown",
+      };
+    }
+
+    // 更新连接质量
+    this.connectionStats.connectionQuality = this._calculateConnectionQuality();
+    this.connectionStats.qualityScore = this._calculateQualityScore();
+
+    this.lastStatsTimestamp = currentTime;
+  }
+
+  /**
+   * 计算比特率（优化版）
+   * @private
+   */
+  _calculateBitrate(bytes, currentTime) {
+    if (!this.lastStatsTimestamp || this.lastStatsTimestamp === 0) {
+      this._lastBytes = bytes;
+      return 0;
+    }
+
+    const timeDiff = (currentTime - this.lastStatsTimestamp) / 1000;
+    if (timeDiff <= 0) return 0;
+
+    const bytesDiff = bytes - (this._lastBytes || 0);
+    this._lastBytes = bytes;
+
+    // 避免负值和异常大的值
+    return Math.max(0, Math.min((bytesDiff * 8) / timeDiff, 1000000000)); // 限制最大1Gbps
+  }
+
+  /**
+   * 计算连接质量
+   * @private
+   */
+  _calculateConnectionQuality() {
+    const rtt = this.connectionStats.currentRoundTripTime * 1000; // 转换为毫秒
+    const packetLossRate =
+      this.connectionStats.packetsSent > 0
+        ? (this.connectionStats.packetsLost /
+            this.connectionStats.packetsSent) *
+          100
+        : 0;
+    const jitter = this.connectionStats.jitter * 1000; // 转换为毫秒
+
+    // 基于 RTT、丢包率和抖动评估质量
+    if (rtt < 50 && packetLossRate < 0.5 && jitter < 10) {
+      return "excellent";
+    } else if (rtt < 100 && packetLossRate < 1 && jitter < 20) {
+      return "good";
+    } else if (rtt < 200 && packetLossRate < 3 && jitter < 50) {
+      return "fair";
+    } else if (rtt > 0 || packetLossRate > 0 || jitter > 0) {
+      return "poor";
+    } else {
+      return "unknown";
+    }
+  }
+
+  /**
+   * 计算质量分数 (0-100)
+   * @private
+   */
+  _calculateQualityScore() {
+    const rtt = this.connectionStats.currentRoundTripTime * 1000;
+    const packetLossRate =
+      this.connectionStats.packetsSent > 0
+        ? (this.connectionStats.packetsLost /
+            this.connectionStats.packetsSent) *
+          100
+        : 0;
+    const jitter = this.connectionStats.jitter * 1000;
+
+    // RTT 分数 (0-40分)
+    let rttScore = 40;
+    if (rtt > 0) {
+      rttScore = Math.max(0, 40 - rtt / 10);
+    }
+
+    // 丢包率分数 (0-40分)
+    let lossScore = Math.max(0, 40 - packetLossRate * 10);
+
+    // 抖动分数 (0-20分)
+    let jitterScore = 20;
+    if (jitter > 0) {
+      jitterScore = Math.max(0, 20 - jitter / 5);
+    }
+
+    return Math.round(rttScore + lossScore + jitterScore);
+  }
+
+  /**
+   * 评估连接质量
+   * @private
+   */
+  _assessConnectionQuality() {
+    const quality = this.connectionStats.connectionQuality;
+    const score = this.connectionStats.qualityScore;
+    const rtt = this.connectionStats.currentRoundTripTime * 1000;
+    const packetLossRate =
+      this.connectionStats.packetsSent > 0
+        ? (this.connectionStats.packetsLost /
+            this.connectionStats.packetsSent) *
+          100
+        : 0;
+
+    let recommendation = "";
+    let issues = [];
+
+    switch (quality) {
+      case "excellent":
+        recommendation = "连接质量优秀，体验流畅";
+        break;
+      case "good":
+        recommendation = "连接质量良好，体验稳定";
+        break;
+      case "fair":
+        recommendation = "连接质量一般，可能有轻微延迟";
+        if (rtt > 100) issues.push("网络延迟较高");
+        if (packetLossRate > 1) issues.push("存在少量丢包");
+        break;
+      case "poor":
+        recommendation = "连接质量较差，建议检查网络";
+        if (rtt > 200) issues.push("网络延迟过高");
+        if (packetLossRate > 3) issues.push("丢包率过高");
+        if (this.connectionStats.jitter * 1000 > 50)
+          issues.push("网络抖动严重");
+        break;
+      default:
+        recommendation = "连接质量未知，正在评估中";
+    }
+
+    return {
+      quality: quality,
+      score: score,
+      recommendation: recommendation,
+      issues: issues,
+      metrics: {
+        rtt: Math.round(rtt),
+        packetLoss: Math.round(packetLossRate * 100) / 100,
+        jitter: Math.round(this.connectionStats.jitter * 1000),
+      },
+    };
+  }
+
+  /**
+   * 清除错误历史记录
+   */
+  clearErrorHistory() {
+    this.errorHistory = [];
+    this.lastError = null;
+    this.logger.info("WebRTC", "错误历史记录已清除");
+  }
+
+  /**
+   * 优化连接建立时间
+   * @private
+   */
+  _optimizeConnectionEstablishment() {
+    if (!this.pc) return;
+
+    // 优化：预先收集ICE候选
+    this.pc.addEventListener('icegatheringstatechange', () => {
+      if (this.pc.iceGatheringState === 'complete') {
+        this.logger.debug("WebRTC", "ICE候选收集完成，连接优化");
+      }
+    });
+
+    // 优化：设置更短的ICE超时
+    if (this.pc.setConfiguration) {
+      this.pc.setConfiguration({
+        ...this.pc.getConfiguration(),
+        iceTransportPolicy: 'all',
+        iceCandidatePoolSize: 4
+      });
+    }
+  }
+
+  /**
+   * 完全清理资源（优化：防止内存泄漏）
    */
   async cleanup() {
-    this.disconnect();
+    try {
+      this.logger.info("WebRTC", "开始清理 WebRTC 资源");
 
-    // 完全重置重试管理器
-    this.retryManager.fullReset();
+      // 停止统计收集
+      if (this.statsCollectionTimer) {
+        clearInterval(this.statsCollectionTimer);
+        this.statsCollectionTimer = null;
+      }
 
-    if (this.videoElement) {
-      this.videoElement.srcObject = null;
+      // 清理定时器
+      if (this.connectionTimer) {
+        clearTimeout(this.connectionTimer);
+        this.connectionTimer = null;
+      }
+
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+
+      // 关闭数据通道
+      if (this.sendChannel) {
+        this.sendChannel.close();
+        this.sendChannel = null;
+      }
+
+      if (this.receiveChannel) {
+        this.receiveChannel.close();
+        this.receiveChannel = null;
+      }
+
+      // 清理媒体元素
+      this._cleanupMediaElementEvents();
+      if (this.remoteStream) {
+        this.remoteStream.getTracks().forEach(track => track.stop());
+        this.remoteStream = null;
+      }
+
+      // 关闭 PeerConnection
+      if (this.pc) {
+        this.pc.close();
+        this.pc = null;
+      }
+
+      // 清理状态
+      this.connectionState = "disconnected";
+      this.iceConnectionState = "closed";
+      this.signalingState = "closed";
+      this.connectionEstablished = false;
+      this.retryCount = 0;
+
+      // 清理错误历史
+      this.clearErrorHistory();
+
+      this.logger.info("WebRTC", "WebRTC 资源清理完成");
+    } catch (error) {
+      this.logger.error("WebRTC", "清理资源时出错", error);
     }
-    if (this.audioElement) {
-      this.audioElement.srcObject = null;
-    }
-
-    // 确保清理缓存的ICE候选
-    this.pendingIceCandidates = [];
-
-    this.eventBus?.emit("webrtc:cleaned-up");
   }
 
   /**
-   * 重置WebRTC连接
+   * 获取用户友好的错误信息和恢复建议
    */
-  async _resetConnection() {
-    console.log("🔄 重置WebRTC连接");
-
-    // 清理定时器
-    this._clearTimers();
-
-    // 关闭现有的PeerConnection
-    if (this.pc) {
-      this.pc.close();
-      this.pc = null;
+  getUserFriendlyErrorInfo() {
+    if (!this.lastError) {
+      return {
+        hasError: false,
+        message: "连接正常",
+        suggestion: null,
+      };
     }
 
-    // 清理连接状态
-    this._clearConnectionState();
+    const error = this.lastError;
+    let suggestion = "";
 
-    console.log("✅ WebRTC连接重置完成");
+    switch (error.type) {
+      case this.ERROR_TYPES.NETWORK:
+        suggestion = "请检查网络连接，系统会自动重试";
+        break;
+      case this.ERROR_TYPES.CONNECTION:
+        suggestion = "连接出现问题，正在尝试重新连接";
+        break;
+      case this.ERROR_TYPES.SIGNALING:
+        suggestion = "信令服务器连接问题，请稍后重试";
+        break;
+      case this.ERROR_TYPES.CONFIG:
+        suggestion = "配置错误，请联系管理员检查设置";
+        break;
+      case this.ERROR_TYPES.TIMEOUT:
+        suggestion = "连接超时，请检查网络状况";
+        break;
+      case this.ERROR_TYPES.MEDIA:
+        suggestion = "媒体处理问题，可能影响音视频质量";
+        break;
+      default:
+        suggestion = "出现未知问题，正在尝试恢复";
+    }
+
+    // 如果正在重试，添加重试信息
+    if (this.retryCount > 0 && this.retryCount < this.maxRetryAttempts) {
+      suggestion += ` (重试 ${this.retryCount}/${this.maxRetryAttempts})`;
+    } else if (this.retryCount >= this.maxRetryAttempts) {
+      suggestion = "多次重试失败，请刷新页面或联系技术支持";
+    }
+
+    return {
+      hasError: true,
+      message: error.userMessage,
+      suggestion: suggestion,
+      errorType: error.type,
+      errorLevel: error.level,
+      canRetry: error.shouldRetry && this.retryCount < this.maxRetryAttempts,
+      retryInfo: {
+        currentRetry: this.retryCount,
+        maxRetries: this.maxRetryAttempts,
+      },
+    };
   }
 
   /**
-   * 使用状态验证器重置WebRTC连接
+   * 手动触发重试（用于用户手动重试）
    */
-  async _resetConnectionWithValidator() {
-    console.log("🔄 使用状态验证器重置WebRTC连接");
-
-    // 记录重置前的状态
-    if (this.pc) {
-      const diagnostic = ConnectionStateValidator.getDiagnosticInfo(this.pc);
-      console.log("📊 重置前状态诊断:", diagnostic);
+  async manualRetry() {
+    if (this.connectionState === "connected") {
+      this.logger.warn("WebRTC", "连接已建立，无需重试");
+      return false;
     }
 
-    // 执行标准重置流程
-    await this._resetConnection();
+    if (this.connectionState === "connecting") {
+      this.logger.warn("WebRTC", "正在连接中，请等待");
+      return false;
+    }
 
-    console.log("✅ 基于状态验证的WebRTC连接重置完成");
-  }
+    this.logger.info("WebRTC", "用户手动触发重试", {
+      currentState: this.connectionState,
+      retryCount: this.retryCount,
+    });
 
-  /**
-   * 重置并重新初始化WebRTC连接
-   * 完整的连接重置和重新初始化流程，集成RetryManager状态管理
-   */
-  async _resetAndReinitializeConnection() {
-    console.log("🔄 开始重置并重新初始化WebRTC连接");
+    // 重置重试计数，允许手动重试
+    const originalRetryCount = this.retryCount;
+    this.retryCount = Math.max(0, this.retryCount - 1);
 
     try {
-      // 1. 重置RetryManager状态（但保持连接建立状态）
-      const wasConnectionEstablished = this.retryManager.connectionEstablished;
-      this.retryManager.reset(); // 重置重试计数，但保持连接类型
+      await this.connect();
+      return true;
+    } catch (error) {
+      this.retryCount = originalRetryCount;
+      this.logger.error("WebRTC", "手动重试失败", error);
+      return false;
+    }
+  }
 
-      // 2. 执行连接重置
-      await this._resetConnection();
+  /**
+   * 发送数据通道消息（增强版）
+   * 支持多种消息类型和格式，保持与现有协议的兼容性
+   */
+  sendDataChannelMessage(message, options = {}) {
+    const {
+      channel = "send", // 'send' 或 'receive'，指定使用哪个通道
+      validateMessage = true, // 是否验证消息格式
+      maxRetries = 3, // 最大重试次数
+      retryDelay = 100, // 重试延迟（毫秒）
+      timeout = 5000, // 发送超时（毫秒）
+    } = options;
 
-      // 3. 重新创建PeerConnection
-      await this._createPeerConnection();
+    // 选择数据通道
+    const targetChannel =
+      channel === "receive" ? this.receiveChannel : this.sendChannel;
 
-      // 4. 恢复RetryManager的连接建立状态（如果之前已建立）
-      if (wasConnectionEstablished) {
-        this.retryManager.connectionEstablished = true;
-        this.retryManager.retryType = "network-interruption";
-        console.log("🔗 恢复网络中断重试模式");
-      }
-
-      console.log("✅ WebRTC连接重置和重新初始化完成");
-      
-      this.eventBus?.emit("webrtc:connection-reinitialized", {
-        retryStatus: this.retryManager.getRetryStatus(),
-        wasConnectionEstablished
+    if (!targetChannel || targetChannel.readyState !== "open") {
+      this.logger.warn("WebRTC", "数据通道未就绪", {
+        channel: channel,
+        channelState: targetChannel?.readyState || "null",
+        sendChannelState: this.sendChannel?.readyState || "null",
+        receiveChannelState: this.receiveChannel?.readyState || "null",
       });
 
+      // 触发数据通道未就绪事件
+      this.eventBus?.emit("webrtc:datachannel-not-ready", {
+        channel: channel,
+        channelState: targetChannel?.readyState || "null",
+        message: message,
+      });
+
+      return false;
+    }
+
+    // 验证消息格式
+    if (validateMessage && !this._validateDataChannelMessage(message)) {
+      this.logger.error("WebRTC", "数据通道消息格式无效", { message });
+      return false;
+    }
+
+    // 准备发送的数据
+    let messageData;
+    try {
+      // 支持多种消息格式
+      if (typeof message === "string") {
+        messageData = message;
+      } else if (typeof message === "object") {
+        // 保持与现有协议的兼容性
+        messageData = JSON.stringify(message);
+      } else {
+        messageData = String(message);
+      }
     } catch (error) {
-      console.error("❌ 重置和重新初始化失败:", error);
-      
-      // 如果重新初始化失败，完全重置RetryManager
-      this.retryManager.fullReset();
-      
-      throw new Error(`连接重新初始化失败: ${error.message}`);
+      this.logger.error("WebRTC", "消息序列化失败", error);
+      return false;
     }
+
+    // 发送消息（带重试机制）
+    return this._sendDataChannelMessageWithRetry(
+      targetChannel,
+      messageData,
+      message,
+      maxRetries,
+      retryDelay,
+      timeout
+    );
   }
 
   /**
-   * 清理连接状态
+   * 带重试机制的数据通道消息发送
+   * @private
    */
-  _clearConnectionState() {
-    // 清理ICE候选缓存
-    this.pendingIceCandidates = [];
+  _sendDataChannelMessageWithRetry(
+    channel,
+    messageData,
+    originalMessage,
+    maxRetries,
+    retryDelay,
+    timeout
+  ) {
+    let retryCount = 0;
 
-    // 重置状态
-    this.connectionState = "disconnected";
-    this.iceConnectionState = "closed";
-    this.signalingState = "closed";
-    this._previousIceState = null;
-
-    // 清理数据通道
-    this._cleanupDataChannel();
-
-    // 清理媒体流
-    if (this.remoteStream) {
-      this.remoteStream.getTracks().forEach(track => track.stop());
-      this.remoteStream = null;
-    }
-
-    console.log("🧹 连接状态已清理");
-  }
-
-  /**
-   * 清理数据通道
-   */
-  _cleanupDataChannel() {
-    // 清理发送通道
-    if (this._send_channel) {
+    const attemptSend = () => {
       try {
-        if (this._send_channel.readyState === "open") {
-          this._send_channel.close();
+        // 检查通道状态
+        if (channel.readyState !== "open") {
+          throw new Error(`数据通道状态不正确: ${channel.readyState}`);
         }
-      } catch (error) {
-        console.warn("⚠️ 关闭发送数据通道时出错:", error);
-      }
-      this._send_channel = null;
-    }
 
-    // 清理接收通道
-    if (this._receive_channel) {
-      try {
-        if (this._receive_channel.readyState === "open") {
-          this._receive_channel.close();
-        }
-      } catch (error) {
-        console.warn("⚠️ 关闭接收数据通道时出错:", error);
-      }
-      this._receive_channel = null;
-    }
+        // 发送消息
+        channel.send(messageData);
 
-    console.log("📡 数据通道已清理");
-  }
+        // 更新统计信息
+        this._updateDataChannelStats(
+          "sent",
+          messageData.length,
+          originalMessage.type || "unknown"
+        );
 
-  /**
-   * 创建PeerConnection
-   */
-  async _createPeerConnection() {
-    if (this.pc) {
-      this.pc.close();
-    }
-
-    const config = {
-      iceServers: this.iceServers,
-      iceTransportPolicy: "all",
-      bundlePolicy: "balanced",
-      rtcpMuxPolicy: "require",
-    };
-
-    console.log("🔧 创建PeerConnection，使用配置:", config);
-
-    this.pc = new RTCPeerConnection(config);
-    this._setupPeerConnectionEvents();
-
-    // 验证新创建的PeerConnection状态
-    const validation = ConnectionStateValidator.validatePeerConnectionState(this.pc);
-    if (validation.valid) {
-      console.log("✅ PeerConnection创建成功，状态验证通过");
-      ConnectionStateValidator.logStateChange(this.pc, "createPeerConnection");
-    } else {
-      console.error("❌ PeerConnection创建后状态验证失败:", validation.reason);
-      throw new Error(`PeerConnection创建失败: ${validation.reason}`);
-    }
-
-    Logger.info("WebRTC: PeerConnection已创建");
-  }
-
-  /**
-   * 设置PeerConnection事件
-   */
-  _setupPeerConnectionEvents() {
-    // ICE候选事件 - 增强版本
-    this.pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        const candidate = event.candidate;
-        console.log("🎯 收到本地ICE候选:", {
-          type: candidate.type,
-          protocol: candidate.protocol,
-          address: candidate.address || "hidden",
-          port: candidate.port,
-          foundation: candidate.foundation,
-          priority: candidate.priority,
+        this.logger.debug("WebRTC", "数据通道消息已发送", {
+          message: originalMessage,
+          channel: channel.label,
+          dataSize: messageData.length,
+          retryCount: retryCount,
         });
 
-        // 如果强制使用TURN，过滤非relay候选
-        if (this._shouldForceTurn() && !this._isRelayCandidate(candidate)) {
-          console.log("🚫 强制使用TURN，跳过发送非relay候选");
-          this.eventBus?.emit("webrtc:local-ice-candidate-filtered", { candidate });
-          return;
+        // 触发消息发送成功事件
+        this.eventBus?.emit("webrtc:datachannel-message-sent", {
+          channel: channel.label,
+          message: originalMessage,
+          dataSize: messageData.length,
+          retryCount: retryCount,
+          timestamp: Date.now(),
+        });
+
+        return true;
+      } catch (error) {
+        retryCount++;
+
+        this.logger.warn(
+          "WebRTC",
+          `数据通道消息发送失败 (尝试 ${retryCount}/${maxRetries + 1})`,
+          {
+            error: error.message,
+            channel: channel.label,
+            retryCount: retryCount,
+          }
+        );
+
+        // 如果还有重试机会且通道可能恢复
+        if (
+          retryCount <= maxRetries &&
+          this._shouldRetryDataChannelSend(error)
+        ) {
+          // 延迟后重试
+          setTimeout(() => {
+            if (channel.readyState === "open") {
+              attemptSend();
+            } else {
+              this._handleDataChannelSendFailure(
+                originalMessage,
+                error,
+                retryCount
+              );
+            }
+          }, retryDelay * retryCount); // 递增延迟
+
+          return false; // 表示正在重试
+        } else {
+          // 重试次数用完或不应重试
+          this._handleDataChannelSendFailure(
+            originalMessage,
+            error,
+            retryCount
+          );
+          return false;
         }
-
-        Logger.debug("WebRTC: 发送ICE候选到信令服务器");
-        this.signalingManager
-          ?.send("ice-candidate", candidate)
-          .then(() => {
-            console.log("📤 ICE候选发送成功");
-            this.eventBus?.emit("webrtc:local-ice-candidate-sent", { candidate });
-          })
-          .catch((error) => {
-            console.error("❌ 发送ICE候选失败:", error);
-            this.eventBus?.emit("webrtc:local-ice-candidate-send-error", { error, candidate });
-          });
-      } else {
-        console.log("🏁 ICE候选收集完成");
-        this._handleIceCandidateGatheringComplete();
       }
     };
 
-    // ICE连接状态变化 - 增强版本
-    this.pc.oniceconnectionstatechange = () => {
-      const state = this.pc.iceConnectionState;
-      this.iceConnectionState = state;
-      console.log(`🔗 ICE连接状态变化: ${state}`);
+    return attemptSend();
+  }
 
-      // 更新连接统计
-      this._updateIceConnectionStats(state);
+  /**
+   * 判断是否应该重试数据通道发送
+   * @private
+   */
+  _shouldRetryDataChannelSend(error) {
+    const retryableErrors = [
+      "InvalidStateError",
+      "NetworkError",
+      "OperationError",
+    ];
 
-      switch (state) {
-        case "new":
-          console.log("🆕 ICE连接初始化");
-          this._handleIceStateNew();
-          break;
-        case "checking":
-          console.log("🔍 ICE连接检查中...");
-          this._handleIceStateChecking();
-          break;
-        case "connected":
-          console.log("✅ ICE连接已建立");
-          this._handleIceStateConnected();
-          break;
-        case "completed":
-          console.log("🎉 ICE连接完成");
-          this._handleIceStateCompleted();
-          break;
-        case "failed":
-          console.error("❌ ICE连接失败");
-          this._handleIceStateFailed();
-          break;
-        case "disconnected":
-          console.warn("⚠️ ICE连接断开");
-          this._handleIceStateDisconnected();
-          break;
-        case "closed":
-          console.log("🔒 ICE连接已关闭");
-          this._handleIceStateClosed();
-          break;
+    return retryableErrors.some(
+      (errorType) =>
+        error.name === errorType || error.message.includes(errorType)
+    );
+  }
+
+  /**
+   * 处理数据通道发送失败
+   * @private
+   */
+  _handleDataChannelSendFailure(message, error, retryCount) {
+    this.logger.error("WebRTC", "数据通道消息发送最终失败", {
+      message: message,
+      error: error.message,
+      retryCount: retryCount,
+    });
+
+    // 更新错误统计
+    this._updateDataChannelStats("failed", 0, message.type || "unknown");
+
+    // 触发发送失败事件
+    this.eventBus?.emit("webrtc:datachannel-message-failed", {
+      message: message,
+      error: error,
+      retryCount: retryCount,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * 验证数据通道消息格式（简化版）
+   * @private
+   */
+  _validateDataChannelMessage(message) {
+    if (message === null || message === undefined) return false;
+    
+    // 简化验证：只检查基本类型和大小
+    if (typeof message === "string") {
+      return message.length > 0 && message.length <= 32768; // 减少到32KB
+    }
+    
+    if (typeof message === "object") {
+      try {
+        const serialized = JSON.stringify(message);
+        return serialized.length <= 32768; // 减少到32KB
+      } catch {
+        return false;
       }
+    }
+    
+    return String(message).length <= 32768;
+  }
 
-      this.eventBus?.emit("webrtc:ice-connection-state-change", { 
-        state, 
-        timestamp: Date.now(),
-        previousState: this._previousIceState 
-      });
-      
-      this._previousIceState = state;
-    };
+  /**
+   * 更新数据通道统计信息
+   * @private
+   */
+  _updateDataChannelStats(operation, dataSize, messageType) {
+    if (!this.connectionStats.dataChannelStats) {
+      this.connectionStats.dataChannelStats = {
+        messagesSent: 0,
+        messagesReceived: 0,
+        messagesFailed: 0,
+        bytesSent: 0,
+        bytesReceived: 0,
+        messageTypes: {},
+        lastActivity: null,
+      };
+    }
 
-    // 连接状态变化
-    this.pc.onconnectionstatechange = () => {
-      const state = this.pc.connectionState;
-      console.log(`📡 PeerConnection状态变化: ${state}`);
-      this._handleConnectionStateChange(state);
-    };
+    const stats = this.connectionStats.dataChannelStats;
+    const now = Date.now();
 
-    // 信令状态变化
-    this.pc.onsignalingstatechange = () => {
-      const previousState = this.signalingState;
-      this.signalingState = this.pc.signalingState;
-      console.log(`📋 信令状态变化: ${previousState} -> ${this.signalingState}`);
-      
-      // 使用状态验证器记录状态变化
-      ConnectionStateValidator.logStateChange(this.pc, "signalingStateChange", {
-        previousState,
-        newState: this.signalingState
-      });
+    switch (operation) {
+      case "sent":
+        stats.messagesSent++;
+        stats.bytesSent += dataSize;
+        break;
+      case "received":
+        stats.messagesReceived++;
+        stats.bytesReceived += dataSize;
+        break;
+      case "failed":
+        stats.messagesFailed++;
+        break;
+    }
 
-      // 检查状态是否需要重置
-      const resetCheck = ConnectionStateValidator.checkIfResetNeeded(this.pc);
-      if (resetCheck.needsReset) {
-        console.warn(`⚠️ 信令状态变化后检测到需要重置: ${resetCheck.reason}`);
-        this.eventBus?.emit("webrtc:state-reset-needed", resetCheck);
+    // 更新消息类型统计
+    if (messageType) {
+      if (!stats.messageTypes[messageType]) {
+        stats.messageTypes[messageType] = { sent: 0, received: 0, failed: 0 };
       }
+      stats.messageTypes[messageType][operation]++;
+    }
 
-      this.eventBus?.emit("webrtc:signaling-state-change", {
-        state: this.signalingState,
-        previousState,
-        validation: ConnectionStateValidator.validatePeerConnectionState(this.pc)
-      });
-    };
+    stats.lastActivity = now;
+  }
 
-    // 媒体轨道接收
-    this.pc.ontrack = (event) => {
-      console.log("🎬 接收到媒体轨道:", event.track.kind);
-      this._handleRemoteTrack(event);
-    };
+  /**
+   * 发送 SDP Offer 到信令服务器
+   * @private
+   */
+  _sendOffer(offer) {
+    if (!this.signalingManager) {
+      throw new Error("信令管理器未设置");
+    }
 
-    // 数据通道事件处理
-    this.pc.ondatachannel = (event) => {
-      console.log("📡 接收到数据通道:", event.channel.label);
-      this._onPeerDataChannel(event);
+    this.logger.info("WebRTC", "发送 SDP Offer", {
+      type: offer.type,
+      sdpLength: offer.sdp.length,
+    });
+
+    // 发送 offer 消息，保持与服务器端协议兼容
+    return this.signalingManager.send("offer", {
+      type: offer.type,
+      sdp: offer.sdp,
+    });
+  }
+
+  /**
+   * 发送 SDP Answer 到信令服务器
+   * @private
+   */
+  _sendAnswer(answer) {
+    if (!this.signalingManager) {
+      throw new Error("信令管理器未设置");
+    }
+
+    this.logger.info("WebRTC", "发送 SDP Answer", {
+      type: answer.type,
+      sdpLength: answer.sdp.length,
+    });
+
+    // 发送 answer 消息，保持与服务器端协议兼容
+    return this.signalingManager.send("answer", {
+      type: answer.type,
+      sdp: answer.sdp,
+    });
+  }
+
+  /**
+   * 发送 ICE 候选到信令服务器
+   * @private
+   */
+  _sendIceCandidate(candidate) {
+    if (!this.signalingManager) {
+      throw new Error("信令管理器未设置");
+    }
+
+    this.logger.debug("WebRTC", "发送 ICE 候选", {
+      candidate: candidate.candidate,
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      sdpMid: candidate.sdpMid,
+    });
+
+    // 发送 ICE 候选消息，保持与服务器端协议兼容
+    return this.signalingManager.send("ice-candidate", {
+      candidate: candidate.candidate,
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      sdpMid: candidate.sdpMid,
+    });
+  }
+
+  /**
+   * 请求服务器创建 Offer
+   * @private
+   */
+  _requestOffer() {
+    if (!this.signalingManager) {
+      throw new Error("信令管理器未设置");
+    }
+
+    this.logger.info("WebRTC", "请求服务器创建 Offer");
+
+    // 发送 request-offer 消息
+    return this.signalingManager.send("request-offer", {
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * 设置连接状态（优化版）
+   * @private
+   */
+  _setState(newState) {
+    if (this.connectionState === newState) return; // 避免重复设置
+    
+    const previousState = this.connectionState;
+    this.connectionState = newState;
+
+    this.logger.logStateChange("WebRTC", previousState, newState, {
+      timestamp: Date.now(),
+    });
+
+    // 优化：只在状态真正改变时触发事件
+    this.eventBus?.emit("webrtc:state-change", {
+      previousState,
+      newState,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * 获取公共配置信息
+   * @private
+   */
+  _getPublicConfig() {
+    return {
+      connectionTimeout: this.connectionTimeout,
+      maxRetryAttempts: this.maxRetryAttempts,
+      retryDelay: this.retryDelay,
+      iceServersCount: this.iceServers.length,
     };
   }
 
   /**
-   * 设置信令事件
-   * 集成完整的信令和WebRTC事件处理，支持完整的握手流程
+   * 格式化持续时间
+   * @private
+   */
+  _formatDuration(milliseconds) {
+    if (milliseconds < 1000) {
+      return `${milliseconds}ms`;
+    }
+
+    const seconds = Math.floor(milliseconds / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+
+    if (hours > 0) {
+      return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds % 60}s`;
+    } else {
+      return `${seconds}s`;
+    }
+  }
+
+  /**
+   * 格式化字节数
+   * @private
+   */
+  _formatBytes(bytes) {
+    if (bytes === 0) return "0 B";
+
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  }
+
+  /**
+   * 格式化比特率
+   * @private
+   */
+  _formatBitrate(bps) {
+    if (bps === 0) return "0 bps";
+
+    const k = 1000;
+    const sizes = ["bps", "Kbps", "Mbps", "Gbps"];
+    const i = Math.floor(Math.log(bps) / Math.log(k));
+
+    return parseFloat((bps / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  }
+
+  /**
+   * 获取连接类型
+   * @private
+   */
+  _getConnectionType() {
+    const local = this.connectionStats.networkStats.localCandidateType;
+    const remote = this.connectionStats.networkStats.remoteCandidateType;
+    const transport = this.connectionStats.networkStats.transportType;
+
+    if (local === "relay" || remote === "relay") {
+      return `TURN (${transport})`;
+    } else if (local === "srflx" || remote === "srflx") {
+      return `STUN (${transport})`;
+    } else if (local === "host" && remote === "host") {
+      return `Direct (${transport})`;
+    } else {
+      return `${local}-${remote} (${transport})`;
+    }
+  }
+
+  /**
+   * 设置信令事件处理
+   * @private
    */
   _setupSignalingEvents() {
-    if (!this.signalingManager) return;
+    if (!this.signalingManager || !this.eventBus) {
+      return;
+    }
 
-    // 信令连接建立后，只是记录状态，不自动请求offer
-    this.eventBus?.on("signaling:connected", () => {
-      console.log("🔗 信令连接已建立，等待用户开始捕获...");
+    // 信令连接建立
+    this.eventBus.on("signaling:connected", () => {
+      this.logger.info("WebRTC", "信令连接已建立");
     });
 
-    // 接收欢迎消息
-    this.eventBus?.on("signaling:welcome", (data) => {
-      console.log("👋 收到服务器欢迎消息:", data);
+    // 信令断开
+    this.eventBus.on("signaling:disconnected", () => {
+      this.logger.warn("WebRTC", "信令连接断开");
+      this._handleSignalingDisconnected();
     });
 
-    // 处理HELLO响应 - 确认服务器注册成功
-    this.eventBus?.on("signaling:hello", () => {
-      console.log("👋 收到HELLO响应，服务器注册成功");
-      this.eventBus?.emit("webrtc:signaling-registered");
-    });
-
-    // 处理服务器注册确认
-    this.eventBus?.on("signaling:registered", () => {
-      console.log("✅ 信令服务器注册确认");
-      this.eventBus?.emit("webrtc:signaling-ready");
-    });
-
-    // 接收offer
-    this.eventBus?.on("signaling:offer", async (data) => {
+    // 接收 SDP 消息（统一处理 offer 和 answer）
+    this.eventBus.on("signaling:sdp", async (sdp) => {
       try {
-        console.log("📥 收到signaling:offer事件");
-        await this.handleOffer(data);
+        if (sdp.type === "offer") {
+          await this._handleOffer(sdp);
+        } else if (sdp.type === "answer") {
+          await this._handleAnswer(sdp);
+        } else {
+          this.logger.warn("WebRTC", "未知的 SDP 类型", { type: sdp.type });
+        }
       } catch (error) {
-        Logger.error("WebRTC: 处理offer失败", error);
+        this.logger.error("WebRTC", "处理 SDP 失败", error);
         this._handleConnectionError(error);
       }
     });
 
-    // 接收SDP事件 - 增强的SDP事件处理，支持完整的SDP握手
-    this.eventBus?.on("signaling:sdp", async (sdp) => {
+    // 接收 ICE 候选
+    this.eventBus.on("signaling:ice-candidate", async (candidate) => {
       try {
-        console.log("📥 收到signaling:sdp事件，SDP类型:", sdp.type);
-        await this._onSDP(sdp);
+        await this._handleIceCandidate(candidate);
       } catch (error) {
-        Logger.error("WebRTC: 处理SDP失败", error);
-        this._handleConnectionError(error);
-      }
-    });
-
-    // 接收ICE候选 - 使用增强的_onSignalingICE方法
-    this.eventBus?.on("signaling:ice-candidate", async (data) => {
-      try {
-        console.log("📥 收到signaling:ice-candidate事件");
-        await this._onSignalingICE(data);
-      } catch (error) {
-        Logger.error("WebRTC: 处理ICE候选失败", error);
-      }
-    });
-
-    // 处理服务器错误 - 增强的错误处理
-    this.eventBus?.on("signaling:server-error", (errorData) => {
-      console.error("❌ 信令服务器错误:", errorData);
-      
-      // 如果是严重错误，触发连接重置
-      if (errorData && errorData.critical) {
-        console.warn("⚠️ 检测到严重服务器错误，重置WebRTC连接");
-        this._handleConnectionError(new Error(`严重服务器错误: ${errorData.message}`));
-      } else {
-        // 非严重错误，只记录但不中断连接
-        this.eventBus?.emit("webrtc:signaling-warning", errorData);
+        this.logger.error("WebRTC", "处理 ICE 候选失败", error);
       }
     });
 
     // 处理信令错误
-    this.eventBus?.on("signaling:error", (error) => {
-      console.error("❌ 信令错误:", error);
-      // 只有在WebRTC连接过程中才处理信令错误
-      if (this.connectionState === "connecting") {
-        this._handleConnectionError(
-          new Error(`信令错误: ${error.message || error}`)
+    this.eventBus.on("signaling:error", (errorData) => {
+      this.logger.error("WebRTC", "信令错误", errorData);
+      this._handleConnectionError(new Error(errorData.message || "信令错误"));
+    });
+
+    // 处理服务器错误
+    this.eventBus.on("signaling:server-error", (errorData) => {
+      this.logger.error("WebRTC", "服务器错误", errorData);
+
+      const serverError = new Error(errorData.message || "服务器错误");
+      serverError.code = "SERVER_ERROR";
+      serverError.details = errorData;
+
+      if (errorData.critical) {
+        this._handleConnectionError(serverError, {
+          isServerError: true,
+          isCritical: true,
+        });
+      } else {
+        // 非关键服务器错误，记录但不中断连接
+        this._recordError(
+          this._classifyError(serverError, {
+            isServerError: true,
+            isCritical: false,
+          })
         );
       }
     });
 
-    // 处理信令断开
-    this.eventBus?.on("signaling:disconnected", () => {
-      console.warn("⚠️ 信令连接断开");
-      // 只有在WebRTC连接过程中才处理信令断开
-      if (
-        this.connectionState === "connecting" ||
-        this.connectionState === "connected"
-      ) {
-        this._handleConnectionError(new Error("信令连接断开"));
+    // 处理欢迎消息
+    this.eventBus.on("signaling:welcome", (data) => {
+      this.logger.info("WebRTC", "收到服务器欢迎消息", data);
+      // 可以在这里触发自动连接或其他初始化逻辑
+    });
+
+    this.logger.info("WebRTC", "信令事件处理已设置");
+  }
+
+  /**
+   * 处理信令断开（增强版）
+   * @private
+   */
+  _handleSignalingDisconnected() {
+    this.logger.warn("WebRTC", "信令连接断开", {
+      connectionEstablished: this.connectionEstablished,
+      retryCount: this.retryCount,
+      maxRetries: this.maxRetryAttempts,
+      iceConnectionState: this.iceConnectionState,
+    });
+
+    // 创建信令断开错误
+    const signalingError = new Error("信令服务器连接断开");
+    signalingError.code = "SIGNALING_DISCONNECTED";
+    signalingError.details = {
+      connectionEstablished: this.connectionEstablished,
+      iceConnectionState: this.iceConnectionState,
+    };
+
+    // 如果连接已建立，这是网络中断，应该重试
+    if (this.connectionEstablished) {
+      this._handleConnectionError(signalingError, {
+        isSignalingDisconnect: true,
+        shouldRetry: true,
+      });
+    } else {
+      // 如果连接未建立，这可能是初始连接失败
+      this._handleConnectionError(signalingError, {
+        isSignalingDisconnect: true,
+        shouldRetry: this.retryCount < this.maxRetryAttempts,
+      });
+    }
+  }
+
+  /**
+   * 分类错误类型和严重级别
+   * @private
+   */
+  _classifyError(error, context = {}) {
+    let errorType = this.ERROR_TYPES.CONNECTION;
+    let errorLevel = this.ERROR_LEVELS.ERROR;
+    let shouldRetry = false;
+    let userMessage = "连接出现问题";
+
+    // 根据错误消息和上下文分类错误
+    const errorMessage = error.message?.toLowerCase() || "";
+
+    if (errorMessage.includes("timeout") || errorMessage.includes("超时")) {
+      errorType = this.ERROR_TYPES.TIMEOUT;
+      errorLevel = this.ERROR_LEVELS.ERROR;
+      shouldRetry = this.connectionEstablished;
+      userMessage = "连接超时，正在重试";
+    } else if (
+      errorMessage.includes("ice") ||
+      errorMessage.includes("connection failed")
+    ) {
+      errorType = this.ERROR_TYPES.CONNECTION;
+      errorLevel = this.ERROR_LEVELS.ERROR;
+      shouldRetry = this.connectionEstablished;
+      userMessage = "网络连接失败";
+    } else if (
+      errorMessage.includes("signaling") ||
+      errorMessage.includes("信令")
+    ) {
+      errorType = this.ERROR_TYPES.SIGNALING;
+      errorLevel = this.ERROR_LEVELS.ERROR;
+      shouldRetry = true;
+      userMessage = "信令服务器连接问题";
+    } else if (
+      errorMessage.includes("media") ||
+      errorMessage.includes("stream")
+    ) {
+      errorType = this.ERROR_TYPES.MEDIA;
+      errorLevel = this.ERROR_LEVELS.WARNING;
+      shouldRetry = false;
+      userMessage = "媒体流处理问题";
+    } else if (
+      errorMessage.includes("config") ||
+      errorMessage.includes("ice server") ||
+      errorMessage.includes("invalid")
+    ) {
+      errorType = this.ERROR_TYPES.CONFIG;
+      errorLevel = this.ERROR_LEVELS.FATAL;
+      shouldRetry = false;
+      userMessage = "配置错误，请检查设置";
+    } else if (
+      errorMessage.includes("network") ||
+      errorMessage.includes("网络")
+    ) {
+      errorType = this.ERROR_TYPES.NETWORK;
+      errorLevel = this.ERROR_LEVELS.ERROR;
+      shouldRetry = this.connectionEstablished;
+      userMessage = "网络中断，正在重连";
+    }
+
+    // 基于上下文调整分类
+    if (context.iceConnectionState === "failed") {
+      errorType = this.ERROR_TYPES.CONNECTION;
+      shouldRetry = this.connectionEstablished;
+    }
+
+    if (context.signalingState === "closed" && this.connectionEstablished) {
+      errorType = this.ERROR_TYPES.NETWORK;
+      shouldRetry = true;
+    }
+
+    return {
+      type: errorType,
+      level: errorLevel,
+      shouldRetry: shouldRetry && this.retryCount < this.maxRetryAttempts,
+      userMessage,
+      originalError: error,
+      context,
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
+   * 记录错误到历史记录（优化版）
+   * @private
+   */
+  _recordError(classifiedError) {
+    this.lastError = classifiedError;
+    this.errorHistory.push(classifiedError);
+
+    // 优化：保持更小的错误历史记录，减少内存使用
+    if (this.errorHistory.length > 5) {
+      this.errorHistory.shift();
+    }
+
+    // 根据错误级别记录日志
+    switch (classifiedError.level) {
+      case this.ERROR_LEVELS.WARNING:
+        this.logger.warn("WebRTC", `${classifiedError.type}错误`, {
+          message: classifiedError.userMessage,
+          error: classifiedError.originalError,
+          context: classifiedError.context,
+        });
+        break;
+      case this.ERROR_LEVELS.ERROR:
+        this.logger.error("WebRTC", `${classifiedError.type}错误`, {
+          message: classifiedError.userMessage,
+          error: classifiedError.originalError,
+          context: classifiedError.context,
+        });
+        break;
+      case this.ERROR_LEVELS.FATAL:
+        this.logger.error("WebRTC", `致命${classifiedError.type}错误`, {
+          message: classifiedError.userMessage,
+          error: classifiedError.originalError,
+          context: classifiedError.context,
+        });
+        break;
+    }
+  }
+
+  /**
+   * 处理连接错误（增强版）
+   * @private
+   */
+  _handleConnectionError(error, context = {}) {
+    // 分类错误
+    const classifiedError = this._classifyError(error, {
+      ...context,
+      iceConnectionState: this.iceConnectionState,
+      signalingState: this.signalingState,
+      connectionState: this.connectionState,
+      retryCount: this.retryCount,
+    });
+
+    // 记录错误
+    this._recordError(classifiedError);
+
+    // 触发错误事件
+    this.eventBus?.emit("webrtc:error", {
+      ...classifiedError,
+      retryCount: this.retryCount,
+      maxRetries: this.maxRetryAttempts,
+    });
+
+    // 根据错误分类决定处理策略
+    if (classifiedError.level === this.ERROR_LEVELS.FATAL) {
+      // 致命错误，不重试
+      this._setState("failed");
+      this.eventBus?.emit("webrtc:connection-failed", {
+        error: classifiedError,
+        retryCount: this.retryCount,
+        finalFailure: true,
+        reason: "fatal_error",
+      });
+    } else if (classifiedError.shouldRetry) {
+      // 可重试错误
+      this.logger.info("WebRTC", "错误可重试，安排重试", {
+        errorType: classifiedError.type,
+        retryCount: this.retryCount,
+        maxRetries: this.maxRetryAttempts,
+      });
+      this._scheduleRetry(classifiedError);
+    } else {
+      // 不可重试错误或已达到最大重试次数
+      this._setState("failed");
+      this.eventBus?.emit("webrtc:connection-failed", {
+        error: classifiedError,
+        retryCount: this.retryCount,
+        finalFailure: true,
+        reason: classifiedError.shouldRetry
+          ? "max_retries_exceeded"
+          : "non_retryable_error",
+      });
+    }
+  }
+
+  /**
+   * 安排重试（增强版）
+   * @private
+   */
+  _scheduleRetry(classifiedError = null) {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+    }
+
+    this.retryCount++;
+    this.connectionStats.reconnectAttempts++;
+
+    // 根据错误类型调整重试延迟
+    let baseDelay = this.retryDelay;
+    if (classifiedError) {
+      switch (classifiedError.type) {
+        case this.ERROR_TYPES.NETWORK:
+          // 网络错误使用较短延迟
+          baseDelay = Math.min(this.retryDelay, 1000);
+          break;
+        case this.ERROR_TYPES.SIGNALING:
+          // 信令错误使用中等延迟
+          baseDelay = this.retryDelay;
+          break;
+        case this.ERROR_TYPES.CONNECTION:
+          // 连接错误使用较长延迟
+          baseDelay = this.retryDelay * 1.5;
+          break;
+        case this.ERROR_TYPES.TIMEOUT:
+          // 超时错误使用更长延迟
+          baseDelay = this.retryDelay * 2;
+          break;
+        default:
+          baseDelay = this.retryDelay;
       }
-    });
-
-    // 处理原始消息 - 兼容selkies协议
-    this.eventBus?.on("signaling:raw-message", (data) => {
-      console.log("📨 收到原始信令消息:", data.message);
-      this.eventBus?.emit("webrtc:raw-signaling-message", data);
-    });
-
-    // 处理未处理的消息
-    this.eventBus?.on("signaling:unhandled-message", (message) => {
-      console.warn("⚠️ 未处理的信令消息:", message.type);
-      this.eventBus?.emit("webrtc:unhandled-signaling-message", message);
-    });
-
-    // 处理信令重连事件
-    this.eventBus?.on("signaling:reconnecting", (data) => {
-      console.log(`🔄 信令重连中 (第${data.attempt}次尝试)`);
-      this.eventBus?.emit("webrtc:signaling-reconnecting", data);
-    });
-
-    // 处理信令心跳超时
-    this.eventBus?.on("signaling:heartbeat-timeout", () => {
-      console.warn("💓 信令心跳超时");
-      this.eventBus?.emit("webrtc:signaling-heartbeat-timeout");
-    });
-
-    console.log("✅ 信令事件监听器已设置完成");
-  }
-
-  /**
-   * 开始连接流程
-   */
-  async _startConnection() {
-    // 设置连接超时
-    this._setTimer(
-      "connectionTimer",
-      () => {
-        console.error("⏰ WebRTC连接超时");
-        this._handleConnectionError(new Error("连接超时"));
-      },
-      this.connectionTimeout
-    );
-
-    // 设置ICE超时
-    this._setTimer(
-      "iceTimer",
-      () => {
-        console.warn("⏰ ICE收集超时");
-      },
-      this.iceTimeout
-    );
-
-    // 检查信令连接状态
-    if (!this._isSignalingConnected()) {
-      console.log("❌ 信令连接未就绪，无法启动WebRTC连接");
-      throw new Error("信令连接未就绪");
     }
 
-    // 发送request-offer请求
-    console.log("📤 发送request-offer请求...");
-    this._requestOffer();
+    // 应用指数退避，但设置最大延迟限制
+    const exponentialDelay = baseDelay * Math.pow(2, this.retryCount - 1);
+    const maxDelay = 30000; // 最大30秒
+    const delay = Math.min(exponentialDelay, maxDelay);
 
-    console.log("✅ 连接流程已启动，等待offer...");
-  }
-
-  /**
-   * 检查信令连接状态
-   */
-  _isSignalingConnected() {
-    if (!this.signalingManager) {
-      console.log("🔍 信令管理器不存在");
-      return false;
-    }
-
-    const isConnected = this.signalingManager.readyState === WebSocket.OPEN;
-    console.log("🔍 信令连接状态检查:", {
-      readyState: this.signalingManager.readyState,
-      WebSocket_OPEN: WebSocket.OPEN,
-      isConnected: isConnected,
+    this.logger.info("WebRTC", "安排重试连接", {
+      retryCount: this.retryCount,
+      delay: delay,
+      maxRetries: this.maxRetryAttempts,
+      errorType: classifiedError?.type || "unknown",
+      baseDelay: baseDelay,
     });
 
-    return isConnected;
+    this.retryTimer = setTimeout(() => {
+      this._attemptReconnect(classifiedError);
+    }, delay);
+
+    this.eventBus?.emit("webrtc:retry-scheduled", {
+      retryCount: this.retryCount,
+      delay: delay,
+      errorType: classifiedError?.type,
+      errorLevel: classifiedError?.level,
+    });
   }
 
   /**
-   * 等待信令连接
+   * 尝试重新连接（增强版）
+   * @private
    */
-  _waitForSignaling() {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("信令连接超时"));
-      }, 10000);
+  async _attemptReconnect(previousError = null) {
+    try {
+      this.logger.info("WebRTC", "尝试重新连接", {
+        attempt: this.retryCount,
+        maxRetries: this.maxRetryAttempts,
+        previousErrorType: previousError?.type || "unknown",
+      });
+
+      // 触发重连开始事件
+      this.eventBus?.emit("webrtc:reconnect-attempt", {
+        attempt: this.retryCount,
+        previousError: previousError,
+      });
+
+      this._setState("connecting");
+
+      // 根据之前的错误类型采取不同的重连策略
+      if (previousError?.type === this.ERROR_TYPES.SIGNALING) {
+        // 信令错误：等待信令重新连接
+        if (!this.signalingManager || !this.signalingManager.isConnected()) {
+          this.logger.info("WebRTC", "等待信令服务器重新连接");
+          // 等待信令连接恢复，或者超时后继续
+          await this._waitForSignalingConnection(5000);
+        }
+      }
+
+      // 执行重连
+      await this.connect();
+
+      this.logger.info("WebRTC", "重新连接成功", {
+        attempt: this.retryCount,
+        totalReconnects: this.connectionStats.reconnectAttempts,
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "重新连接失败", {
+        attempt: this.retryCount,
+        error: error.message,
+      });
+
+      // 递归处理重连失败
+      this._handleConnectionError(error, {
+        isReconnectAttempt: true,
+        previousError: previousError,
+      });
+    }
+  }
+
+  /**
+   * 等待信令连接恢复
+   * @private
+   */
+  async _waitForSignalingConnection(timeout = 5000) {
+    return new Promise((resolve) => {
+      const startTime = Date.now();
 
       const checkConnection = () => {
-        if (this._isSignalingConnected()) {
-          clearTimeout(timeout);
-          resolve();
+        if (this.signalingManager && this.signalingManager.isConnected()) {
+          this.logger.info("WebRTC", "信令连接已恢复");
+          resolve(true);
+        } else if (Date.now() - startTime >= timeout) {
+          this.logger.warn("WebRTC", "等待信令连接超时");
+          resolve(false);
         } else {
           setTimeout(checkConnection, 100);
         }
@@ -1362,1300 +1935,1250 @@ class WebRTCManager {
   }
 
   /**
-   * 请求WebRTC offer
+   * 创建 PeerConnection
+   * 使用 webrtc-adapter 标准化的 API
+   * @private
    */
-  _requestOffer() {
-    if (!this.signalingManager) {
-      console.error("❌ 信令管理器不可用");
-      return;
-    }
-
-    console.log("📤 发送request-offer请求...");
-
-    this.signalingManager
-      .send("request-offer", {
-        timestamp: Date.now(),
-        client_info: {
-          user_agent: navigator.userAgent,
-          platform: navigator.platform,
-          webrtc_support: true,
-        },
-      })
-      .then(() => {
-        console.log("✅ request-offer请求已发送");
-      })
-      .catch((error) => {
-        console.error("❌ 发送request-offer失败:", error);
-        this._handleConnectionError(error);
-      });
-  }
-
-  /**
-   * 检查是否可以设置本地描述
-   */
-  _canSetLocalDescription() {
-    return ConnectionStateValidator.canSetLocalDescription(this.pc);
-  }
-
-  /**
-   * 处理SDP事件 - 新增SDP事件处理方法
-   * @param {RTCSessionDescription} sdp - SDP描述对象
-   */
-  async _onSDP(sdp) {
-    // SDP类型验证
-    if (!sdp || typeof sdp !== "object") {
-      this._setError("收到的SDP数据无效");
-      return;
-    }
-
-    if (sdp.type !== "offer") {
-      this._setError("收到的SDP类型不是offer");
-      return;
-    }
-
-    console.log("📥 收到远程SDP offer:", sdp);
-
+  _createPeerConnection() {
     try {
-      return await this.handleOffer(sdp);
+      PerformanceMonitor.startTimer('createPeerConnection');
+      
+      this.logger.info("WebRTC", "创建 PeerConnection", {
+        iceServersCount: this.iceServers.length,
+      });
+
+      // 优化的 PeerConnection 配置
+      const pcConfig = {
+        iceServers: this.iceServers,
+        iceCandidatePoolSize: 4, // 减少候选池大小
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+        iceTransportPolicy: "all", // 允许所有传输类型
+      };
+
+      this.pc = new RTCPeerConnection(pcConfig);
+
+      // 设置基本的 PeerConnection 事件处理
+      this._setupPeerConnectionEvents();
+
+      // 优化连接建立
+      this._optimizeConnectionEstablishment();
+
+      const duration = PerformanceMonitor.endTimer('createPeerConnection');
+      PerformanceMonitor.logTiming('PeerConnection创建', duration);
+
+      this.logger.info("WebRTC", "PeerConnection 创建成功", {
+        signalingState: this.pc.signalingState,
+        iceConnectionState: this.pc.iceConnectionState,
+        creationTime: `${duration.toFixed(2)}ms`
+      });
+
+      return this.pc;
     } catch (error) {
-      console.error("❌ 处理SDP offer失败:", error);
-      this._setError(`SDP处理失败: ${error.message}`);
+      this.logger.error("WebRTC", "创建 PeerConnection 失败", error);
       throw error;
     }
   }
 
   /**
-   * 处理offer - 调试验证版本
-   * 基于控制台日志进行针对性修复，确保所有代码路径都返回有效值
-   * 需求: 1.1, 2.1, 3.1, 4.1, 5.1
+   * 设置 PeerConnection 事件处理
+   * @private
    */
-  async handleOffer(offer) {
-    console.log("📥 [DEBUG] 收到offer，开始处理...", {
-      offerType: offer?.type,
-      offerSdpLength: offer?.sdp?.length || 0,
-      timestamp: new Date().toISOString()
-    });
+  _setupPeerConnectionEvents() {
+    if (!this.pc) {
+      throw new Error("PeerConnection not created");
+    }
 
-    try {
-      // 1. 基础验证 - 确保offer对象有效 (需求 1.1)
-      if (!offer || typeof offer !== 'object') {
-        const error = new Error("Offer对象无效或不存在");
-        console.error("❌ [DEBUG] Offer验证失败:", error.message);
-        throw error;
-      }
-
-      if (!offer.sdp || typeof offer.sdp !== 'string' || offer.type !== 'offer') {
-        const error = new Error(`Offer格式无效: type=${offer.type}, sdp长度=${offer.sdp?.length || 0}`);
-        console.error("❌ [DEBUG] Offer格式验证失败:", error.message);
-        throw error;
-      }
-
-      console.log("✅ [DEBUG] Offer基础验证通过");
-
-      // 2. 确保PeerConnection存在 (需求 1.2)
-      if (!this.pc) {
-        console.log("🔧 [DEBUG] PeerConnection不存在，创建新连接");
-        await this._createPeerConnection();
-        console.log("✅ [DEBUG] PeerConnection创建完成");
-      }
-
-      // 3. 状态验证和处理 (需求 3.1)
-      const currentState = {
-        signaling: this.pc.signalingState,
-        connection: this.pc.connectionState,
-        ice: this.pc.iceConnectionState
-      };
-      
-      console.log("🔍 [DEBUG] 当前PeerConnection状态:", currentState);
-
-      // 处理stable状态 - 这是之前返回undefined的地方 (需求 1.1)
-      if (this.pc.signalingState === "stable") {
-        console.warn("⚠️ [DEBUG] PeerConnection处于stable状态，需要重置连接");
-        await this._resetConnection();
-        await this._createPeerConnection();
-        console.log("✅ [DEBUG] 连接重置完成，新状态:", {
-          signaling: this.pc.signalingState,
-          connection: this.pc.connectionState
-        });
-      }
-
-      // 4. 设置远程描述 (需求 1.3)
-      console.log("🔄 [DEBUG] 开始设置远程描述");
-      try {
-        await this.pc.setRemoteDescription(offer);
-        console.log("✅ [DEBUG] 远程描述设置成功，新状态:", this.pc.signalingState);
-      } catch (setRemoteError) {
-        console.error("❌ [DEBUG] 设置远程描述失败:", setRemoteError.message);
-        // 这是之前返回undefined的另一个地方 (需求 1.2)
-        throw new Error(`设置远程描述失败: ${setRemoteError.message}`);
-      }
-
-      // 5. 处理缓存的ICE候选
-      try {
-        await this._processPendingIceCandidates();
-        console.log("✅ [DEBUG] 缓存ICE候选处理完成");
-      } catch (iceError) {
-        console.warn("⚠️ [DEBUG] 处理缓存ICE候选时出错，但继续流程:", iceError.message);
-      }
-
-      // 6. 创建answer (需求 4.1, 4.3)
-      console.log("🔄 [DEBUG] 开始创建answer");
-      let answer;
-      try {
-        answer = await this.pc.createAnswer();
-        console.log("✅ [DEBUG] Answer创建成功:", {
-          type: answer.type,
-          sdpLength: answer.sdp?.length || 0
-        });
-      } catch (createAnswerError) {
-        console.error("❌ [DEBUG] 创建answer失败:", createAnswerError.message);
-        throw new Error(`创建answer失败: ${createAnswerError.message}`);
-      }
-
-      // 7. 验证answer有效性 (需求 1.4)
-      if (!answer || !answer.sdp || answer.type !== "answer") {
-        const error = new Error(`创建的answer无效: type=${answer?.type}, sdp长度=${answer?.sdp?.length || 0}`);
-        console.error("❌ [DEBUG] Answer验证失败:", error.message);
-        throw error;
-      }
-
-      console.log("✅ [DEBUG] Answer验证通过");
-
-      // 8. SDP优化 (需求 4.2, 4.4)
-      try {
-        this._optimizeSDP(answer);
-        console.log("✅ [DEBUG] SDP优化完成");
-      } catch (optimizeError) {
-        console.warn("⚠️ [DEBUG] SDP优化失败，使用原始SDP:", optimizeError.message);
-        // 继续使用原始answer，不抛出错误
-      }
-
-      // 9. 设置本地描述 (需求 1.3)
-      console.log("🔄 [DEBUG] 开始设置本地描述");
-      try {
-        await this.pc.setLocalDescription(answer);
-        console.log("✅ [DEBUG] 本地描述设置成功，最终状态:", {
-          signaling: this.pc.signalingState,
-          connection: this.pc.connectionState,
-          ice: this.pc.iceConnectionState
-        });
-      } catch (setLocalError) {
-        console.error("❌ [DEBUG] 设置本地描述失败:", setLocalError.message);
-        throw new Error(`设置本地描述失败: ${setLocalError.message}`);
-      }
-
-      // 10. 发送answer到信令服务器
-      console.log("📤 [DEBUG] 开始发送answer到信令服务器");
-      try {
-        await this.signalingManager?.send("answer", answer);
-        console.log("✅ [DEBUG] Answer发送成功");
-      } catch (sendError) {
-        console.error("❌ [DEBUG] 发送answer失败:", sendError.message);
-        throw new Error(`发送answer失败: ${sendError.message}`);
-      }
-
-      // 11. 最终验证和返回 (需求 1.1)
-      console.log("🎉 [DEBUG] HandleOffer完成，返回有效answer:", {
-        type: answer.type,
-        sdpLength: answer.sdp.length,
-        finalState: {
-          signaling: this.pc.signalingState,
-          connection: this.pc.connectionState,
-          ice: this.pc.iceConnectionState
-        }
+    // ICE 候选事件处理
+    this.pc.onicecandidate = (event) => {
+      this.logger.debug("WebRTC", "ICE 候选生成", {
+        candidate: event.candidate?.candidate || null,
+        sdpMLineIndex: event.candidate?.sdpMLineIndex || null,
       });
 
-      // 最终验证 - 确保返回值符合要求 (需求 1.1)
-      this._verifyHandleOfferCompletion(answer);
-      
-      return answer; // 确保始终返回有效的answer对象
+      if (event.candidate && this.signalingManager) {
+        // 发送 ICE 候选到信令服务器
+        this._sendIceCandidate(event.candidate);
+      } else if (!event.candidate) {
+        this.logger.info("WebRTC", "ICE 候选收集完成");
+      }
+    };
 
-    } catch (error) {
-      // 12. 统一错误处理 - 仅控制台日志，无UI弹窗 (需求 2.1)
-      const errorContext = {
-        phase: "offer-processing",
-        timestamp: new Date().toISOString(),
-        signalingState: this.pc?.signalingState || "unknown",
-        connectionState: this.pc?.connectionState || "unknown",
-        iceConnectionState: this.pc?.iceConnectionState || "unknown",
-        originalError: error.message,
-        stack: error.stack
+    // 远程媒体流事件处理 - 增强版本
+    this.pc.ontrack = (event) => {
+      this.logger.info("WebRTC", "接收到远程媒体轨道", {
+        streamId: event.streams[0]?.id || "unknown",
+        trackKind: event.track?.kind || "unknown",
+        trackId: event.track?.id || "unknown",
+        trackLabel: event.track?.label || "unknown",
+        trackEnabled: event.track?.enabled,
+        trackMuted: event.track?.muted,
+        trackReadyState: event.track?.readyState,
+      });
+
+      // 设置轨道事件监听器
+      this._setupTrackEvents(event.track);
+
+      // 处理流
+      if (event.streams && event.streams[0]) {
+        const stream = event.streams[0];
+
+        // 如果是新的流或流发生变化，重新处理
+        if (!this.remoteStream || this.remoteStream.id !== stream.id) {
+          this.logger.info("WebRTC", "检测到新的远程媒体流", {
+            oldStreamId: this.remoteStream?.id || "none",
+            newStreamId: stream.id,
+          });
+
+          this._handleRemoteStream(stream);
+        } else {
+          // 同一个流，但可能添加了新轨道
+          this.logger.info("WebRTC", "现有流添加了新轨道", {
+            streamId: stream.id,
+            trackKind: event.track.kind,
+          });
+
+          // 重新应用流到媒体元素以包含新轨道
+          this._applyRemoteStreamToElements(stream);
+        }
+      } else {
+        this.logger.warn("WebRTC", "接收到轨道但没有关联的流");
+      }
+
+      // 触发轨道接收事件
+      this.eventBus?.emit("webrtc:track-received", {
+        track: event.track,
+        streams: event.streams,
+        timestamp: Date.now(),
+      });
+    };
+
+    // 数据通道事件处理
+    this.pc.ondatachannel = (event) => {
+      this.logger.info("WebRTC", "接收到数据通道", {
+        label: event.channel.label,
+        readyState: event.channel.readyState,
+      });
+
+      this.receiveChannel = event.channel;
+      this._setupDataChannelEvents(this.receiveChannel);
+    };
+
+    // ICE 连接状态变化
+    this.pc.oniceconnectionstatechange = () => {
+      const newState = this.pc.iceConnectionState;
+      this.logger.info("WebRTC", "ICE 连接状态变化", {
+        previousState: this.iceConnectionState,
+        newState: newState,
+      });
+
+      this.iceConnectionState = newState;
+      this._handleIceConnectionStateChange(newState);
+    };
+
+    // 信令状态变化
+    this.pc.onsignalingstatechange = () => {
+      const newState = this.pc.signalingState;
+      this.logger.info("WebRTC", "信令状态变化", {
+        previousState: this.signalingState,
+        newState: newState,
+      });
+
+      this.signalingState = newState;
+      this._handleSignalingStateChange(newState);
+    };
+
+    // 连接状态变化（现代浏览器支持）
+    if (this.pc.onconnectionstatechange !== undefined) {
+      this.pc.onconnectionstatechange = () => {
+        const newState = this.pc.connectionState;
+        this.logger.info("WebRTC", "连接状态变化", {
+          connectionState: newState,
+          iceConnectionState: this.pc.iceConnectionState,
+          signalingState: this.pc.signalingState,
+        });
+
+        this._handleConnectionStateChange(newState);
       };
+    }
 
-      console.error("❌ [DEBUG] HandleOffer最终失败:", errorContext);
-      
-      // 抛出明确的错误而不是返回undefined (需求 1.1, 1.4)
-      throw new Error(`Offer处理失败: ${error.message} (状态: ${errorContext.signalingState})`);
+    this.logger.info("WebRTC", "PeerConnection 事件处理已设置");
+  }
+
+  /**
+   * 处理远程媒体流
+   * 增强版本，支持更好的错误处理和跨浏览器兼容性
+   * @private
+   */
+  _handleRemoteStream(stream) {
+    try {
+      this.logger.info("WebRTC", "开始处理远程媒体流", {
+        streamId: stream.id,
+        videoTracks: stream.getVideoTracks().length,
+        audioTracks: stream.getAudioTracks().length,
+        totalTracks: stream.getTracks().length,
+      });
+
+      // 存储远程流引用
+      this.remoteStream = stream;
+
+      // 设置流事件监听器
+      this._setupRemoteStreamEvents(stream);
+
+      // 应用流到媒体元素
+      this._applyRemoteStreamToElements(stream);
+
+      // 触发媒体流接收事件
+      this.eventBus?.emit("webrtc:remote-stream", {
+        stream: stream,
+        streamId: stream.id,
+        videoTracks: stream.getVideoTracks().length,
+        audioTracks: stream.getAudioTracks().length,
+        timestamp: Date.now(),
+      });
+
+      this.logger.info("WebRTC", "远程媒体流处理完成");
+    } catch (error) {
+      this.logger.error("WebRTC", "处理远程媒体流失败", error);
+      this._handleMediaError("REMOTE_STREAM_PROCESSING_FAILED", error);
     }
   }
 
   /**
-   * 验证handleOffer完成情况 - 调试验证方法
-   * 确保所有需求都得到满足 (需求 1.1, 2.1, 3.1, 4.1, 5.1)
+   * 应用远程流到媒体元素
    * @private
    */
-  _verifyHandleOfferCompletion(answer) {
-    console.log("🔍 [DEBUG] 验证handleOffer完成情况:");
-    
-    // 验证需求 1.1: handleOffer方法始终返回有效值
-    const requirement1_1 = answer && typeof answer === 'object' && answer.type === 'answer' && answer.sdp;
-    console.log(`✅ [需求 1.1] handleOffer返回有效answer: ${requirement1_1}`, {
-      hasAnswer: !!answer,
-      type: answer?.type,
-      hasSdp: !!answer?.sdp,
-      sdpLength: answer?.sdp?.length || 0
-    });
+  _applyRemoteStreamToElements(stream) {
+    try {
+      const videoTracks = stream.getVideoTracks();
+      const audioTracks = stream.getAudioTracks();
 
-    // 验证需求 2.1: 错误信息仅在控制台显示
-    console.log("✅ [需求 2.1] 错误信息仅控制台显示: true (无UI弹窗调用)");
+      // 处理视频流
+      if (this.videoElement && videoTracks.length > 0) {
+        this._setVideoStream(stream, videoTracks);
+      }
 
-    // 验证需求 3.1: 连接状态检查逻辑
-    const requirement3_1 = this.pc && this.pc.signalingState !== 'closed';
-    console.log(`✅ [需求 3.1] 连接状态检查正常: ${requirement3_1}`, {
-      hasPeerConnection: !!this.pc,
-      signalingState: this.pc?.signalingState,
-      connectionState: this.pc?.connectionState
-    });
+      // 处理音频流
+      if (this.audioElement && audioTracks.length > 0) {
+        this._setAudioStream(stream, audioTracks);
+      }
 
-    // 验证需求 4.1: SDP处理流程
-    console.log("✅ [需求 4.1] SDP处理流程完成: true (已验证SDP有效性)");
+      // 如果没有对应的媒体元素，记录警告
+      if (videoTracks.length > 0 && !this.videoElement) {
+        this.logger.warn("WebRTC", "接收到视频流但未设置视频元素");
+      }
 
-    // 验证需求 5.1: 重试机制状态
-    const retryStatus = this.retryManager.getRetryStatus();
-    console.log("✅ [需求 5.1] 重试机制状态:", {
-      connectionEstablished: retryStatus.connectionEstablished,
-      retryType: retryStatus.retryType,
-      currentRetries: retryStatus.currentRetries,
-      maxRetries: retryStatus.maxRetries
-    });
-
-    console.log("🎉 [DEBUG] handleOffer验证完成，所有需求满足");
+      if (audioTracks.length > 0 && !this.audioElement) {
+        this.logger.warn("WebRTC", "接收到音频流但未设置音频元素");
+      }
+    } catch (error) {
+      this.logger.error("WebRTC", "应用远程流到媒体元素失败", error);
+      this._handleMediaError("STREAM_APPLICATION_FAILED", error);
+    }
   }
 
   /**
-   * 调试验证方法 - 检查错误弹窗是否已完全移除
-   * 需求: 2.1, 2.2
+   * 设置视频流到视频元素
+   * @private
    */
-  _verifyNoErrorPopups() {
-    console.log("🔍 [DEBUG] 验证错误弹窗移除情况:");
-    
-    // 检查DOM中是否存在错误弹窗元素
-    const errorElements = [
-      document.getElementById('error-message'),
-      document.querySelector('.error-popup'),
-      document.querySelector('.error-modal'),
-      document.querySelector('.error-toast'),
-      document.querySelector('[class*="error"][class*="popup"]'),
-      document.querySelector('[class*="error"][class*="modal"]')
-    ].filter(el => el !== null);
+  _setVideoStream(stream, videoTracks) {
+    try {
+      // 跨浏览器兼容性处理
+      if (this.videoElement.srcObject !== undefined) {
+        // 现代浏览器
+        this.videoElement.srcObject = stream;
+      } else {
+        // 旧版浏览器兼容性
+        this.videoElement.src = window.URL.createObjectURL(stream);
+      }
 
-    console.log(`✅ [需求 2.2] DOM中无错误弹窗元素: ${errorElements.length === 0}`, {
-      foundElements: errorElements.length,
-      elementIds: errorElements.map(el => el.id || el.className)
-    });
+      // 设置视频元素属性以确保跨浏览器兼容性
+      this.videoElement.autoplay = true;
+      this.videoElement.playsInline = true; // iOS Safari 兼容性
+      this.videoElement.muted = true; // 避免自动播放策略问题
 
-    // 检查是否有alert调用
-    const originalAlert = window.alert;
-    let alertCalled = false;
-    window.alert = function(...args) {
-      alertCalled = true;
-      console.warn("⚠️ [DEBUG] 检测到alert调用:", args);
-      return originalAlert.apply(this, args);
-    };
+      // 监听视频元素事件
+      this._setupVideoElementEvents();
 
-    setTimeout(() => {
-      console.log(`✅ [需求 2.1] 无alert弹窗调用: ${!alertCalled}`);
-      window.alert = originalAlert; // 恢复原始alert
-    }, 1000);
+      this.logger.info("WebRTC", "视频流已设置到视频元素", {
+        videoTracks: videoTracks.length,
+        trackIds: videoTracks.map((track) => track.id),
+        videoElementReady: this.videoElement.readyState,
+      });
 
-    return {
-      noDOMErrorElements: errorElements.length === 0,
-      noAlertCalls: !alertCalled
-    };
+      // 触发视频流设置事件
+      this.eventBus?.emit("webrtc:video-stream-set", {
+        videoTracks: videoTracks.length,
+        trackIds: videoTracks.map((track) => track.id),
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "设置视频流失败", error);
+      this._handleMediaError("VIDEO_STREAM_SETUP_FAILED", error);
+    }
   }
 
   /**
-   * 调试验证方法 - 验证连接建立后的重试机制
-   * 需求: 5.1, 5.2
+   * 设置音频流到音频元素
+   * @private
    */
-  _verifyRetryMechanism() {
-    console.log("🔍 [DEBUG] 验证重试机制:");
-    
-    const retryStatus = this.retryManager.getRetryStatus();
-    const retryStats = this.retryManager.getRetryStats();
-    
-    console.log("📊 [重试机制状态]:", {
-      connectionEstablished: retryStatus.connectionEstablished,
-      retryType: retryStatus.retryType,
-      currentRetries: retryStatus.currentRetries,
-      maxRetries: retryStatus.maxRetries,
-      canRetry: retryStatus.canRetry,
-      totalRetries: retryStats.totalRetries,
-      initialRetries: retryStats.initialRetries,
-      networkRetries: retryStats.networkRetries
-    });
+  _setAudioStream(stream, audioTracks) {
+    try {
+      // 跨浏览器兼容性处理
+      if (this.audioElement.srcObject !== undefined) {
+        // 现代浏览器
+        this.audioElement.srcObject = stream;
+      } else {
+        // 旧版浏览器兼容性
+        this.audioElement.src = window.URL.createObjectURL(stream);
+      }
 
-    // 验证初始连接阶段不重试 (需求 5.1)
-    const requirement5_1 = !retryStatus.connectionEstablished ? retryStatus.maxRetries === 0 : true;
-    console.log(`✅ [需求 5.1] 初始连接阶段不重试: ${requirement5_1}`);
+      // 设置音频元素属性
+      this.audioElement.autoplay = true;
 
-    // 验证连接建立后启用网络中断重试 (需求 5.2)
-    const requirement5_2 = retryStatus.connectionEstablished ? 
-      (retryStatus.retryType === 'network-interruption' && retryStatus.maxRetries === 2) : true;
-    console.log(`✅ [需求 5.2] 连接建立后启用网络中断重试: ${requirement5_2}`);
+      // 监听音频元素事件
+      this._setupAudioElementEvents();
 
-    return {
-      initialConnectionNoRetry: requirement5_1,
-      networkInterruptionRetry: requirement5_2,
-      retryStatus,
-      retryStats
-    };
+      this.logger.info("WebRTC", "音频流已设置到音频元素", {
+        audioTracks: audioTracks.length,
+        trackIds: audioTracks.map((track) => track.id),
+        audioElementReady: this.audioElement.readyState,
+      });
+
+      // 触发音频流设置事件
+      this.eventBus?.emit("webrtc:audio-stream-set", {
+        audioTracks: audioTracks.length,
+        trackIds: audioTracks.map((track) => track.id),
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "设置音频流失败", error);
+      this._handleMediaError("AUDIO_STREAM_SETUP_FAILED", error);
+    }
   }
 
   /**
-   * 初始化调试验证系统 - 任务 8 实现
-   * 基于控制台日志调试和验证所有需求
+   * 设置媒体元素事件监听器
+   * @private
    */
-  _initializeDebugging() {
-    console.log("🚀 [DEBUG] 初始化WebRTC调试验证系统 (任务 8)");
-    
-    // 验证错误弹窗已移除
-    setTimeout(() => {
-      const popupVerification = this._verifyNoErrorPopups();
-      console.log("📋 [任务 8] 错误弹窗移除验证:", popupVerification);
-    }, 500);
+  _setupMediaElementEvents() {
+    // 设置视频元素事件
+    if (this.videoElement) {
+      this._setupVideoElementEvents();
+    }
 
-    // 验证重试机制
-    const retryVerification = this._verifyRetryMechanism();
-    console.log("📋 [任务 8] 重试机制验证:", retryVerification);
+    // 设置音频元素事件
+    if (this.audioElement) {
+      this._setupAudioElementEvents();
+    }
+  }
 
-    // 设置连接成功监听器来验证连接建立后的状态
-    this.eventBus?.on("webrtc:connection-established", () => {
-      console.log("🎉 [DEBUG] 连接建立成功，验证后续状态");
-      setTimeout(() => {
-        const postConnectionVerification = this._verifyRetryMechanism();
-        console.log("📋 [任务 8] 连接建立后验证:", postConnectionVerification);
-      }, 1000);
+  /**
+   * 设置视频元素事件监听器
+   * @private
+   */
+  _setupVideoElementEvents() {
+    if (!this.videoElement) return;
+
+    // 清理之前的事件监听器
+    this._cleanupVideoElementEvents();
+
+    // 视频加载开始
+    this.videoElement.addEventListener(
+      "loadstart",
+      this._onVideoLoadStart.bind(this)
+    );
+
+    // 视频元数据加载完成
+    this.videoElement.addEventListener(
+      "loadedmetadata",
+      this._onVideoLoadedMetadata.bind(this)
+    );
+
+    // 视频可以开始播放
+    this.videoElement.addEventListener(
+      "canplay",
+      this._onVideoCanPlay.bind(this)
+    );
+
+    // 视频开始播放
+    this.videoElement.addEventListener("play", this._onVideoPlay.bind(this));
+
+    // 视频暂停
+    this.videoElement.addEventListener("pause", this._onVideoPause.bind(this));
+
+    // 视频播放结束
+    this.videoElement.addEventListener("ended", this._onVideoEnded.bind(this));
+
+    // 视频错误
+    this.videoElement.addEventListener("error", this._onVideoError.bind(this));
+
+    // 视频尺寸变化
+    this.videoElement.addEventListener(
+      "resize",
+      this._onVideoResize.bind(this)
+    );
+
+    this.logger.debug("WebRTC", "视频元素事件监听器已设置");
+  }
+
+  /**
+   * 设置音频元素事件监听器
+   * @private
+   */
+  _setupAudioElementEvents() {
+    if (!this.audioElement) return;
+
+    // 清理之前的事件监听器
+    this._cleanupAudioElementEvents();
+
+    // 音频加载开始
+    this.audioElement.addEventListener(
+      "loadstart",
+      this._onAudioLoadStart.bind(this)
+    );
+
+    // 音频元数据加载完成
+    this.audioElement.addEventListener(
+      "loadedmetadata",
+      this._onAudioLoadedMetadata.bind(this)
+    );
+
+    // 音频可以开始播放
+    this.audioElement.addEventListener(
+      "canplay",
+      this._onAudioCanPlay.bind(this)
+    );
+
+    // 音频开始播放
+    this.audioElement.addEventListener("play", this._onAudioPlay.bind(this));
+
+    // 音频暂停
+    this.audioElement.addEventListener("pause", this._onAudioPause.bind(this));
+
+    // 音频播放结束
+    this.audioElement.addEventListener("ended", this._onAudioEnded.bind(this));
+
+    // 音频错误
+    this.audioElement.addEventListener("error", this._onAudioError.bind(this));
+
+    this.logger.debug("WebRTC", "音频元素事件监听器已设置");
+  }
+
+  /**
+   * 设置远程流事件监听器
+   * @private
+   */
+  _setupRemoteStreamEvents(stream) {
+    if (!stream) return;
+
+    // 监听轨道添加事件
+    stream.addEventListener("addtrack", (event) => {
+      this.logger.info("WebRTC", "远程流添加了新轨道", {
+        trackKind: event.track.kind,
+        trackId: event.track.id,
+        trackLabel: event.track.label,
+      });
+
+      this.eventBus?.emit("webrtc:remote-track-added", {
+        track: event.track,
+        stream: stream,
+        timestamp: Date.now(),
+      });
+
+      // 如果是新的视频或音频轨道，重新应用到媒体元素
+      if (event.track.kind === "video" && this.videoElement) {
+        this._setVideoStream(stream, stream.getVideoTracks());
+      } else if (event.track.kind === "audio" && this.audioElement) {
+        this._setAudioStream(stream, stream.getAudioTracks());
+      }
     });
 
-    // 设置错误监听器来验证错误处理
-    this.eventBus?.on("webrtc:connection-failed", (data) => {
-      console.log("❌ [DEBUG] 连接失败事件，验证错误处理:", {
-        showUI: data.showUI,
-        hasUIPopup: data.showUI !== false,
-        errorHandlingCorrect: data.showUI === false
+    // 监听轨道移除事件
+    stream.addEventListener("removetrack", (event) => {
+      this.logger.info("WebRTC", "远程流移除了轨道", {
+        trackKind: event.track.kind,
+        trackId: event.track.id,
+      });
+
+      this.eventBus?.emit("webrtc:remote-track-removed", {
+        track: event.track,
+        stream: stream,
+        timestamp: Date.now(),
       });
     });
 
-    console.log("✅ [DEBUG] 调试验证系统初始化完成");
-    
-    // 输出任务 8 的验证摘要
-    this._outputTask8Summary();
+    this.logger.debug("WebRTC", "远程流事件监听器已设置");
   }
 
   /**
-   * 输出任务 8 验证摘要
-   */
-  _outputTask8Summary() {
-    console.log("📊 [任务 8] WebRTC Offer处理修复验证摘要:");
-    console.log("├── ✅ 需求 1.1: handleOffer方法返回值问题已修复");
-    console.log("├── ✅ 需求 2.1: 错误信息仅在控制台显示");
-    console.log("├── ✅ 需求 2.2: 错误弹窗显示机制已移除");
-    console.log("├── ✅ 需求 3.1: 连接状态验证器已实现");
-    console.log("├── ✅ 需求 4.1: SDP处理和优化已增强");
-    console.log("├── ✅ 需求 5.1: 初始连接失败不重试");
-    console.log("└── ✅ 需求 5.2: 连接建立后启用网络中断重试");
-    console.log("");
-    console.log("🔍 [调试说明] 所有错误信息将仅在浏览器控制台显示");
-    console.log("🔍 [调试说明] 不会显示任何UI错误弹窗或提示");
-    console.log("🔍 [调试说明] handleOffer方法确保所有代码路径都返回有效值");
-    console.log("🔍 [调试说明] 重试机制根据连接状态智能调整策略");
-  }
-
-  /**
-   * 测试方法 - 验证handleOffer修复 (任务 8)
-   * 用于验证所有代码路径都正确处理返回值
-   */
-  async _testHandleOfferFix() {
-    console.log("🧪 [TEST] 开始测试handleOffer修复");
-    
-    try {
-      // 测试无效offer处理
-      try {
-        await this.handleOffer(null);
-        console.error("❌ [TEST] 应该抛出错误但没有");
-      } catch (error) {
-        console.log("✅ [TEST] 无效offer正确抛出错误:", error.message);
-      }
-
-      // 测试无效SDP处理
-      try {
-        await this.handleOffer({ type: 'offer', sdp: '' });
-        console.error("❌ [TEST] 应该抛出错误但没有");
-      } catch (error) {
-        console.log("✅ [TEST] 无效SDP正确抛出错误:", error.message);
-      }
-
-      console.log("✅ [TEST] handleOffer修复测试完成");
-      
-    } catch (error) {
-      console.error("❌ [TEST] 测试过程中出错:", error);
-    }
-  }
-
-  /**
-   * 验证传入的SDP有效性 (需求 4.1)
-   * @param {RTCSessionDescription} offer - 传入的offer对象
-   * @returns {Object} 验证结果 {isValid: boolean, reason?: string}
+   * 清理媒体元素事件监听器
    * @private
    */
-  _validateIncomingSDP(offer) {
-    try {
-      // 基本结构验证
-      if (!offer || typeof offer !== "object") {
-        return { isValid: false, reason: "offer对象无效或不存在" };
-      }
-
-      if (!offer.sdp || typeof offer.sdp !== "string") {
-        return { isValid: false, reason: "SDP内容无效或不存在" };
-      }
-
-      if (offer.type !== "offer") {
-        return { isValid: false, reason: `SDP类型错误，期望'offer'，实际'${offer.type}'` };
-      }
-
-      const sdp = offer.sdp;
-
-      // SDP格式基本验证
-      if (sdp.length === 0) {
-        return { isValid: false, reason: "SDP内容为空" };
-      }
-
-      // 检查SDP版本行
-      if (!sdp.includes("v=0")) {
-        return { isValid: false, reason: "缺少SDP版本行(v=0)" };
-      }
-
-      // 检查会话描述行
-      if (!sdp.includes("s=")) {
-        return { isValid: false, reason: "缺少会话描述行(s=)" };
-      }
-
-      // 检查媒体描述行
-      if (!sdp.includes("m=")) {
-        return { isValid: false, reason: "缺少媒体描述行(m=)" };
-      }
-
-      // 检查连接信息
-      if (!sdp.includes("c=")) {
-        return { isValid: false, reason: "缺少连接信息行(c=)" };
-      }
-
-      // 检查是否包含音频或视频媒体
-      const hasVideo = sdp.includes("m=video");
-      const hasAudio = sdp.includes("m=audio");
-      
-      if (!hasVideo && !hasAudio) {
-        return { isValid: false, reason: "SDP中未找到音频或视频媒体描述" };
-      }
-
-      // 检查RTP映射
-      if (!sdp.includes("a=rtpmap:")) {
-        return { isValid: false, reason: "缺少RTP映射信息(a=rtpmap:)" };
-      }
-
-      // 检查SDP结构完整性 - 确保每个媒体段都有必要的属性
-      const mediaLines = sdp.split('\n').filter(line => line.startsWith('m='));
-      for (const mediaLine of mediaLines) {
-        const mediaType = mediaLine.split(' ')[0].substring(2); // 去掉 'm='
-        
-        // 检查该媒体类型是否有对应的rtpmap
-        const mediaRegex = new RegExp(`m=${mediaType}.*\\n([\\s\\S]*?)(?=m=|$)`);
-        const mediaSection = sdp.match(mediaRegex);
-        
-        if (mediaSection && !mediaSection[1].includes('a=rtpmap:')) {
-          return { isValid: false, reason: `${mediaType}媒体段缺少RTP映射` };
-        }
-      }
-
-      console.log("✅ SDP有效性验证通过");
-      return { isValid: true };
-
-    } catch (error) {
-      return { isValid: false, reason: `SDP验证异常: ${error.message}` };
-    }
+  _cleanupMediaElementEvents() {
+    this._cleanupVideoElementEvents();
+    this._cleanupAudioElementEvents();
   }
 
   /**
-   * 创建answer并包含重试逻辑 (需求 4.3)
-   * @returns {RTCSessionDescription} answer对象
+   * 清理视频元素事件监听器
    * @private
    */
-  async _createAnswerWithRetry() {
-    const maxRetries = 3;
-    const retryDelay = 1000; // 1秒
-    let lastError = null;
+  _cleanupVideoElementEvents() {
+    if (!this.videoElement) return;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        console.log(`🔄 创建answer (尝试 ${attempt}/${maxRetries})`);
-        
-        // 验证PeerConnection状态
-        if (!this.pc || this.pc.signalingState === "closed") {
-          throw new Error("PeerConnection不可用或已关闭");
-        }
-
-        if (this.pc.signalingState !== "have-remote-offer") {
-          throw new Error(`信令状态不正确，期望'have-remote-offer'，实际'${this.pc.signalingState}'`);
-        }
-
-        const answer = await this.pc.createAnswer();
-
-        // 验证创建的answer
-        if (!answer || !answer.sdp || answer.type !== "answer") {
-          throw new Error("创建的answer无效：缺少必要的sdp内容或类型不正确");
-        }
-
-        // 额外的answer SDP验证
-        const answerValidation = this._validateAnswerSDP(answer);
-        if (!answerValidation.isValid) {
-          throw new Error(`Answer SDP验证失败: ${answerValidation.reason}`);
-        }
-
-        console.log(`✅ Answer创建成功 (尝试 ${attempt}/${maxRetries})`);
-        return answer;
-
-      } catch (error) {
-        lastError = error;
-        console.warn(`⚠️ 创建answer失败 (尝试 ${attempt}/${maxRetries}): ${error.message}`);
-
-        // 如果不是最后一次尝试，等待后重试
-        if (attempt < maxRetries) {
-          console.log(`⏳ 等待 ${retryDelay}ms 后重试...`);
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-          
-          // 检查连接状态是否需要重置
-          const stateCheck = ConnectionStateValidator.checkIfResetNeeded(this.pc);
-          if (stateCheck.needsReset) {
-            console.warn(`⚠️ 检测到连接状态需要重置: ${stateCheck.reason}`);
-            // 这里不重置，因为可能会影响已设置的远程描述
-            // 只记录警告，让上层处理
-          }
-        }
-      }
-    }
-
-    // 所有重试都失败了
-    const finalError = new Error(`Answer创建失败，已重试${maxRetries}次: ${lastError?.message || '未知错误'}`);
-    console.error("❌ Answer创建最终失败:", finalError.message);
-    throw finalError;
+    const events = [
+      "loadstart",
+      "loadedmetadata",
+      "canplay",
+      "play",
+      "pause",
+      "ended",
+      "error",
+      "resize",
+    ];
+    events.forEach((event) => {
+      this.videoElement.removeEventListener(
+        event,
+        this[`_onVideo${event.charAt(0).toUpperCase() + event.slice(1)}`]
+      );
+    });
   }
 
   /**
-   * 验证Answer SDP的有效性
-   * @param {RTCSessionDescription} answer - answer对象
-   * @returns {Object} 验证结果
+   * 清理音频元素事件监听器
    * @private
    */
-  _validateAnswerSDP(answer) {
-    try {
-      if (!answer || !answer.sdp || answer.type !== "answer") {
-        return { isValid: false, reason: "Answer对象结构无效" };
-      }
+  _cleanupAudioElementEvents() {
+    if (!this.audioElement) return;
 
-      const sdp = answer.sdp;
-
-      // 基本SDP结构检查
-      if (!sdp.includes("v=0")) {
-        return { isValid: false, reason: "Answer SDP缺少版本行" };
-      }
-
-      if (!sdp.includes("m=")) {
-        return { isValid: false, reason: "Answer SDP缺少媒体描述" };
-      }
-
-      // 检查answer特有的属性
-      if (!sdp.includes("a=sendrecv") && !sdp.includes("a=recvonly") && !sdp.includes("a=sendonly")) {
-        return { isValid: false, reason: "Answer SDP缺少媒体方向属性" };
-      }
-
-      return { isValid: true };
-
-    } catch (error) {
-      return { isValid: false, reason: `Answer SDP验证异常: ${error.message}` };
-    }
+    const events = [
+      "loadstart",
+      "loadedmetadata",
+      "canplay",
+      "play",
+      "pause",
+      "ended",
+      "error",
+    ];
+    events.forEach((event) => {
+      this.audioElement.removeEventListener(
+        event,
+        this[`_onAudio${event.charAt(0).toUpperCase() + event.slice(1)}`]
+      );
+    });
   }
 
-  /**
-   * 增强的SDP优化处理，包含失败回退机制 (需求 4.2, 4.4)
-   * @param {RTCSessionDescription} answer - answer对象
-   * @returns {Object} 优化结果
-   * @private
-   */
-  async _optimizeSDPWithFallback(answer) {
-    if (!answer || !answer.sdp) {
-      console.warn("⚠️ Answer对象无效，跳过SDP优化");
-      return { success: false, reason: "invalid_answer", usedFallback: false };
-    }
-
-    // 保存原始SDP作为回退选项
-    const originalSDP = answer.sdp;
-    const optimizationStartTime = Date.now();
-
-    try {
-      console.log("🔧 开始SDP优化处理...");
-
-      // 1. 预优化验证 - 确保SDP结构完整
-      const preOptimizationCheck = this._validateSDPStructure(answer.sdp);
-      if (!preOptimizationCheck.isValid) {
-        console.warn(`⚠️ SDP预优化检查失败: ${preOptimizationCheck.reason}，跳过优化`);
-        return { 
-          success: false, 
-          reason: `pre_optimization_check_failed: ${preOptimizationCheck.reason}`,
-          usedFallback: false 
-        };
-      }
-
-      // 2. 执行SDP优化
-      const optimizationResult = this._optimizeSDP(answer);
-      
-      if (optimizationResult.success) {
-        // 3. 优化后验证 - 确保优化没有破坏SDP结构 (需求 4.4)
-        const postOptimizationCheck = this._validateSDPStructure(answer.sdp);
-        if (!postOptimizationCheck.isValid) {
-          console.warn(`⚠️ SDP优化后验证失败: ${postOptimizationCheck.reason}，执行回退`);
-          return this._executeSdpFallback(answer, originalSDP, "post_optimization_validation_failed");
-        }
-
-        // 4. 结构完整性检查 - 确保关键字段未丢失
-        const integrityCheck = this._checkSDPIntegrity(originalSDP, answer.sdp);
-        if (!integrityCheck.isValid) {
-          console.warn(`⚠️ SDP完整性检查失败: ${integrityCheck.reason}，执行回退`);
-          return this._executeSdpFallback(answer, originalSDP, "integrity_check_failed");
-        }
-
-        const optimizationTime = Date.now() - optimizationStartTime;
-        console.log(`✅ SDP优化成功完成 (耗时: ${optimizationTime}ms)`);
-        
-        return {
-          success: true,
-          modifications: optimizationResult.modifications,
-          optimizationTime,
-          usedFallback: false
-        };
-
-      } else {
-        // 优化失败，检查是否需要回退
-        if (optimizationResult.rollback) {
-          console.log("ℹ️ SDP优化已自动回滚，无需额外处理");
-          return {
-            success: false,
-            reason: optimizationResult.reason,
-            usedFallback: true,
-            fallbackReason: "automatic_rollback"
-          };
-        } else {
-          console.log("ℹ️ SDP优化跳过，使用原始SDP");
-          return {
-            success: false,
-            reason: optimizationResult.reason,
-            usedFallback: false
-          };
-        }
-      }
-
-    } catch (error) {
-      console.error("❌ SDP优化过程中发生异常:", error);
-      return this._executeSdpFallback(answer, originalSDP, `optimization_exception: ${error.message}`);
-    }
+  // 视频元素事件处理器
+  _onVideoLoadStart(event) {
+    this.logger.debug("WebRTC", "视频开始加载");
+    this.eventBus?.emit("webrtc:video-load-start", { timestamp: Date.now() });
   }
 
-  /**
-   * 验证SDP结构完整性
-   * @param {string} sdp - SDP字符串
-   * @returns {Object} 验证结果
-   * @private
-   */
-  _validateSDPStructure(sdp) {
-    try {
-      if (!sdp || typeof sdp !== "string" || sdp.length === 0) {
-        return { isValid: false, reason: "SDP为空或无效" };
-      }
+  _onVideoLoadedMetadata(event) {
+    this.logger.info("WebRTC", "视频元数据已加载", {
+      videoWidth: this.videoElement.videoWidth,
+      videoHeight: this.videoElement.videoHeight,
+      duration: this.videoElement.duration,
+    });
 
-      // 检查基本SDP行
-      const requiredLines = ["v=", "o=", "s=", "t="];
-      for (const line of requiredLines) {
-        if (!sdp.includes(line)) {
-          return { isValid: false, reason: `缺少必需的SDP行: ${line}` };
-        }
-      }
-
-      // 检查媒体描述
-      if (!sdp.includes("m=")) {
-        return { isValid: false, reason: "缺少媒体描述行" };
-      }
-
-      // 检查SDP行格式
-      const lines = sdp.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.length === 0) continue;
-        
-        // 每行应该以字母=开始
-        if (!/^[a-z]=/.test(line)) {
-          return { isValid: false, reason: `第${i+1}行格式无效: ${line.substring(0, 20)}...` };
-        }
-      }
-
-      return { isValid: true };
-
-    } catch (error) {
-      return { isValid: false, reason: `SDP结构验证异常: ${error.message}` };
-    }
-  }
-
-  /**
-   * 检查SDP完整性 - 确保优化后的SDP包含原始SDP的关键信息
-   * @param {string} originalSDP - 原始SDP
-   * @param {string} optimizedSDP - 优化后的SDP
-   * @returns {Object} 检查结果
-   * @private
-   */
-  _checkSDPIntegrity(originalSDP, optimizedSDP) {
-    try {
-      // 检查关键字段是否保留
-      const criticalFields = [
-        "m=video", "m=audio", "a=rtpmap:", "a=fmtp:", 
-        "c=IN", "a=ice-ufrag:", "a=ice-pwd:", "a=fingerprint:"
-      ];
-
-      for (const field of criticalFields) {
-        const originalCount = (originalSDP.match(new RegExp(field, 'g')) || []).length;
-        const optimizedCount = (optimizedSDP.match(new RegExp(field, 'g')) || []).length;
-        
-        if (originalCount > 0 && optimizedCount === 0) {
-          return { isValid: false, reason: `关键字段丢失: ${field}` };
-        }
-        
-        if (originalCount > 0 && optimizedCount !== originalCount) {
-          console.warn(`⚠️ 字段数量变化: ${field} (原始: ${originalCount}, 优化后: ${optimizedCount})`);
-        }
-      }
-
-      // 检查媒体段数量
-      const originalMediaCount = (originalSDP.match(/m=/g) || []).length;
-      const optimizedMediaCount = (optimizedSDP.match(/m=/g) || []).length;
-      
-      if (originalMediaCount !== optimizedMediaCount) {
-        return { isValid: false, reason: `媒体段数量变化: ${originalMediaCount} -> ${optimizedMediaCount}` };
-      }
-
-      // 检查SDP长度变化是否合理
-      const lengthChange = Math.abs(optimizedSDP.length - originalSDP.length);
-      const maxAllowedChange = originalSDP.length * 0.2; // 允许20%的变化
-      
-      if (lengthChange > maxAllowedChange) {
-        return { isValid: false, reason: `SDP长度变化过大: ${lengthChange} bytes (超过${maxAllowedChange})` };
-      }
-
-      return { isValid: true };
-
-    } catch (error) {
-      return { isValid: false, reason: `完整性检查异常: ${error.message}` };
-    }
-  }
-
-  /**
-   * 执行SDP回退机制
-   * @param {RTCSessionDescription} answer - answer对象
-   * @param {string} originalSDP - 原始SDP
-   * @param {string} reason - 回退原因
-   * @returns {Object} 回退结果
-   * @private
-   */
-  _executeSdpFallback(answer, originalSDP, reason) {
-    console.warn(`🔄 执行SDP回退机制，原因: ${reason}`);
-    
-    try {
-      // 恢复原始SDP
-      answer.sdp = originalSDP;
-      
-      // 验证回退后的SDP
-      const fallbackValidation = this._validateSDPStructure(originalSDP);
-      if (!fallbackValidation.isValid) {
-        console.error("❌ 回退后的SDP验证失败:", fallbackValidation.reason);
-        throw new Error(`SDP回退失败: ${fallbackValidation.reason}`);
-      }
-      
-      // 记录回退信息
-      const fallbackInfo = {
-        timestamp: Date.now(),
-        reason: reason,
-        originalLength: originalSDP.length,
-        fallbackSuccessful: true
-      };
-      
-      // 存储回退历史
-      if (!this._sdpFallbackHistory) {
-        this._sdpFallbackHistory = [];
-      }
-      this._sdpFallbackHistory.push(fallbackInfo);
-      
-      // 保持历史记录在合理范围内
-      if (this._sdpFallbackHistory.length > 10) {
-        this._sdpFallbackHistory = this._sdpFallbackHistory.slice(-5);
-      }
-      
-      // 触发回退事件
-      this.eventBus?.emit("webrtc:sdp-fallback-executed", fallbackInfo);
-      
-      console.log("✅ SDP回退成功，已恢复原始SDP");
-      
-      return {
-        success: false,
-        reason: reason,
-        usedFallback: true,
-        fallbackSuccessful: true,
-        fallbackInfo: fallbackInfo
-      };
-      
-    } catch (error) {
-      console.error("❌ SDP回退执行失败:", error);
-      
-      return {
-        success: false,
-        reason: `fallback_failed: ${error.message}`,
-        usedFallback: true,
-        fallbackSuccessful: false
-      };
-    }
-  }
-
-  /**
-   * 优化SDP配置 - 增强版本，包含回滚机制和详细的错误处理
-   * @param {RTCSessionDescription} sdp - 要优化的SDP描述
-   * @returns {Object} 优化结果，包含是否成功和应用的修改
-   * @private
-   */
-  _optimizeSDP(sdp) {
-    if (!sdp || !sdp.sdp) {
-      console.warn("⚠️ SDP数据无效，跳过优化");
-      return { success: false, reason: "invalid_sdp", modifications: [] };
-    }
-
-    const originalSdp = sdp.sdp;
-    const appliedModifications = [];
-    let currentSdp = sdp.sdp;
-    
-    try {
-      // 创建SDP修改的备份点
-      const sdpBackup = {
-        original: originalSdp,
-        checkpoints: []
-      };
-
-      // 1. 设置sps-pps-idr-in-keyframe=1 - 改善H.264关键帧处理
-      const keyframeResult = this._applySdpKeyframeOptimization(currentSdp);
-      if (keyframeResult.success) {
-        sdpBackup.checkpoints.push({
-          name: "keyframe_optimization",
-          before: currentSdp,
-          after: keyframeResult.sdp
-        });
-        currentSdp = keyframeResult.sdp;
-        appliedModifications.push("sps-pps-idr-in-keyframe=1");
-        console.log("🔧 SDP优化: 启用sps-pps-idr-in-keyframe=1");
-      }
-
-      // 2. 启用立体声音频 - 仅对非multiopus编解码器
-      if (currentSdp.indexOf("multiopus") === -1) {
-        const stereoResult = this._applySdpStereoOptimization(currentSdp);
-        if (stereoResult.success) {
-          sdpBackup.checkpoints.push({
-            name: "stereo_optimization",
-            before: currentSdp,
-            after: stereoResult.sdp
-          });
-          currentSdp = stereoResult.sdp;
-          appliedModifications.push("stereo=1");
-          console.log("🔧 SDP优化: 启用立体声音频");
-        }
-
-        // 3. 设置低延迟音频包 - 减少音频包大小到10ms
-        const latencyResult = this._applySdpLatencyOptimization(currentSdp);
-        if (latencyResult.success) {
-          sdpBackup.checkpoints.push({
-            name: "latency_optimization",
-            before: currentSdp,
-            after: latencyResult.sdp
-          });
-          currentSdp = latencyResult.sdp;
-          appliedModifications.push("minptime=10");
-          console.log("🔧 SDP优化: 启用低延迟音频包(10ms)");
-        }
-      } else {
-        console.log("ℹ️ 检测到multiopus编解码器，跳过音频优化");
-      }
-
-      // 验证优化后的SDP - 增强验证确保不破坏原始结构 (需求 4.4)
-      const validationResult = this._validateOptimizedSDP(currentSdp, originalSdp);
-      if (!validationResult.isValid) {
-        console.warn("⚠️ SDP优化后验证失败，执行回滚:", validationResult.reason);
-        return this._rollbackSdpOptimization(sdp, originalSdp, appliedModifications, validationResult.reason);
-      }
-
-      // 额外的结构完整性检查 - 确保SDP优化不会破坏原始结构 (需求 4.4)
-      const integrityCheck = this._checkSDPIntegrity(originalSdp, currentSdp);
-      if (!integrityCheck.isValid) {
-        console.warn("⚠️ SDP结构完整性检查失败，执行回滚:", integrityCheck.reason);
-        return this._rollbackSdpOptimization(sdp, originalSdp, appliedModifications, `integrity_check: ${integrityCheck.reason}`);
-      }
-
-      // 应用最终的SDP
-      sdp.sdp = currentSdp;
-
-      // 存储优化信息用于调试
-      this._lastSdpOptimization = {
-        timestamp: Date.now(),
-        originalLength: originalSdp.length,
-        optimizedLength: currentSdp.length,
-        modifications: appliedModifications,
-        backup: sdpBackup
-      };
-
-      if (appliedModifications.length > 0) {
-        console.log("✅ SDP优化完成，应用的修改:", appliedModifications);
-        this.eventBus?.emit("webrtc:sdp-optimized", {
-          modifications: appliedModifications,
-          originalLength: originalSdp.length,
-          optimizedLength: currentSdp.length
-        });
-      } else {
-        console.log("ℹ️ SDP无需优化或已经优化");
-      }
-
-      return { 
-        success: true, 
-        modifications: appliedModifications,
-        originalLength: originalSdp.length,
-        optimizedLength: currentSdp.length
-      };
-
-    } catch (error) {
-      console.error("❌ SDP优化过程中发生异常:", error);
-      return this._rollbackSdpOptimization(sdp, originalSdp, appliedModifications, error.message);
-    }
-  }
-
-  /**
-   * 应用SDP关键帧优化
-   * @param {string} sdp - 当前SDP
-   * @returns {Object} 优化结果
-   * @private
-   */
-  _applySdpKeyframeOptimization(sdp) {
-    try {
-      if (
-        !/[^-]sps-pps-idr-in-keyframe=1[^\d]/gm.test(sdp) &&
-        /[^-]packetization-mode=/gm.test(sdp)
-      ) {
-        let optimizedSdp = sdp;
-        
-        if (/[^-]sps-pps-idr-in-keyframe=\d+/gm.test(sdp)) {
-          optimizedSdp = sdp.replace(
-            /sps-pps-idr-in-keyframe=\d+/gm,
-            "sps-pps-idr-in-keyframe=1"
-          );
-        } else {
-          optimizedSdp = sdp.replace(
-            "packetization-mode=",
-            "sps-pps-idr-in-keyframe=1;packetization-mode="
-          );
-        }
-        
-        return { success: true, sdp: optimizedSdp };
-      }
-      return { success: false, sdp, reason: "already_optimized_or_not_applicable" };
-    } catch (error) {
-      return { success: false, sdp, reason: error.message };
-    }
-  }
-
-  /**
-   * 应用SDP立体声优化
-   * @param {string} sdp - 当前SDP
-   * @returns {Object} 优化结果
-   * @private
-   */
-  _applySdpStereoOptimization(sdp) {
-    try {
-      if (
-        !/[^-]stereo=1[^\d]/gm.test(sdp) &&
-        /[^-]useinbandfec=/gm.test(sdp)
-      ) {
-        let optimizedSdp = sdp;
-        
-        if (/[^-]stereo=\d+/gm.test(sdp)) {
-          optimizedSdp = sdp.replace(/stereo=\d+/gm, "stereo=1");
-        } else {
-          optimizedSdp = sdp.replace(
-            "useinbandfec=",
-            "stereo=1;useinbandfec="
-          );
-        }
-        
-        return { success: true, sdp: optimizedSdp };
-      }
-      return { success: false, sdp, reason: "already_optimized_or_not_applicable" };
-    } catch (error) {
-      return { success: false, sdp, reason: error.message };
-    }
-  }
-
-  /**
-   * 应用SDP延迟优化
-   * @param {string} sdp - 当前SDP
-   * @returns {Object} 优化结果
-   * @private
-   */
-  _applySdpLatencyOptimization(sdp) {
-    try {
-      if (
-        !/[^-]minptime=10[^\d]/gm.test(sdp) &&
-        /[^-]useinbandfec=/gm.test(sdp)
-      ) {
-        let optimizedSdp = sdp;
-        
-        if (/[^-]minptime=\d+/gm.test(sdp)) {
-          optimizedSdp = sdp.replace(/minptime=\d+/gm, "minptime=10");
-        } else {
-          optimizedSdp = sdp.replace(
-            "useinbandfec=",
-            "minptime=10;useinbandfec="
-          );
-        }
-        
-        return { success: true, sdp: optimizedSdp };
-      }
-      return { success: false, sdp, reason: "already_optimized_or_not_applicable" };
-    } catch (error) {
-      return { success: false, sdp, reason: error.message };
-    }
-  }
-
-  /**
-   * 验证优化后的SDP - 增强版本，确保优化不破坏SDP结构 (需求 4.4)
-   * @param {string} optimizedSdp - 优化后的SDP
-   * @param {string} originalSdp - 原始SDP
-   * @returns {Object} 验证结果
-   * @private
-   */
-  _validateOptimizedSDP(optimizedSdp, originalSdp) {
-    try {
-      // 基本长度检查
-      if (optimizedSdp.length === 0) {
-        return { isValid: false, reason: "optimized_sdp_is_empty" };
-      }
-
-      // 检查SDP结构完整性
-      if (!optimizedSdp.includes("v=0")) {
-        return { isValid: false, reason: "missing_version_line" };
-      }
-
-      if (!optimizedSdp.includes("m=")) {
-        return { isValid: false, reason: "missing_media_lines" };
-      }
-
-      // 增强的关键字段检查 - 确保所有重要字段都保留
-      const criticalFields = [
-        "c=", "a=rtpmap:", "a=fmtp:", "a=ice-ufrag:", "a=ice-pwd:", 
-        "a=fingerprint:", "a=setup:", "a=mid:", "a=sendrecv"
-      ];
-      
-      for (const field of criticalFields) {
-        if (originalSdp.includes(field) && !optimizedSdp.includes(field)) {
-          return { isValid: false, reason: `missing_critical_field_${field.replace(/[=:]/g, '_')}` };
-        }
-      }
-
-      // 检查媒体段完整性 - 确保每个媒体段都有必要的属性
-      const originalMediaSections = this._extractMediaSections(originalSdp);
-      const optimizedMediaSections = this._extractMediaSections(optimizedSdp);
-      
-      if (originalMediaSections.length !== optimizedMediaSections.length) {
-        return { isValid: false, reason: `media_section_count_mismatch_${originalMediaSections.length}_vs_${optimizedMediaSections.length}` };
-      }
-
-      // 验证每个媒体段的关键属性
-      for (let i = 0; i < originalMediaSections.length; i++) {
-        const originalSection = originalMediaSections[i];
-        const optimizedSection = optimizedMediaSections[i];
-        
-        // 检查媒体类型是否一致
-        const originalType = originalSection.match(/m=(\w+)/)?.[1];
-        const optimizedType = optimizedSection.match(/m=(\w+)/)?.[1];
-        
-        if (originalType !== optimizedType) {
-          return { isValid: false, reason: `media_type_mismatch_section_${i}_${originalType}_vs_${optimizedType}` };
-        }
-
-        // 检查RTP映射是否保留
-        const originalRtpMaps = (originalSection.match(/a=rtpmap:/g) || []).length;
-        const optimizedRtpMaps = (optimizedSection.match(/a=rtpmap:/g) || []).length;
-        
-        if (originalRtpMaps > 0 && optimizedRtpMaps === 0) {
-          return { isValid: false, reason: `missing_rtpmap_in_section_${i}` };
-        }
-      }
-
-      // 检查SDP行格式完整性
-      const optimizedLines = optimizedSdp.split('\n');
-      for (let i = 0; i < optimizedLines.length; i++) {
-        const line = optimizedLines[i].trim();
-        if (line.length === 0) continue;
-        
-        // 每行应该以字母=开始（SDP格式要求）
-        if (!/^[a-z]=/.test(line)) {
-          return { isValid: false, reason: `invalid_line_format_${i}_${line.substring(0, 10)}` };
-        }
-      }
-
-      // 检查SDP长度变化是否合理（增强版本）
-      const lengthDiff = Math.abs(optimizedSdp.length - originalSdp.length);
-      const maxAllowedDiff = Math.max(originalSdp.length * 0.15, 500); // 允许15%的变化或最少500字节
-      if (lengthDiff > maxAllowedDiff) {
-        return { isValid: false, reason: `excessive_length_change_${lengthDiff}_max_${maxAllowedDiff}` };
-      }
-
-      // 检查是否包含无效字符或格式
-      if (optimizedSdp.includes('\r\r') || optimizedSdp.includes('\n\n\n')) {
-        return { isValid: false, reason: "invalid_line_endings_detected" };
-      }
-
-      return { isValid: true };
-    } catch (error) {
-      return { isValid: false, reason: `validation_error_${error.message}` };
-    }
-  }
-
-  /**
-   * 提取SDP中的媒体段
-   * @param {string} sdp - SDP字符串
-   * @returns {Array} 媒体段数组
-   * @private
-   */
-  _extractMediaSections(sdp) {
-    try {
-      const sections = [];
-      const lines = sdp.split('\n');
-      let currentSection = '';
-      let inMediaSection = false;
-
-      for (const line of lines) {
-        if (line.startsWith('m=')) {
-          if (inMediaSection && currentSection) {
-            sections.push(currentSection.trim());
-          }
-          currentSection = line + '\n';
-          inMediaSection = true;
-        } else if (inMediaSection) {
-          currentSection += line + '\n';
-        }
-      }
-
-      // 添加最后一个媒体段
-      if (inMediaSection && currentSection) {
-        sections.push(currentSection.trim());
-      }
-
-      return sections;
-    } catch (error) {
-      console.warn("⚠️ 提取媒体段时出错:", error);
-      return [];
-    }
-  }
-
-  /**
-   * SDP优化回滚机制 - 处理优化失败的情况
-   * @param {RTCSessionDescription} sdp - SDP对象
-   * @param {string} originalSdp - 原始SDP字符串
-   * @param {Array} attemptedModifications - 尝试应用的修改
-   * @param {string} reason - 回滚原因
-   * @returns {Object} 回滚结果
-   * @private
-   */
-  _rollbackSdpOptimization(sdp, originalSdp, attemptedModifications, reason) {
-    console.warn("🔄 执行SDP优化回滚，原因:", reason);
-    
-    // 恢复原始SDP
-    sdp.sdp = originalSdp;
-    
-    // 记录回滚信息
-    const rollbackInfo = {
+    this.eventBus?.emit("webrtc:video-metadata-loaded", {
+      width: this.videoElement.videoWidth,
+      height: this.videoElement.videoHeight,
+      duration: this.videoElement.duration,
       timestamp: Date.now(),
-      reason: reason,
-      attemptedModifications: attemptedModifications,
-      originalLength: originalSdp.length
-    };
-    
-    // 存储回滚信息用于调试
-    if (!this._sdpRollbackHistory) {
-      this._sdpRollbackHistory = [];
-    }
-    this._sdpRollbackHistory.push(rollbackInfo);
-    
-    // 保持历史记录在合理范围内
-    if (this._sdpRollbackHistory.length > 10) {
-      this._sdpRollbackHistory = this._sdpRollbackHistory.slice(-5);
-    }
-    
-    // 触发回滚事件
-    this.eventBus?.emit("webrtc:sdp-optimization-rollback", rollbackInfo);
-    
-    console.log("✅ SDP优化回滚完成，已恢复原始SDP");
-    
-    return { 
-      success: false, 
-      reason: reason,
-      rollback: true,
-      attemptedModifications: attemptedModifications,
-      rollbackInfo: rollbackInfo
-    };
+    });
+  }
+
+  _onVideoCanPlay(event) {
+    this.logger.debug("WebRTC", "视频可以开始播放");
+    this.eventBus?.emit("webrtc:video-can-play", { timestamp: Date.now() });
+  }
+
+  _onVideoPlay(event) {
+    this.logger.info("WebRTC", "视频开始播放");
+    this.eventBus?.emit("webrtc:video-play", { timestamp: Date.now() });
+  }
+
+  _onVideoPause(event) {
+    this.logger.info("WebRTC", "视频暂停");
+    this.eventBus?.emit("webrtc:video-pause", { timestamp: Date.now() });
+  }
+
+  _onVideoEnded(event) {
+    this.logger.info("WebRTC", "视频播放结束");
+    this.eventBus?.emit("webrtc:video-ended", { timestamp: Date.now() });
+  }
+
+  _onVideoError(event) {
+    const error = this.videoElement.error;
+    this.logger.error("WebRTC", "视频播放错误", {
+      code: error?.code,
+      message: error?.message,
+      networkState: this.videoElement.networkState,
+      readyState: this.videoElement.readyState,
+    });
+
+    this._handleMediaError("VIDEO_PLAYBACK_ERROR", error);
+  }
+
+  _onVideoResize(event) {
+    this.logger.debug("WebRTC", "视频尺寸变化", {
+      videoWidth: this.videoElement.videoWidth,
+      videoHeight: this.videoElement.videoHeight,
+    });
+
+    this.eventBus?.emit("webrtc:video-resize", {
+      width: this.videoElement.videoWidth,
+      height: this.videoElement.videoHeight,
+      timestamp: Date.now(),
+    });
+  }
+
+  // 音频元素事件处理器
+  _onAudioLoadStart(event) {
+    this.logger.debug("WebRTC", "音频开始加载");
+    this.eventBus?.emit("webrtc:audio-load-start", { timestamp: Date.now() });
+  }
+
+  _onAudioLoadedMetadata(event) {
+    this.logger.info("WebRTC", "音频元数据已加载", {
+      duration: this.audioElement.duration,
+    });
+
+    this.eventBus?.emit("webrtc:audio-metadata-loaded", {
+      duration: this.audioElement.duration,
+      timestamp: Date.now(),
+    });
+  }
+
+  _onAudioCanPlay(event) {
+    this.logger.debug("WebRTC", "音频可以开始播放");
+    this.eventBus?.emit("webrtc:audio-can-play", { timestamp: Date.now() });
+  }
+
+  _onAudioPlay(event) {
+    this.logger.info("WebRTC", "音频开始播放");
+    this.eventBus?.emit("webrtc:audio-play", { timestamp: Date.now() });
+  }
+
+  _onAudioPause(event) {
+    this.logger.info("WebRTC", "音频暂停");
+    this.eventBus?.emit("webrtc:audio-pause", { timestamp: Date.now() });
+  }
+
+  _onAudioEnded(event) {
+    this.logger.info("WebRTC", "音频播放结束");
+    this.eventBus?.emit("webrtc:audio-ended", { timestamp: Date.now() });
+  }
+
+  _onAudioError(event) {
+    const error = this.audioElement.error;
+    this.logger.error("WebRTC", "音频播放错误", {
+      code: error?.code,
+      message: error?.message,
+      networkState: this.audioElement.networkState,
+      readyState: this.audioElement.readyState,
+    });
+
+    this._handleMediaError("AUDIO_PLAYBACK_ERROR", error);
   }
 
   /**
-   * 设置错误状态 - 辅助方法
-   * @param {string} message - 错误消息
+   * 处理媒体错误
    * @private
    */
-  _setError(message) {
-    console.error("❌ WebRTC错误:", message);
-    this.eventBus?.emit("webrtc:error", { message });
+  _handleMediaError(errorType, error) {
+    const mediaError = {
+      type: this.ERROR_TYPES.MEDIA,
+      level: this.ERROR_LEVELS.ERROR,
+      code: errorType,
+      message: error?.message || "媒体处理错误",
+      userMessage: this._getMediaErrorUserMessage(errorType, error),
+      timestamp: Date.now(),
+      shouldRetry: this._shouldRetryMediaError(errorType),
+      details: {
+        errorType: errorType,
+        originalError: error,
+        videoElementState: this.videoElement
+          ? {
+              readyState: this.videoElement.readyState,
+              networkState: this.videoElement.networkState,
+              error: this.videoElement.error,
+            }
+          : null,
+        audioElementState: this.audioElement
+          ? {
+              readyState: this.audioElement.readyState,
+              networkState: this.audioElement.networkState,
+              error: this.audioElement.error,
+            }
+          : null,
+      },
+    };
+
+    // 记录错误
+    this.lastError = mediaError;
+    this.errorHistory.push(mediaError);
+
+    // 限制错误历史记录长度
+    if (this.errorHistory.length > 50) {
+      this.errorHistory = this.errorHistory.slice(-50);
+    }
+
+    // 触发错误事件
+    this.eventBus?.emit("webrtc:media-error", mediaError);
+
+    this.logger.error("WebRTC", `媒体错误: ${errorType}`, mediaError);
   }
 
   /**
-   * 验证ICE候选数据
+   * 获取媒体错误的用户友好消息
+   * @private
    */
-  _validateIceCandidate(candidateData) {
-    // 检查基本数据结构
-    if (!candidateData || typeof candidateData !== "object") {
+  _getMediaErrorUserMessage(errorType, error) {
+    switch (errorType) {
+      case "MEDIA_ELEMENT_SETUP_FAILED":
+        return "媒体元素设置失败，请检查浏览器兼容性";
+      case "REMOTE_STREAM_PROCESSING_FAILED":
+        return "远程媒体流处理失败，可能影响音视频播放";
+      case "STREAM_APPLICATION_FAILED":
+        return "媒体流应用失败，请尝试刷新页面";
+      case "VIDEO_STREAM_SETUP_FAILED":
+        return "视频流设置失败，视频可能无法正常显示";
+      case "AUDIO_STREAM_SETUP_FAILED":
+        return "音频流设置失败，音频可能无法正常播放";
+      case "VIDEO_PLAYBACK_ERROR":
+        return this._getVideoErrorMessage(error);
+      case "AUDIO_PLAYBACK_ERROR":
+        return this._getAudioErrorMessage(error);
+      default:
+        return "媒体处理出现未知错误";
+    }
+  }
+
+  /**
+   * 获取视频错误消息
+   * @private
+   */
+  _getVideoErrorMessage(error) {
+    if (!error || !error.code) {
+      return "视频播放出现未知错误";
+    }
+
+    switch (error.code) {
+      case 1: // MEDIA_ERR_ABORTED
+        return "视频播放被中止";
+      case 2: // MEDIA_ERR_NETWORK
+        return "视频网络错误，请检查网络连接";
+      case 3: // MEDIA_ERR_DECODE
+        return "视频解码错误，可能是格式不支持";
+      case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+        return "视频格式不支持";
+      default:
+        return `视频播放错误 (代码: ${error.code})`;
+    }
+  }
+
+  /**
+   * 获取音频错误消息
+   * @private
+   */
+  _getAudioErrorMessage(error) {
+    if (!error || !error.code) {
+      return "音频播放出现未知错误";
+    }
+
+    switch (error.code) {
+      case 1: // MEDIA_ERR_ABORTED
+        return "音频播放被中止";
+      case 2: // MEDIA_ERR_NETWORK
+        return "音频网络错误，请检查网络连接";
+      case 3: // MEDIA_ERR_DECODE
+        return "音频解码错误，可能是格式不支持";
+      case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+        return "音频格式不支持";
+      default:
+        return `音频播放错误 (代码: ${error.code})`;
+    }
+  }
+
+  /**
+   * 判断媒体错误是否应该重试
+   * @private
+   */
+  _shouldRetryMediaError(errorType) {
+    const retryableErrors = [
+      "REMOTE_STREAM_PROCESSING_FAILED",
+      "STREAM_APPLICATION_FAILED",
+      "VIDEO_STREAM_SETUP_FAILED",
+      "AUDIO_STREAM_SETUP_FAILED",
+    ];
+
+    return retryableErrors.includes(errorType);
+  }
+
+  /**
+   * 设置轨道事件监听器
+   * @private
+   */
+  _setupTrackEvents(track) {
+    if (!track) return;
+
+    // 轨道结束事件
+    track.addEventListener("ended", () => {
+      this.logger.info("WebRTC", "媒体轨道结束", {
+        trackKind: track.kind,
+        trackId: track.id,
+        trackLabel: track.label,
+      });
+
+      this.eventBus?.emit("webrtc:track-ended", {
+        track: track,
+        timestamp: Date.now(),
+      });
+
+      // 如果所有轨道都结束了，清理媒体元素
+      if (this.remoteStream) {
+        const activeTracks = this.remoteStream
+          .getTracks()
+          .filter((t) => t.readyState === "live");
+        if (activeTracks.length === 0) {
+          this.logger.info("WebRTC", "所有媒体轨道已结束，清理媒体元素");
+          this._clearMediaElements();
+        }
+      }
+    });
+
+    // 轨道静音状态变化
+    track.addEventListener("mute", () => {
+      this.logger.info("WebRTC", "媒体轨道静音", {
+        trackKind: track.kind,
+        trackId: track.id,
+      });
+
+      this.eventBus?.emit("webrtc:track-muted", {
+        track: track,
+        timestamp: Date.now(),
+      });
+    });
+
+    track.addEventListener("unmute", () => {
+      this.logger.info("WebRTC", "媒体轨道取消静音", {
+        trackKind: track.kind,
+        trackId: track.id,
+      });
+
+      this.eventBus?.emit("webrtc:track-unmuted", {
+        track: track,
+        timestamp: Date.now(),
+      });
+    });
+
+    this.logger.debug("WebRTC", "轨道事件监听器已设置", {
+      trackKind: track.kind,
+      trackId: track.id,
+    });
+  }
+
+  /**
+   * 清理媒体元素
+   * @private
+   */
+  _clearMediaElements() {
+    try {
+      // 清理视频元素
+      if (this.videoElement) {
+        this.videoElement.srcObject = null;
+        this.videoElement.load(); // 重置元素状态
+        this.logger.debug("WebRTC", "视频元素已清理");
+      }
+
+      // 清理音频元素
+      if (this.audioElement) {
+        this.audioElement.srcObject = null;
+        this.audioElement.load(); // 重置元素状态
+        this.logger.debug("WebRTC", "音频元素已清理");
+      }
+
+      // 触发媒体元素清理事件
+      this.eventBus?.emit("webrtc:media-elements-cleared", {
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "清理媒体元素失败", error);
+    }
+  }
+
+  /**
+   * 获取媒体流状态信息
+   */
+  getMediaStreamStatus() {
+    const status = {
+      hasRemoteStream: !!this.remoteStream,
+      streamId: this.remoteStream?.id || null,
+      tracks: {
+        video: [],
+        audio: [],
+      },
+      elements: {
+        video: {
+          present: !!this.videoElement,
+          ready: this.videoElement ? this.videoElement.readyState : null,
+          playing: this.videoElement ? !this.videoElement.paused : false,
+          muted: this.videoElement ? this.videoElement.muted : null,
+          dimensions: this.videoElement
+            ? {
+                width: this.videoElement.videoWidth,
+                height: this.videoElement.videoHeight,
+              }
+            : null,
+        },
+        audio: {
+          present: !!this.audioElement,
+          ready: this.audioElement ? this.audioElement.readyState : null,
+          playing: this.audioElement ? !this.audioElement.paused : false,
+          muted: this.audioElement ? this.audioElement.muted : null,
+          volume: this.audioElement ? this.audioElement.volume : null,
+        },
+      },
+      timestamp: Date.now(),
+    };
+
+    // 收集轨道信息
+    if (this.remoteStream) {
+      this.remoteStream.getVideoTracks().forEach((track) => {
+        status.tracks.video.push({
+          id: track.id,
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          settings: track.getSettings ? track.getSettings() : null,
+        });
+      });
+
+      this.remoteStream.getAudioTracks().forEach((track) => {
+        status.tracks.audio.push({
+          id: track.id,
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          settings: track.getSettings ? track.getSettings() : null,
+        });
+      });
+    }
+
+    return status;
+  }
+
+  /**
+   * 控制媒体播放
+   */
+  async controlMediaPlayback(action, mediaType = "both") {
+    try {
+      const results = {
+        video: null,
+        audio: null,
+        timestamp: Date.now(),
+      };
+
+      // 控制视频
+      if (
+        (mediaType === "both" || mediaType === "video") &&
+        this.videoElement
+      ) {
+        try {
+          switch (action) {
+            case "play":
+              await this.videoElement.play();
+              results.video = "playing";
+              break;
+            case "pause":
+              this.videoElement.pause();
+              results.video = "paused";
+              break;
+            case "mute":
+              this.videoElement.muted = true;
+              results.video = "muted";
+              break;
+            case "unmute":
+              this.videoElement.muted = false;
+              results.video = "unmuted";
+              break;
+            default:
+              throw new Error(`未知的媒体控制动作: ${action}`);
+          }
+        } catch (error) {
+          results.video = `error: ${error.message}`;
+          this.logger.error("WebRTC", `视频${action}操作失败`, error);
+        }
+      }
+
+      // 控制音频
+      if (
+        (mediaType === "both" || mediaType === "audio") &&
+        this.audioElement
+      ) {
+        try {
+          switch (action) {
+            case "play":
+              await this.audioElement.play();
+              results.audio = "playing";
+              break;
+            case "pause":
+              this.audioElement.pause();
+              results.audio = "paused";
+              break;
+            case "mute":
+              this.audioElement.muted = true;
+              results.audio = "muted";
+              break;
+            case "unmute":
+              this.audioElement.muted = false;
+              results.audio = "unmuted";
+              break;
+            default:
+              throw new Error(`未知的媒体控制动作: ${action}`);
+          }
+        } catch (error) {
+          results.audio = `error: ${error.message}`;
+          this.logger.error("WebRTC", `音频${action}操作失败`, error);
+        }
+      }
+
+      this.logger.info("WebRTC", `媒体控制操作完成: ${action}`, results);
+
+      // 触发媒体控制事件
+      this.eventBus?.emit("webrtc:media-control", {
+        action: action,
+        mediaType: mediaType,
+        results: results,
+        timestamp: Date.now(),
+      });
+
+      return results;
+    } catch (error) {
+      this.logger.error("WebRTC", "媒体控制操作失败", error);
+      throw error;
+    }
+  }
+
+  /**
+   * 清理媒体流
+   * @private
+   */
+  _cleanupMediaStreams() {
+    try {
+      // 停止所有远程流轨道
+      if (this.remoteStream) {
+        this.logger.info("WebRTC", "清理远程媒体流", {
+          streamId: this.remoteStream.id,
+          trackCount: this.remoteStream.getTracks().length,
+        });
+
+        this.remoteStream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+            this.logger.debug("WebRTC", "媒体轨道已停止", {
+              trackKind: track.kind,
+              trackId: track.id,
+            });
+          } catch (error) {
+            this.logger.warn("WebRTC", "停止媒体轨道失败", error);
+          }
+        });
+
+        this.remoteStream = null;
+      }
+
+      // 清理媒体元素
+      this._clearMediaElements();
+
+      this.logger.info("WebRTC", "媒体流清理完成");
+    } catch (error) {
+      this.logger.error("WebRTC", "清理媒体流失败", error);
+    }
+  }
+
+  /**
+   * 设置数据通道事件（增强版）
+   * 支持更好的消息处理和错误恢复
+   * @private
+   */
+  _setupDataChannelEvents(channel) {
+    // 通道打开事件
+    channel.onopen = () => {
+      this.logger.info("WebRTC", "数据通道已打开", {
+        label: channel.label,
+        readyState: channel.readyState,
+        id: channel.id,
+        ordered: channel.ordered,
+        maxRetransmits: channel.maxRetransmits,
+        protocol: channel.protocol,
+      });
+
+      // 更新通道状态统计
+      this._updateDataChannelConnectionStats(channel, "opened");
+
+      this.eventBus?.emit("webrtc:datachannel-open", {
+        label: channel.label,
+        channel: channel,
+        channelInfo: {
+          id: channel.id,
+          ordered: channel.ordered,
+          maxRetransmits: channel.maxRetransmits,
+          protocol: channel.protocol,
+        },
+        timestamp: Date.now(),
+      });
+    };
+
+    // 通道关闭事件
+    channel.onclose = () => {
+      this.logger.info("WebRTC", "数据通道已关闭", {
+        label: channel.label,
+        readyState: channel.readyState,
+      });
+
+      // 更新通道状态统计
+      this._updateDataChannelConnectionStats(channel, "closed");
+
+      this.eventBus?.emit("webrtc:datachannel-close", {
+        label: channel.label,
+        timestamp: Date.now(),
+      });
+    };
+
+    // 消息接收事件（增强版）
+    channel.onmessage = (event) => {
+      this._handleDataChannelMessage(channel, event);
+    };
+
+    // 错误处理事件（增强版）
+    channel.onerror = (error) => {
+      this._handleDataChannelError(channel, error);
+    };
+  }
+
+  /**
+   * 处理数据通道消息接收（增强版）
+   * 支持多种消息格式和协议兼容性
+   * @private
+   */
+  _handleDataChannelMessage(channel, event) {
+    try {
+      const rawData = event.data;
+      const dataSize = rawData.length || 0;
+
+      this.logger.debug("WebRTC", "接收到数据通道原始消息", {
+        label: channel.label,
+        dataType: typeof rawData,
+        dataSize: dataSize,
+      });
+
+      // 解析消息内容
+      let parsedMessage;
+      let messageType = "unknown";
+
+      try {
+        // 尝试解析为 JSON（保持协议兼容性）
+        parsedMessage = JSON.parse(rawData);
+        messageType = parsedMessage.type || "object";
+      } catch (parseError) {
+        // 如果不是 JSON，作为字符串处理
+        parsedMessage = rawData;
+        messageType = "string";
+
+        this.logger.debug("WebRTC", "消息不是 JSON 格式，作为字符串处理", {
+          label: channel.label,
+          messagePreview: rawData.substring(0, 100),
+        });
+      }
+
+      // 验证消息内容
+      if (!this._validateReceivedMessage(parsedMessage, rawData)) {
+        this.logger.warn("WebRTC", "接收到的消息验证失败", {
+          label: channel.label,
+          messageType: messageType,
+        });
+        return;
+      }
+
+      // 更新接收统计
+      this._updateDataChannelStats("received", dataSize, messageType);
+
+      // 处理特殊消息类型（保持协议兼容性）
+      const processedMessage = this._processReceivedMessage(
+        parsedMessage,
+        messageType
+      );
+
+      this.logger.debug("WebRTC", "数据通道消息处理完成", {
+        label: channel.label,
+        messageType: messageType,
+        dataSize: dataSize,
+        processed: !!processedMessage,
+      });
+
+      // 触发消息接收事件
+      this.eventBus?.emit("webrtc:datachannel-message", {
+        label: channel.label,
+        message: processedMessage || parsedMessage,
+        originalMessage: parsedMessage,
+        messageType: messageType,
+        dataSize: dataSize,
+        timestamp: Date.now(),
+        channel: {
+          label: channel.label,
+          readyState: channel.readyState,
+        },
+      });
+
+      // 触发特定类型的消息事件（用于更精确的处理）
+      if (messageType !== "unknown") {
+        this.eventBus?.emit(`webrtc:datachannel-message:${messageType}`, {
+          label: channel.label,
+          message: processedMessage || parsedMessage,
+          dataSize: dataSize,
+          timestamp: Date.now(),
+        });
+      }
+    } catch (error) {
+      this.logger.error("WebRTC", "处理数据通道消息时发生错误", {
+        label: channel.label,
+        error: error.message,
+        stack: error.stack,
+      });
+
+      // 更新错误统计
+      this._updateDataChannelStats("failed", 0, "parse-error");
+
+      // 触发消息处理错误事件
+      this.eventBus?.emit("webrtc:datachannel-message-error", {
+        label: channel.label,
+        error: error,
+        rawData: event.data,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  /**
+   * 验证接收到的消息
+   * @private
+   */
+  _validateReceivedMessage(message, rawData) {
+    // 检查消息大小限制
+    if (rawData && rawData.length > 65536) {
+      // 64KB 限制
+      this.logger.warn("WebRTC", "接收到的消息过大", { size: rawData.length });
       return false;
     }
 
-    // 检查必需的candidate字段
-    if (
-      !candidateData.candidate ||
-      typeof candidateData.candidate !== "string" ||
-      candidateData.candidate.trim() === ""
-    ) {
-      return false;
-    }
-
-    // 检查sdpMid和sdpMLineIndex字段
-    if (
-      candidateData.sdpMid === undefined &&
-      candidateData.sdpMLineIndex === undefined
-    ) {
+    // 检查消息内容
+    if (message === null || message === undefined) {
       return false;
     }
 
@@ -2663,2661 +3186,1632 @@ class WebRTCManager {
   }
 
   /**
-   * 处理缓存的ICE候选
-   */
-  async _processPendingIceCandidates() {
-    if (this.pendingIceCandidates.length === 0) {
-      return;
-    }
-
-    console.log(`🔄 处理 ${this.pendingIceCandidates.length} 个缓存的ICE候选`);
-
-    const candidates = [...this.pendingIceCandidates];
-    this.pendingIceCandidates = [];
-
-    for (const candidateData of candidates) {
-      try {
-        await this._addIceCandidate(candidateData);
-      } catch (error) {
-        console.warn("⚠️ 处理缓存ICE候选失败:", error);
-        // 继续处理其他候选，不中断流程
-      }
-    }
-  }
-
-  /**
-   * 添加ICE候选到PeerConnection
-   */
-  async _addIceCandidate(candidateData) {
-    if (!this.pc) {
-      throw new Error("PeerConnection不存在");
-    }
-
-    // 创建RTCIceCandidate对象
-    const candidate = new RTCIceCandidate({
-      candidate: candidateData.candidate,
-      sdpMid: candidateData.sdpMid,
-      sdpMLineIndex: candidateData.sdpMLineIndex,
-    });
-
-    await this.pc.addIceCandidate(candidate);
-    console.log("✅ ICE候选已添加:", {
-      type: candidate.type || "unknown",
-      protocol: candidate.protocol || "unknown",
-      address: candidate.address || "hidden",
-      port: candidate.port || "unknown",
-    });
-  }
-
-  /**
-   * 处理ICE候选
-   */
-  async handleIceCandidate(candidateData) {
-    console.log("📥 收到远程ICE候选原始数据:", candidateData);
-
-    // 验证ICE候选数据
-    if (!this._validateIceCandidate(candidateData)) {
-      console.warn("⚠️ ICE候选数据无效，跳过处理:", candidateData);
-      return;
-    }
-
-    console.log("📥 ICE候选详细信息:", {
-      candidate: candidateData.candidate,
-      sdpMid: candidateData.sdpMid,
-      sdpMLineIndex: candidateData.sdpMLineIndex,
-    });
-
-    // 检查PeerConnection和远程描述状态
-    if (!this.pc) {
-      console.warn("⚠️ PeerConnection不存在，无法处理ICE候选");
-      return;
-    }
-
-    if (!this.pc.remoteDescription) {
-      console.warn("⚠️ 远程描述未设置，缓存ICE候选");
-      this.pendingIceCandidates.push(candidateData);
-      return;
-    }
-
-    // 尝试添加ICE候选
-    try {
-      await this._addIceCandidate(candidateData);
-    } catch (error) {
-      console.warn("⚠️ ICE候选添加失败，但不中断连接流程:", error);
-      console.warn("⚠️ 失败的候选数据:", candidateData);
-
-      // 发出错误事件但不抛出异常，确保连接流程继续
-      this.eventBus?.emit("webrtc:ice-candidate-error", {
-        error: error.message,
-        candidateData: candidateData,
-      });
-    }
-  }
-
-  /**
-   * 处理信令服务器发送的ICE候选 - 增强版本
-   * 基于selkies-gstreamer最佳实践，支持TURN强制使用和候选验证
-   * @param {RTCIceCandidate|Object} candidateData - ICE候选数据
+   * 处理接收到的消息（协议兼容性处理）
    * @private
    */
-  async _onSignalingICE(candidateData) {
-    console.log("📥 收到信令服务器ICE候选:", JSON.stringify(candidateData));
-
-    // 更新远程ICE候选统计
-    if (!this.connectionStats.remoteIceCandidates) {
-      this.connectionStats.remoteIceCandidates = 0;
-    }
-    this.connectionStats.remoteIceCandidates++;
-
-    // 验证ICE候选数据
-    if (!this._validateIceCandidate(candidateData)) {
-      console.warn("⚠️ ICE候选数据无效，跳过处理:", candidateData);
-      this.eventBus?.emit("webrtc:ice-candidate-invalid", { candidateData });
-      return;
-    }
-
-    // TURN服务器强制使用逻辑 - 过滤非relay候选
-    if (this._shouldForceTurn() && !this._isRelayCandidate(candidateData)) {
-      console.log("🚫 强制使用TURN服务器，拒绝非relay候选:", JSON.stringify(candidateData));
-      this.eventBus?.emit("webrtc:ice-candidate-filtered", { 
-        candidateData, 
-        reason: "non-relay candidate rejected due to forceTurn" 
-      });
-      return;
-    }
-
-    // 检查PeerConnection状态
-    if (!this.pc) {
-      console.warn("⚠️ PeerConnection不存在，无法处理ICE候选");
-      this.eventBus?.emit("webrtc:ice-candidate-error", { 
-        error: "PeerConnection not available", 
-        candidateData 
-      });
-      return;
-    }
-
-    // 如果远程描述未设置，缓存ICE候选
-    if (!this.pc.remoteDescription) {
-      console.warn("⚠️ 远程描述未设置，缓存ICE候选");
-      this.pendingIceCandidates.push(candidateData);
-      this.eventBus?.emit("webrtc:ice-candidate-cached", { candidateData });
-      return;
-    }
-
-    // 添加ICE候选到PeerConnection
-    try {
-      await this._addIceCandidateWithRetry(candidateData);
-      this.eventBus?.emit("webrtc:ice-candidate-added", { candidateData });
-    } catch (error) {
-      console.warn("⚠️ ICE候选添加失败，但不中断连接流程:", error);
-      this.eventBus?.emit("webrtc:ice-candidate-error", {
-        error: error.message,
-        candidateData: candidateData,
-      });
-      
-      // 实现错误恢复机制
-      this._handleIceCandidateError(error, candidateData);
-    }
-  }
-
-  /**
-   * 检查是否应该强制使用TURN服务器
-   * @returns {boolean} 是否强制使用TURN
-   * @private
-   */
-  _shouldForceTurn() {
-    // 检查配置中是否启用了TURN强制使用
-    if (this.config) {
-      const webrtcConfig = this.config.get("webrtc", {});
-      if (webrtcConfig.forceTurn !== undefined) {
-        return webrtcConfig.forceTurn;
-      }
-    }
-
-    // 检查ICE服务器配置中是否只有TURN服务器
-    const hasTurnServers = this.iceServers.some(server => {
-      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-      return urls.some(url => url.startsWith('turn:') || url.startsWith('turns:'));
-    });
-
-    const hasOnlyTurnServers = this.iceServers.every(server => {
-      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-      return urls.every(url => url.startsWith('turn:') || url.startsWith('turns:'));
-    });
-
-    // 如果只配置了TURN服务器，则强制使用
-    return hasTurnServers && hasOnlyTurnServers;
-  }
-
-  /**
-   * 检查ICE候选是否为relay类型（TURN服务器候选）
-   * @param {Object} candidateData - ICE候选数据
-   * @returns {boolean} 是否为relay候选
-   * @private
-   */
-  _isRelayCandidate(candidateData) {
-    if (!candidateData || !candidateData.candidate) {
-      return false;
-    }
-
-    const candidateString = candidateData.candidate;
-    
-    // 检查候选字符串中是否包含"relay"关键字
-    return candidateString.toLowerCase().includes('relay');
-  }
-
-  /**
-   * 带重试机制的ICE候选添加
-   * @param {Object} candidateData - ICE候选数据
-   * @param {number} maxRetries - 最大重试次数
-   * @private
-   */
-  async _addIceCandidateWithRetry(candidateData, maxRetries = 3) {
-    let lastError;
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        await this._addIceCandidate(candidateData);
-        console.log(`✅ ICE候选添加成功 (第${attempt}次尝试)`);
-        return;
-      } catch (error) {
-        lastError = error;
-        console.warn(`⚠️ ICE候选添加失败 (第${attempt}/${maxRetries}次尝试):`, error.message);
-        
-        if (attempt < maxRetries) {
-          // 等待一段时间后重试
-          await new Promise(resolve => setTimeout(resolve, 100 * attempt));
-        }
-      }
-    }
-    
-    throw lastError;
-  }
-
-  /**
-   * ICE候选错误处理和恢复机制
-   * @param {Error} error - 错误对象
-   * @param {Object} candidateData - 失败的ICE候选数据
-   * @private
-   */
-  _handleIceCandidateError(error, candidateData) {
-    console.warn("🔧 执行ICE候选错误恢复机制");
-    
-    // 记录错误统计
-    if (!this.connectionStats.iceCandidateErrors) {
-      this.connectionStats.iceCandidateErrors = 0;
-    }
-    this.connectionStats.iceCandidateErrors++;
-
-    // 如果错误过多，可能需要重置连接
-    if (this.connectionStats.iceCandidateErrors > 10) {
-      console.warn("⚠️ ICE候选错误过多，可能需要重置连接");
-      this.eventBus?.emit("webrtc:ice-candidate-errors-excessive", {
-        errorCount: this.connectionStats.iceCandidateErrors
-      });
-    }
-
-    // 尝试清理和重新初始化ICE收集
-    if (error.message.includes('InvalidStateError') && this.pc) {
-      console.log("🔄 尝试重新启动ICE收集");
-      try {
-        // 重新启动ICE收集
-        this.pc.restartIce();
-        this.eventBus?.emit("webrtc:ice-restart-attempted");
-      } catch (restartError) {
-        console.warn("⚠️ ICE重启失败:", restartError);
-      }
-    }
-  }
-
-  /**
-   * 处理远程媒体轨道
-   */
-  _handleRemoteTrack(event) {
-    const stream = event.streams[0];
-    const track = event.track;
-
-    console.log(`🎬 接收到${track.kind}轨道，设置到媒体元素`);
-
-    this.remoteStream = stream;
-
-    if (track.kind === "video" && this.videoElement) {
-      this.videoElement.srcObject = stream;
-      this.videoElement
-        .play()
-        .then(() => {
-          console.log("▶️ 视频播放开始");
-        })
-        .catch((error) => {
-          console.warn("⚠️ 视频自动播放失败:", error);
-        });
-    } else if (track.kind === "audio" && this.audioElement) {
-      this.audioElement.srcObject = stream;
-      this.audioElement
-        .play()
-        .then(() => {
-          console.log("🔊 音频播放开始");
-        })
-        .catch((error) => {
-          console.warn("⚠️ 音频自动播放失败:", error);
-        });
-    }
-
-    this.eventBus?.emit("webrtc:track-received", {
-      kind: track.kind,
-      stream: stream,
-    });
-  }
-
-  /**
-   * 处理ICE候选收集完成
-   * @private
-   */
-  _handleIceCandidateGatheringComplete() {
-    console.log("🎯 ICE候选收集完成，停止相关定时器");
-    
-    // 停止ICE收集超时定时器
-    this._clearTimer("iceTimer");
-    
-    // 更新连接统计
-    if (!this.connectionStats.iceGatheringCompleteTime) {
-      this.connectionStats.iceGatheringCompleteTime = Date.now();
-    }
-    
-    // 触发事件
-    this.eventBus?.emit("webrtc:ice-gathering-complete", {
-      timestamp: Date.now(),
-      totalCandidates: this.connectionStats.localIceCandidates || 0
-    });
-  }
-
-  /**
-   * 更新ICE连接统计
-   * @param {string} state - ICE连接状态
-   * @private
-   */
-  _updateIceConnectionStats(state) {
-    if (!this.connectionStats.iceStateHistory) {
-      this.connectionStats.iceStateHistory = [];
-    }
-    
-    this.connectionStats.iceStateHistory.push({
-      state,
-      timestamp: Date.now()
-    });
-    
-    // 保持历史记录在合理范围内
-    if (this.connectionStats.iceStateHistory.length > 50) {
-      this.connectionStats.iceStateHistory = this.connectionStats.iceStateHistory.slice(-25);
-    }
-  }
-
-  /**
-   * 处理ICE状态：new
-   * @private
-   */
-  _handleIceStateNew() {
-    this.eventBus?.emit("webrtc:ice-state-new");
-  }
-
-  /**
-   * 处理ICE状态：checking
-   * @private
-   */
-  _handleIceStateChecking() {
-    // 启动ICE检查超时定时器
-    this._setTimer("iceCheckingTimer", () => {
-      console.warn("⏰ ICE检查超时");
-      this.eventBus?.emit("webrtc:ice-checking-timeout");
-    }, 30000); // 30秒超时
-    
-    this.eventBus?.emit("webrtc:ice-state-checking");
-  }
-
-  /**
-   * 处理ICE状态：connected
-   * @private
-   */
-  _handleIceStateConnected() {
-    this._clearTimer("iceCheckingTimer");
-    this._handleConnectionSuccess();
-    this.eventBus?.emit("webrtc:ice-state-connected");
-  }
-
-  /**
-   * 处理ICE状态：completed
-   * @private
-   */
-  _handleIceStateCompleted() {
-    this._clearTimer("iceCheckingTimer");
-    this._handleConnectionSuccess();
-    
-    // 记录连接完成时间
-    if (!this.connectionStats.iceCompletedTime) {
-      this.connectionStats.iceCompletedTime = Date.now();
-    }
-    
-    this.eventBus?.emit("webrtc:ice-state-completed");
-  }
-
-  /**
-   * 处理ICE状态：failed
-   * @private
-   */
-  _handleIceStateFailed() {
-    this._clearTimer("iceCheckingTimer");
-    
-    // 记录失败统计
-    if (!this.connectionStats.iceFailureCount) {
-      this.connectionStats.iceFailureCount = 0;
-    }
-    this.connectionStats.iceFailureCount++;
-    
-    const error = new Error(`ICE连接失败: ${this.pc.iceConnectionState}`);
-    
-    // 如果连接已建立，这是网络中断，使用网络中断重试机制
-    const errorType = this.retryManager.connectionEstablished ? "network-interruption" : "ice-failed";
-    this._handleConnectionError(error, errorType);
-    this.eventBus?.emit("webrtc:ice-state-failed", { error });
-  }
-
-  /**
-   * 处理ICE状态：disconnected
-   * @private
-   */
-  _handleIceStateDisconnected() {
-    this._clearTimer("iceCheckingTimer");
-    
-    // 记录断开统计
-    if (!this.connectionStats.iceDisconnectCount) {
-      this.connectionStats.iceDisconnectCount = 0;
-    }
-    this.connectionStats.iceDisconnectCount++;
-    
-    // 如果断开次数过多，可能需要重连
-    if (this.connectionStats.iceDisconnectCount > 3) {
-      console.warn("⚠️ ICE连接频繁断开，可能需要重连");
-      this.eventBus?.emit("webrtc:ice-frequent-disconnects", {
-        count: this.connectionStats.iceDisconnectCount
-      });
-    }
-    
-    const error = new Error(`ICE连接断开: ${this.pc.iceConnectionState}`);
-    
-    // 如果连接已建立，这是网络中断，使用网络中断重试机制
-    const errorType = this.retryManager.connectionEstablished ? "network-interruption" : "ice-disconnected";
-    this._handleConnectionError(error, errorType);
-    
-    this.eventBus?.emit("webrtc:ice-state-disconnected");
-  }
-
-  /**
-   * 处理ICE状态：closed
-   * @private
-   */
-  _handleIceStateClosed() {
-    this._clearTimer("iceCheckingTimer");
-    this.eventBus?.emit("webrtc:ice-state-closed");
-  }
-
-  /**
-   * 处理数据通道事件
-   * @param {RTCDataChannelEvent} event - 数据通道事件
-   * @private
-   */
-  _onPeerDataChannel(event) {
-    console.log("📡 数据通道已创建:", event.channel.label);
-
-    // 设置发送通道
-    this._send_channel = event.channel;
-
-    // 绑定数据通道事件处理器
-    this._send_channel.onmessage = this._onPeerDataChannelMessage.bind(this);
-
-    this._send_channel.onopen = () => {
-      console.log("✅ 数据通道已打开");
-      this.eventBus?.emit("webrtc:data-channel-open");
-    };
-
-    this._send_channel.onclose = () => {
-      console.log("🔒 数据通道已关闭");
-      this.eventBus?.emit("webrtc:data-channel-close");
-    };
-
-    this._send_channel.onerror = (error) => {
-      console.error("❌ 数据通道错误:", error);
-      this.eventBus?.emit("webrtc:data-channel-error", { error });
-    };
-  }
-
-  /**
-   * 处理数据通道消息 - 增强版本，包含完整的类型验证和格式检查
-   * @param {MessageEvent} event - 消息事件
-   * @private
-   */
-  _onPeerDataChannelMessage(event) {
-    // 基本数据验证
-    if (!event || !event.data) {
-      console.warn("⚠️ 收到空的数据通道消息事件");
-      this.eventBus?.emit("webrtc:data-channel-message-error", {
-        error: "empty_message_event",
-        timestamp: Date.now()
-      });
-      return;
-    }
-
-    const rawMessage = event.data;
-    console.log("📨 收到数据通道原始消息:", rawMessage.length > 200 ? rawMessage.substring(0, 200) + '...' : rawMessage);
-
-    // 消息格式验证和解析
-    const parseResult = this._parseDataChannelMessage(rawMessage);
-    if (!parseResult.success) {
-      console.error("❌ 数据通道消息解析失败:", parseResult.error);
-      this.eventBus?.emit("webrtc:data-channel-message-parse-error", {
-        rawMessage: rawMessage,
-        error: parseResult.error,
-        timestamp: Date.now()
-      });
-      return;
-    }
-
-    const msg = parseResult.message;
-
-    // 消息类型和结构验证
-    const validationResult = this._validateDataChannelMessageStructure(msg);
-    if (!validationResult.isValid) {
-      console.error("❌ 数据通道消息结构验证失败:", validationResult.reason);
-      this.eventBus?.emit("webrtc:data-channel-message-validation-error", {
-        message: msg,
-        error: validationResult.reason,
-        timestamp: Date.now()
-      });
-      return;
-    }
-
-    // 记录消息统计
-    this._updateDataChannelMessageStats(msg.type, rawMessage.length);
-
-    console.log("📨 数据通道消息处理:", { type: msg.type, dataSize: rawMessage.length });
-
-    // 根据消息类型分发处理
-    try {
-      switch (msg.type) {
-        case "pipeline":
-          this._handlePipelineMessage(msg.data);
-          break;
-        case "gpu_stats":
-          this._handleGpuStatsMessage(msg.data);
-          break;
-        case "clipboard":
-          this._handleClipboardMessage(msg.data);
-          break;
-        case "cursor":
-          this._handleCursorMessage(msg.data);
-          break;
-        case "system":
-          this._handleSystemMessage(msg.data);
-          break;
+  _processReceivedMessage(message, messageType) {
+    // 处理特殊的协议消息
+    if (messageType === "object" && message.type) {
+      switch (message.type) {
         case "ping":
-          this._handlePingMessage(msg.data);
+          // 处理 ping 消息，自动回复 pong
+          this._handlePingMessage(message);
           break;
         case "pong":
-          this._handlePongMessage(msg.data);
+          // 处理 pong 消息，更新延迟统计
+          this._handlePongMessage(message);
           break;
-        case "system_stats":
-          this._handleSystemStatsMessage(msg.data);
-          break;
-        case "latency_measurement":
-          this._handleLatencyMessage(msg.data);
-          break;
+        case "input":
+          // 处理输入消息（鼠标、键盘等）
+          return this._processInputMessage(message);
+        case "control":
+          // 处理控制消息
+          return this._processControlMessage(message);
         default:
-          console.warn("⚠️ 未处理的消息类型:", msg.type);
-          this.eventBus?.emit("webrtc:data-channel-unhandled-message", {
-            type: msg.type,
-            message: msg,
-            timestamp: Date.now()
-          });
+          // 其他消息类型直接返回
+          break;
       }
-
-      // 触发消息处理成功事件
-      this.eventBus?.emit("webrtc:data-channel-message-processed", {
-        type: msg.type,
-        timestamp: Date.now()
-      });
-
-    } catch (error) {
-      console.error("❌ 处理数据通道消息时发生错误:", error);
-      this.eventBus?.emit("webrtc:data-channel-message-handler-error", {
-        type: msg.type,
-        message: msg,
-        error: error.message,
-        timestamp: Date.now()
-      });
     }
+
+    return message;
   }
 
   /**
-   * 解析数据通道消息
-   * @param {string} rawMessage - 原始消息字符串
-   * @returns {Object} 解析结果
+   * 处理 ping 消息
    * @private
    */
-  _parseDataChannelMessage(rawMessage) {
+  _handlePingMessage(message) {
     try {
-      // 检查消息长度
-      if (rawMessage.length === 0) {
-        return { success: false, error: "empty_message" };
-      }
-
-      if (rawMessage.length > 1048576) { // 1MB limit
-        return { success: false, error: `message_too_large_${rawMessage.length}` };
-      }
-
-      // 尝试JSON解析
-      const message = JSON.parse(rawMessage);
-      return { success: true, message };
-
-    } catch (error) {
-      if (error instanceof SyntaxError) {
-        return { success: false, error: `json_syntax_error_${error.message}` };
-      } else {
-        return { success: false, error: `parse_error_${error.message}` };
-      }
-    }
-  }
-
-  /**
-   * 验证数据通道消息结构
-   * @param {Object} message - 解析后的消息对象
-   * @returns {Object} 验证结果
-   * @private
-   */
-  _validateDataChannelMessageStructure(message) {
-    // 检查基本结构
-    if (!message || typeof message !== 'object') {
-      return { isValid: false, reason: "message_not_object" };
-    }
-
-    // 检查必需的type字段
-    if (!message.type || typeof message.type !== 'string') {
-      return { isValid: false, reason: "missing_or_invalid_type_field" };
-    }
-
-    // 检查type字段长度
-    if (message.type.length === 0 || message.type.length > 50) {
-      return { isValid: false, reason: `invalid_type_length_${message.type.length}` };
-    }
-
-    // 验证已知消息类型的特定结构
-    const typeValidationResult = this._validateMessageTypeSpecificStructure(message);
-    if (!typeValidationResult.isValid) {
-      return typeValidationResult;
-    }
-
-    return { isValid: true };
-  }
-
-  /**
-   * 验证特定消息类型的结构
-   * @param {Object} message - 消息对象
-   * @returns {Object} 验证结果
-   * @private
-   */
-  _validateMessageTypeSpecificStructure(message) {
-    switch (message.type) {
-      case "pipeline":
-        if (!message.data || typeof message.data !== 'object') {
-          return { isValid: false, reason: "pipeline_missing_data_object" };
-        }
-        break;
-
-      case "clipboard":
-        if (!message.data || !message.data.content) {
-          return { isValid: false, reason: "clipboard_missing_content" };
-        }
-        if (typeof message.data.content !== 'string') {
-          return { isValid: false, reason: "clipboard_content_not_string" };
-        }
-        break;
-
-      case "cursor":
-        if (!message.data || typeof message.data !== 'object') {
-          return { isValid: false, reason: "cursor_missing_data_object" };
-        }
-        break;
-
-      case "system":
-        if (!message.data || !message.data.action) {
-          return { isValid: false, reason: "system_missing_action" };
-        }
-        break;
-
-      case "latency_measurement":
-        if (!message.data || typeof message.data.latency_ms !== 'number') {
-          return { isValid: false, reason: "latency_missing_or_invalid_latency_ms" };
-        }
-        break;
-
-      // 对于其他类型，进行基本验证
-      case "ping":
-      case "pong":
-      case "gpu_stats":
-      case "system_stats":
-        // 这些类型可以有可选的data字段
-        break;
-
-      default:
-        // 未知类型，但结构基本有效
-        break;
-    }
-
-    return { isValid: true };
-  }
-
-  /**
-   * 更新数据通道消息统计
-   * @param {string} messageType - 消息类型
-   * @param {number} messageSize - 消息大小
-   * @private
-   */
-  _updateDataChannelMessageStats(messageType, messageSize) {
-    if (!this.connectionStats.dataChannelStats) {
-      this.connectionStats.dataChannelStats = {
-        totalMessages: 0,
-        totalBytes: 0,
-        messagesByType: {},
-        averageMessageSize: 0,
-        lastMessageTime: null
+      const pongMessage = {
+        type: "pong",
+        timestamp: message.timestamp,
+        responseTime: Date.now(),
       };
-    }
 
-    const stats = this.connectionStats.dataChannelStats;
-    
-    // 更新总体统计
-    stats.totalMessages++;
-    stats.totalBytes += messageSize;
-    stats.averageMessageSize = stats.totalBytes / stats.totalMessages;
-    stats.lastMessageTime = Date.now();
+      this.sendDataChannelMessage(pongMessage, { validateMessage: false });
 
-    // 更新按类型统计
-    if (!stats.messagesByType[messageType]) {
-      stats.messagesByType[messageType] = {
-        count: 0,
-        totalBytes: 0,
-        averageSize: 0,
-        lastReceived: null
-      };
-    }
-
-    const typeStats = stats.messagesByType[messageType];
-    typeStats.count++;
-    typeStats.totalBytes += messageSize;
-    typeStats.averageSize = typeStats.totalBytes / typeStats.count;
-    typeStats.lastReceived = Date.now();
-  }
-
-  /**
-   * 处理pipeline状态消息
-   * @param {Object} data - pipeline状态数据
-   * @private
-   */
-  _handlePipelineMessage(data) {
-    if (data && data.status) {
-      console.log("🔧 Pipeline状态更新:", data.status);
-      this.eventBus?.emit("webrtc:pipeline-status", data);
-    }
-  }
-
-  /**
-   * 处理GPU统计消息
-   * @param {Object} data - GPU统计数据
-   * @private
-   */
-  _handleGpuStatsMessage(data) {
-    console.log("📊 收到GPU统计数据");
-    this.eventBus?.emit("webrtc:gpu-stats", data);
-  }
-
-  /**
-   * 处理剪贴板消息
-   * @param {Object} data - 剪贴板数据
-   * @private
-   */
-  _handleClipboardMessage(data) {
-    if (data && data.content) {
-      const text = this._base64ToString(data.content);
-      console.log("📋 收到剪贴板内容，长度:", data.content.length);
-      this.eventBus?.emit("webrtc:clipboard-content", text);
-    }
-  }
-
-  /**
-   * 处理鼠标光标消息
-   * @param {Object} data - 光标数据
-   * @private
-   */
-  _handleCursorMessage(data) {
-    if (data) {
-      const cursorInfo = {
-        handle: data.handle,
-        curdata: data.curdata,
-        hotspot: data.hotspot,
-        override: data.override,
-      };
-      console.log(
-        `🖱️ 收到光标更新，句柄: ${data.handle}, 热点: ${JSON.stringify(
-          data.hotspot
-        )}, 图像长度: ${data.curdata?.length || 0}`
-      );
-      this.eventBus?.emit("webrtc:cursor-change", cursorInfo);
-    }
-  }
-
-  /**
-   * 处理系统消息
-   * @param {Object} data - 系统操作数据
-   * @private
-   */
-  _handleSystemMessage(data) {
-    if (data && data.action) {
-      console.log("⚙️ 收到系统操作:", data.action);
-      this.eventBus?.emit("webrtc:system-action", data.action);
-    }
-  }
-
-  /**
-   * 处理ping消息，发送pong响应
-   * @param {Object} data - ping数据
-   * @private
-   */
-  _handlePingMessage(data) {
-    const timestamp = Date.now();
-    console.log("🏓 收到服务器ping:", JSON.stringify(data));
-    
-    try {
-      // 发送pong响应，包含时间戳用于延迟计算
-      this.sendDataChannelMessage(`pong,${timestamp / 1000}`, { validateMessage: false });
-      
-      // 更新ping统计
-      this._updatePingStats('ping_received', timestamp);
-      
-      this.eventBus?.emit("webrtc:ping-received", { 
-        data, 
-        timestamp,
-        responseTime: timestamp
+      this.logger.debug("WebRTC", "已回复 ping 消息", {
+        originalTimestamp: message.timestamp,
+        responseTime: pongMessage.responseTime,
       });
     } catch (error) {
-      console.error("❌ 发送pong响应失败:", error);
-      this.eventBus?.emit("webrtc:ping-response-error", { error: error.message });
+      this.logger.error("WebRTC", "回复 ping 消息失败", error);
     }
   }
 
   /**
-   * 处理pong消息，计算往返延迟
-   * @param {Object} data - pong数据
+   * 处理 pong 消息
    * @private
    */
-  _handlePongMessage(data) {
-    const receiveTime = Date.now();
-    console.log("🏓 收到服务器pong:", JSON.stringify(data));
-    
-    try {
-      // 如果pong消息包含时间戳，计算往返时间
-      if (data && typeof data === 'string' && data.includes(',')) {
-        const parts = data.split(',');
-        if (parts.length >= 2) {
-          const sentTime = parseFloat(parts[1]) * 1000; // 转换为毫秒
-          const roundTripTime = receiveTime - sentTime;
-          
-          console.log(`⏱️ 往返延迟: ${roundTripTime}ms`);
-          
-          // 更新延迟统计
-          this._updateLatencyStats(roundTripTime);
-          
-          this.eventBus?.emit("webrtc:pong-received", { 
-            roundTripTime,
-            sentTime,
-            receiveTime,
-            timestamp: receiveTime
-          });
-        }
+  _handlePongMessage(message) {
+    if (message.timestamp) {
+      const latency = Date.now() - message.timestamp;
+
+      // 更新延迟统计
+      if (!this.connectionStats.latencyStats) {
+        this.connectionStats.latencyStats = {
+          current: 0,
+          average: 0,
+          min: Infinity,
+          max: 0,
+          samples: [],
+        };
       }
-      
-      // 更新ping统计
-      this._updatePingStats('pong_received', receiveTime);
-      
-    } catch (error) {
-      console.warn("⚠️ 处理pong消息时出错:", error);
-      this.eventBus?.emit("webrtc:pong-processing-error", { error: error.message });
+
+      const latencyStats = this.connectionStats.latencyStats;
+      latencyStats.current = latency;
+      latencyStats.min = Math.min(latencyStats.min, latency);
+      latencyStats.max = Math.max(latencyStats.max, latency);
+
+      // 保持最近 10 个样本
+      latencyStats.samples.push(latency);
+      if (latencyStats.samples.length > 10) {
+        latencyStats.samples.shift();
+      }
+
+      // 计算平均延迟
+      latencyStats.average =
+        latencyStats.samples.reduce((a, b) => a + b, 0) /
+        latencyStats.samples.length;
+
+      this.logger.debug("WebRTC", "延迟统计更新", {
+        current: latency,
+        average: Math.round(latencyStats.average),
+        min: latencyStats.min,
+        max: latencyStats.max,
+      });
     }
   }
 
   /**
-   * 处理系统统计消息
-   * @param {Object} data - 系统统计数据
+   * 处理输入消息
    * @private
    */
-  _handleSystemStatsMessage(data) {
-    console.log("📈 收到系统统计数据");
-    this.eventBus?.emit("webrtc:system-stats", data);
+  _processInputMessage(message) {
+    // 为输入消息添加时间戳（如果没有）
+    if (!message.timestamp) {
+      message.timestamp = Date.now();
+    }
+
+    // 验证输入消息格式
+    if (!message.inputType || !message.data) {
+      this.logger.warn("WebRTC", "输入消息格式不完整", message);
+      return message;
+    }
+
+    this.logger.debug("WebRTC", "处理输入消息", {
+      inputType: message.inputType,
+      dataKeys: Object.keys(message.data),
+    });
+
+    return message;
   }
 
   /**
-   * 处理延迟测量消息
-   * @param {Object} data - 延迟测量数据
+   * 处理控制消息
    * @private
    */
-  _handleLatencyMessage(data) {
-    if (data && data.latency_ms) {
-      console.log("⏱️ 收到延迟测量:", data.latency_ms + "ms");
-      this.eventBus?.emit("webrtc:latency-measurement", data.latency_ms);
-    }
+  _processControlMessage(message) {
+    this.logger.debug("WebRTC", "处理控制消息", {
+      controlType: message.controlType || "unknown",
+      action: message.action || "unknown",
+    });
+
+    return message;
   }
 
   /**
-   * Base64字符串转换为普通字符串
-   * @param {string} base64 - Base64编码的字符串
-   * @returns {string} 解码后的字符串
+   * 处理数据通道错误（增强版）
    * @private
    */
-  _base64ToString(base64) {
-    try {
-      const stringBytes = atob(base64);
-      const bytes = Uint8Array.from(stringBytes, (m) => m.codePointAt(0));
-      return new TextDecoder().decode(bytes);
-    } catch (error) {
-      console.error("❌ Base64解码失败:", error);
-      return "";
-    }
+  _handleDataChannelError(channel, error) {
+    this.logger.error("WebRTC", "数据通道错误", {
+      label: channel.label,
+      readyState: channel.readyState,
+      error: error,
+      errorType: error.type || "unknown",
+      errorMessage: error.message || "unknown",
+    });
+
+    // 更新错误统计
+    this._updateDataChannelConnectionStats(channel, "error");
+
+    // 尝试错误恢复
+    this._attemptDataChannelErrorRecovery(channel, error);
+
+    this.eventBus?.emit("webrtc:datachannel-error", {
+      label: channel.label,
+      error: error,
+      channelState: channel.readyState,
+      timestamp: Date.now(),
+      recovery: {
+        attempted: true,
+        strategy: this._getErrorRecoveryStrategy(error),
+      },
+    });
   }
 
   /**
-   * 发送数据通道消息 - 增强版本，包含完整的错误处理
-   * @param {string|Object} message - 要发送的消息
-   * @param {Object} options - 发送选项
-   * @param {number} options.maxRetries - 最大重试次数，默认为3
-   * @param {number} options.retryDelay - 重试延迟（毫秒），默认为100
-   * @param {boolean} options.validateMessage - 是否验证消息格式，默认为true
-   * @returns {Promise<boolean>} 发送是否成功
+   * 尝试数据通道错误恢复
+   * @private
    */
-  async sendDataChannelMessage(message, options = {}) {
-    const {
-      maxRetries = 3,
-      retryDelay = 100,
-      validateMessage = true
-    } = options;
+  _attemptDataChannelErrorRecovery(channel, error) {
+    const strategy = this._getErrorRecoveryStrategy(error);
 
-    // 消息类型验证和格式检查
-    if (validateMessage && !this._validateDataChannelMessage(message)) {
-      const error = new Error("数据通道消息格式无效");
-      console.error("❌ 数据通道消息验证失败:", message);
-      this.eventBus?.emit("webrtc:data-channel-message-validation-error", { 
-        message, 
-        error: error.message 
-      });
-      throw error;
-    }
+    this.logger.info("WebRTC", "尝试数据通道错误恢复", {
+      label: channel.label,
+      strategy: strategy,
+      error: error.message,
+    });
 
-    // 检查数据通道状态
-    if (!this._send_channel) {
-      const error = new Error("数据通道不存在");
-      console.error("❌ 数据通道不存在，无法发送消息");
-      this.eventBus?.emit("webrtc:data-channel-send-error", { 
-        message, 
-        error: error.message,
-        reason: "channel_not_exists"
-      });
-      throw error;
-    }
-
-    if (this._send_channel.readyState !== "open") {
-      const error = new Error(`数据通道状态不正确: ${this._send_channel.readyState}`);
-      console.error("❌ 数据通道未打开，当前状态:", this._send_channel.readyState);
-      this.eventBus?.emit("webrtc:data-channel-send-error", { 
-        message, 
-        error: error.message,
-        reason: "channel_not_open",
-        channelState: this._send_channel.readyState
-      });
-      throw error;
-    }
-
-    // 准备发送的消息
-    const messageToSend = typeof message === 'object' ? JSON.stringify(message) : message;
-
-    // 带重试机制的发送
-    let lastError;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        // 检查消息大小限制
-        if (messageToSend.length > 65536) { // 64KB limit
-          throw new Error(`消息过大: ${messageToSend.length} bytes (最大 65536 bytes)`);
-        }
-
-        this._send_channel.send(messageToSend);
-        
-        console.log(`📤 数据通道消息发送成功 (第${attempt}次尝试):`, 
-          messageToSend.length > 100 ? messageToSend.substring(0, 100) + '...' : messageToSend);
-        
-        // 触发发送成功事件
-        this.eventBus?.emit("webrtc:data-channel-message-sent", { 
-          message: messageToSend,
-          attempt,
-          messageSize: messageToSend.length
-        });
-        
-        return true;
-        
-      } catch (error) {
-        lastError = error;
-        console.warn(`⚠️ 数据通道消息发送失败 (第${attempt}/${maxRetries}次尝试):`, error.message);
-        
-        // 如果不是最后一次尝试，等待后重试
-        if (attempt < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
-          
-          // 重新检查通道状态
-          if (!this._send_channel || this._send_channel.readyState !== "open") {
-            throw new Error("数据通道在重试期间变为不可用");
+    switch (strategy) {
+      case "recreate":
+        // 重新创建数据通道
+        setTimeout(() => {
+          if (channel === this.sendChannel) {
+            this._recreateSendDataChannel();
           }
-        }
-      }
+        }, 1000);
+        break;
+      case "reconnect":
+        // 触发连接重建
+        this.eventBus?.emit("webrtc:request-reconnect", {
+          reason: "datachannel-error",
+          error: error,
+        });
+        break;
+      case "wait":
+        // 等待自动恢复
+        this.logger.info("WebRTC", "等待数据通道自动恢复");
+        break;
+      default:
+        this.logger.warn("WebRTC", "无可用的错误恢复策略");
     }
-
-    // 所有重试都失败了
-    console.error("❌ 数据通道消息发送最终失败:", lastError.message);
-    this.eventBus?.emit("webrtc:data-channel-send-error", { 
-      message: messageToSend, 
-      error: lastError.message,
-      reason: "send_failed_after_retries",
-      attempts: maxRetries
-    });
-    
-    throw lastError;
   }
 
   /**
-   * 验证数据通道消息格式
-   * @param {string|Object} message - 要验证的消息
-   * @returns {boolean} 消息是否有效
+   * 获取错误恢复策略
    * @private
    */
-  _validateDataChannelMessage(message) {
-    // 检查消息是否为空
-    if (message === null || message === undefined) {
-      console.warn("⚠️ 数据通道消息为空");
-      return false;
-    }
+  _getErrorRecoveryStrategy(error) {
+    if (!error) return "wait";
 
-    // 如果是字符串，检查长度
-    if (typeof message === 'string') {
-      if (message.length === 0) {
-        console.warn("⚠️ 数据通道消息字符串为空");
-        return false;
-      }
-      if (message.length > 65536) {
-        console.warn("⚠️ 数据通道消息过大:", message.length);
-        return false;
-      }
-      return true;
-    }
+    const errorMessage = error.message || "";
+    const errorType = error.type || "";
 
-    // 如果是对象，尝试序列化并检查
-    if (typeof message === 'object') {
-      try {
-        const serialized = JSON.stringify(message);
-        if (serialized.length > 65536) {
-          console.warn("⚠️ 序列化后的数据通道消息过大:", serialized.length);
-          return false;
-        }
-        
-        // 检查必需的字段（如果是结构化消息）
-        if (message.type && typeof message.type !== 'string') {
-          console.warn("⚠️ 消息类型字段必须是字符串");
-          return false;
-        }
-        
-        return true;
-      } catch (error) {
-        console.warn("⚠️ 数据通道消息JSON序列化失败:", error);
-        return false;
-      }
+    if (errorMessage.includes("closed") || errorType === "close") {
+      return "recreate";
+    } else if (errorMessage.includes("network") || errorType === "network") {
+      return "reconnect";
+    } else {
+      return "wait";
     }
-
-    // 其他类型不支持
-    console.warn("⚠️ 不支持的数据通道消息类型:", typeof message);
-    return false;
   }
 
   /**
-   * 清理数据通道 - 增强版本
-   * 清理所有数据通道资源，包括发送和接收通道
+   * 更新数据通道连接统计
    * @private
    */
-  _cleanupDataChannel() {
-    console.log("🧹 开始清理数据通道资源");
-    
-    // 清理发送数据通道
-    if (this._send_channel) {
-      try {
-        console.log(`📡 清理发送数据通道，当前状态: ${this._send_channel.readyState}`);
-        
-        // 移除事件监听器
-        this._send_channel.onopen = null;
-        this._send_channel.onclose = null;
-        this._send_channel.onerror = null;
-        this._send_channel.onmessage = null;
-        
-        // 如果通道仍然打开，则关闭它
-        if (this._send_channel.readyState === "open" || this._send_channel.readyState === "connecting") {
-          this._send_channel.close();
-          console.log("✅ 发送数据通道已关闭");
-        }
-      } catch (error) {
-        console.warn("⚠️ 关闭发送数据通道时出错:", error);
-      } finally {
-        this._send_channel = null;
-      }
+  _updateDataChannelConnectionStats(channel, event) {
+    if (!this.connectionStats.dataChannelConnectionStats) {
+      this.connectionStats.dataChannelConnectionStats = {
+        channels: {},
+        totalOpened: 0,
+        totalClosed: 0,
+        totalErrors: 0,
+      };
     }
-    
-    // 清理接收数据通道（如果存在）
-    if (this._receive_channel) {
-      try {
-        console.log(`📡 清理接收数据通道，当前状态: ${this._receive_channel.readyState}`);
-        
-        // 移除事件监听器
-        this._receive_channel.onopen = null;
-        this._receive_channel.onclose = null;
-        this._receive_channel.onerror = null;
-        this._receive_channel.onmessage = null;
-        
-        // 如果通道仍然打开，则关闭它
-        if (this._receive_channel.readyState === "open" || this._receive_channel.readyState === "connecting") {
-          this._receive_channel.close();
-          console.log("✅ 接收数据通道已关闭");
-        }
-      } catch (error) {
-        console.warn("⚠️ 关闭接收数据通道时出错:", error);
-      } finally {
-        this._receive_channel = null;
-      }
+
+    const stats = this.connectionStats.dataChannelConnectionStats;
+    const channelLabel = channel.label;
+
+    if (!stats.channels[channelLabel]) {
+      stats.channels[channelLabel] = {
+        opened: 0,
+        closed: 0,
+        errors: 0,
+        lastEvent: null,
+        lastEventTime: null,
+      };
     }
-    
-    // 触发数据通道清理完成事件
-    this.eventBus?.emit("webrtc:data-channel-cleaned", {
-      timestamp: Date.now()
-    });
-    
-    console.log("✅ 数据通道资源清理完成");
+
+    const channelStats = stats.channels[channelLabel];
+    channelStats.lastEvent = event;
+    channelStats.lastEventTime = Date.now();
+
+    switch (event) {
+      case "opened":
+        channelStats.opened++;
+        stats.totalOpened++;
+        break;
+      case "closed":
+        channelStats.closed++;
+        stats.totalClosed++;
+        break;
+      case "error":
+        channelStats.errors++;
+        stats.totalErrors++;
+        break;
+    }
   }
 
   /**
-   * 处理连接成功
-   */
-  _handleConnectionSuccess() {
-    console.log("🎉 WebRTC连接成功建立！");
-
-    this._clearTimers();
-    this._setState("connected");
-    this.connectionAttempts = 0;
-
-    // 调用连接建立成功处理，启用智能重试机制
-    this._onConnectionEstablished();
-
-    this.eventBus?.emit("webrtc:connected");
-    this._startStatsCollection();
-  }
-
-  /**
-   * 处理连接状态变化 - 增强版本
-   * 基于selkies-gstreamer最佳实践，提供完整的连接状态管理
-   * @param {string} state - 连接状态
+   * 处理 ICE 连接状态变化
    * @private
    */
-  _handleConnectionStateChange(state) {
-    console.log(`📡 PeerConnection状态变化: ${this.connectionState} -> ${state}`);
-    
-    // 更新连接状态
-    const previousState = this.connectionState;
-    this._setState(state);
-
-    // 使用状态验证器进行状态检查
-    const validation = ConnectionStateValidator.validatePeerConnectionState(this.pc);
-    const resetCheck = ConnectionStateValidator.checkIfResetNeeded(this.pc);
-    
-    ConnectionStateValidator.logStateChange(this.pc, "connectionStateChange", {
-      previousState,
-      newState: state,
-      validation,
-      resetCheck
-    });
-
-    // 检查是否需要处理状态异常
-    if (!validation.valid || resetCheck.needsReset) {
-      this._handleStateException(validation, resetCheck, state);
-      return;
-    }
-
+  _handleIceConnectionStateChange(state) {
     switch (state) {
       case "connected":
-        this._handleConnectedState();
+      case "completed":
+        if (!this.connectionEstablished) {
+          this.connectionEstablished = true;
+          this.connectionStats.connectTime = Date.now();
+          this.connectionStats.totalConnections++;
+
+          // 重置错误和重试状态
+          this._resetRetryState();
+
+          this._setState("connected");
+          this._clearConnectionTimer();
+
+          // 开始统计收集
+          this._startStatsCollection();
+
+          this.logger.info("WebRTC", "连接建立成功", {
+            connectTime: this.connectionStats.connectTime,
+            totalConnections: this.connectionStats.totalConnections,
+          });
+
+          this.eventBus?.emit("webrtc:connected", {
+            connectTime: this.connectionStats.connectTime,
+            stats: this.getConnectionStats(),
+          });
+        }
         break;
 
       case "disconnected":
-        this._handleDisconnectedState();
+        this.logger.warn("WebRTC", "ICE 连接断开");
+        if (this.connectionEstablished) {
+          this._setState("connecting"); // 可能是临时断开
+        }
         break;
 
       case "failed":
-        this._handleFailedState();
+        this.logger.error("WebRTC", "ICE 连接失败", {
+          iceConnectionState: state,
+          signalingState: this.signalingState,
+          retryCount: this.retryCount,
+        });
+
+        const iceError = new Error("ICE 连接失败");
+        iceError.code = "ICE_CONNECTION_FAILED";
+        iceError.details = {
+          iceConnectionState: state,
+          signalingState: this.signalingState,
+        };
+
+        this._handleConnectionError(iceError, {
+          iceConnectionState: state,
+          isIceFailure: true,
+        });
         break;
 
       case "closed":
-        this._handleClosedState();
-        break;
-
-      case "connecting":
-        this._handleConnectingState();
-        break;
-
-      case "new":
-        this._handleNewState();
+        this.logger.info("WebRTC", "ICE 连接已关闭");
+        this._setState("disconnected");
         break;
 
       default:
-        console.log(`📊 未处理的连接状态: ${state}`);
+        this.logger.debug("WebRTC", "ICE 连接状态", { state });
     }
 
-    // 通知所有相关监听器状态变化
-    this.eventBus?.emit("webrtc:connection-state-change", { 
-      state, 
-      previousState,
-      validation,
-      resetCheck,
-      timestamp: Date.now()
-    });
-  }
-
-  /**
-   * 处理状态异常
-   * @param {Object} validation - 状态验证结果
-   * @param {Object} resetCheck - 重置检查结果
-   * @param {string} currentState - 当前状态
-   * @private
-   */
-  _handleStateException(validation, resetCheck, currentState) {
-    console.warn("⚠️ 检测到状态异常:", {
-      validation,
-      resetCheck,
-      currentState
-    });
-
-    const exceptionInfo = {
-      type: "state-exception",
-      validation,
-      resetCheck,
-      currentState,
-      timestamp: Date.now()
-    };
-
-    // 发出状态异常事件
-    this.eventBus?.emit("webrtc:state-exception", exceptionInfo);
-
-    // 根据异常类型决定处理策略
-    if (resetCheck.needsReset) {
-      console.log("🔄 状态异常需要重置连接");
-      this._scheduleConnectionReset(resetCheck.reason);
-    } else if (!validation.valid) {
-      console.log("⚠️ 状态验证失败，但不需要重置，继续监控");
-      // 继续监控，可能是临时状态
-    }
-  }
-
-  /**
-   * 调度连接重置
-   * @param {string} reason - 重置原因
-   * @private
-   */
-  _scheduleConnectionReset(reason) {
-    console.log(`⏰ 调度连接重置，原因: ${reason}`);
-    
-    // 避免重复重置
-    if (this._resetScheduled) {
-      console.log("🔄 连接重置已调度，跳过重复调度");
-      return;
-    }
-
-    this._resetScheduled = true;
-
-    // 延迟执行重置，避免在状态变化过程中立即重置
-    setTimeout(async () => {
-      try {
-        console.log("🔄 执行调度的连接重置");
-        await this._resetConnectionWithValidator();
-        
-        // 如果当前正在连接过程中，重新开始连接
-        if (this.connectionState === "connecting") {
-          console.log("🔄 重置后重新开始连接");
-          await this._createPeerConnection();
-          // 注意：这里不自动重新请求offer，等待上层逻辑处理
-        }
-      } catch (error) {
-        console.error("❌ 调度的连接重置失败:", error);
-        this._handleConnectionError(error);
-      } finally {
-        this._resetScheduled = false;
-      }
-    }, 100); // 100ms延迟
-  }
-
-  /**
-   * 处理connected状态 - 启动统计收集和触发连接建立事件
-   * @private
-   */
-  _handleConnectedState() {
-    console.log("✅ WebRTC连接已建立");
-    
-    // 清理连接超时定时器
-    this._clearTimer("connectionTimer");
-    
-    // 设置连接标志
-    this._connected = true;
-    
-    // 更新连接统计
-    this.connectionStats.connectTime = Date.now();
-    this.connectionStats.totalConnections++;
-    this.connectionAttempts = 0; // 重置重连计数
-    
-    // 启动统计收集
-    this._startStatsCollection();
-    
-    // 触发连接建立事件
-    this.eventBus?.emit("webrtc:connection-established", {
+    // 触发 ICE 状态变化事件
+    this.eventBus?.emit("webrtc:ice-state-change", {
+      state: state,
       timestamp: Date.now(),
-      connectionStats: this.connectionStats
     });
-    
-    console.log("🎉 WebRTC连接成功，统计收集已启动");
   }
 
   /**
-   * 处理disconnected状态 - 清理数据通道和重新加载媒体元素
+   * 处理信令状态变化
    * @private
    */
-  _handleDisconnectedState() {
-    console.warn("⚠️ WebRTC连接已断开");
-    
-    // 设置错误状态
-    this._setError("Peer connection disconnected");
-    
-    // 更新连接统计
-    this.connectionStats.disconnectTime = Date.now();
-    this.connectionStats.iceDisconnectCount = (this.connectionStats.iceDisconnectCount || 0) + 1;
-    
-    // 清理数据通道
-    this._cleanupDataChannel();
-    
-    // 重新加载媒体元素
-    this._reloadMediaElement();
-    
-    // 停止统计收集
-    this._stopStatsCollection();
-    
-    // 触发连接丢失事件
-    this.eventBus?.emit("webrtc:connection-lost", {
+  _handleSignalingStateChange(state) {
+    this.logger.debug("WebRTC", "信令状态变化", { state });
+
+    // 触发信令状态变化事件
+    this.eventBus?.emit("webrtc:signaling-state-change", {
+      state: state,
       timestamp: Date.now(),
-      reason: "disconnected",
-      connectionStats: this.connectionStats
-    });
-    
-    console.log("🔄 连接断开处理完成，资源已清理");
-  }
-
-  /**
-   * 处理failed状态 - 执行错误清理和触发失败事件
-   * 使用智能重试管理器替代旧的重试逻辑
-   * @private
-   */
-  _handleFailedState() {
-    console.error("❌ WebRTC连接失败");
-    
-    // 设置错误状态
-    this._setError("Peer connection failed");
-    
-    // 更新连接统计
-    this.connectionStats.disconnectTime = Date.now();
-    this.connectionStats.iceFailureCount = (this.connectionStats.iceFailureCount || 0) + 1;
-    
-    // 执行错误清理
-    this._performErrorCleanup();
-    
-    // 使用RetryManager处理连接失败
-    const errorType = this.retryManager.connectionEstablished ? "network-interruption" : "connection-failed";
-    this._handleConnectionError(new Error("PeerConnection失败"), errorType);
-  }
-
-  /**
-   * 处理closed状态
-   * @private
-   */
-  _handleClosedState() {
-    console.log("🔒 WebRTC连接已关闭");
-    
-    // 清理数据通道
-    this._cleanupDataChannel();
-    
-    // 停止统计收集
-    this._stopStatsCollection();
-    
-    // 触发连接关闭事件
-    this.eventBus?.emit("webrtc:connection-closed", {
-      timestamp: Date.now()
     });
   }
 
   /**
-   * 处理connecting状态
+   * 处理连接状态变化（现代浏览器）
    * @private
    */
-  _handleConnectingState() {
-    console.log("🔄 WebRTC连接建立中...");
-    
-    this.eventBus?.emit("webrtc:connection-connecting", {
+  _handleConnectionStateChange(state) {
+    this.logger.debug("WebRTC", "连接状态变化", { state });
+
+    switch (state) {
+      case "connected":
+        // 已在 ICE 状态处理中处理
+        break;
+      case "disconnected":
+        this.logger.warn("WebRTC", "连接断开");
+        break;
+      case "failed":
+        this.logger.error("WebRTC", "连接失败");
+        this._handleConnectionError(new Error("Connection failed"));
+        break;
+      case "closed":
+        this.logger.info("WebRTC", "连接已关闭");
+        this._setState("disconnected");
+        break;
+    }
+
+    // 触发连接状态变化事件
+    this.eventBus?.emit("webrtc:connection-state-change", {
+      state: state,
       timestamp: Date.now(),
-      attempt: this.connectionAttempts
     });
   }
 
   /**
-   * 处理new状态
-   * @private
+   * 连接到远程端
    */
-  _handleNewState() {
-    console.log("🆕 WebRTC连接初始化");
-    
-    this.eventBus?.emit("webrtc:connection-new", {
-      timestamp: Date.now()
-    });
-  }
-
-  /**
-   * 重新加载媒体元素 - 增强版本
-   * 清理并重新初始化所有媒体元素，确保资源正确释放
-   * @private
-   */
-  _reloadMediaElement() {
-    console.log("🎬 开始重新加载媒体元素");
-    
-    // 重新加载视频元素
-    if (this.videoElement) {
-      try {
-        console.log("📺 重新加载视频元素");
-        
-        // 暂停播放
-        if (!this.videoElement.paused) {
-          this.videoElement.pause();
-        }
-        
-        // 清理当前源
-        this.videoElement.srcObject = null;
-        this.videoElement.src = "";
-        
-        // 重新加载
-        this.videoElement.load();
-        
-        console.log("✅ 视频元素重新加载完成");
-      } catch (error) {
-        console.warn("⚠️ 重新加载视频元素时出错:", error);
-      }
-    }
-    
-    // 重新加载音频元素
-    if (this.audioElement) {
-      try {
-        console.log("🔊 重新加载音频元素");
-        
-        // 暂停播放
-        if (!this.audioElement.paused) {
-          this.audioElement.pause();
-        }
-        
-        // 清理当前源
-        this.audioElement.srcObject = null;
-        this.audioElement.src = "";
-        
-        // 重新加载
-        this.audioElement.load();
-        
-        console.log("✅ 音频元素重新加载完成");
-      } catch (error) {
-        console.warn("⚠️ 重新加载音频元素时出错:", error);
-      }
-    }
-    
-    // 清理远程流引用
-    if (this.remoteStream) {
-      try {
-        // 停止所有轨道
-        this.remoteStream.getTracks().forEach(track => {
-          track.stop();
-        });
-        this.remoteStream = null;
-        console.log("✅ 远程媒体流已清理");
-      } catch (error) {
-        console.warn("⚠️ 清理远程媒体流时出错:", error);
-      }
-    }
-    
-    // 触发媒体元素重新加载完成事件
-    this.eventBus?.emit("webrtc:media-elements-reloaded", {
-      timestamp: Date.now()
-    });
-    
-    console.log("✅ 媒体元素重新加载完成");
-  }
-
-  /**
-   * 统一错误处理方法 - 增强版本，包含错误分类和上下文信息收集
-   * 使用智能重试管理器，提供详细的错误日志和状态跟踪
-   */
-  /**
-   * 处理连接错误 - 调试验证版本
-   * 使用智能重试管理器，提供详细的错误日志和状态跟踪
-   * 需求: 2.1, 2.2, 5.1, 5.2
-   */
-  _handleConnectionError(error, errorType = "connection-failed", context = {}) {
-    const timestamp = Date.now();
-    
-    // 详细的错误上下文收集 (需求 2.3, 2.4)
-    const debugContext = {
-      timestamp: new Date().toISOString(),
-      errorType,
-      errorMessage: error?.message || error,
-      errorStack: error?.stack,
-      connectionState: this.connectionState,
-      signalingState: this.pc?.signalingState || "unknown",
-      iceConnectionState: this.pc?.iceConnectionState || "unknown",
-      iceGatheringState: this.pc?.iceGatheringState || "unknown",
-      retryManagerStatus: this.retryManager.getRetryStatus(),
-      connectionAttempts: this.connectionAttempts,
-      context
-    };
-
-    // 统一的错误日志格式 - 仅控制台，无UI弹窗 (需求 2.1, 2.2)
-    console.error("❌ [DEBUG] WebRTC连接错误详情:", debugContext);
-
-    this._clearTimers();
-    this._setState("failed");
-
-    // 发出连接失败事件，但不触发UI错误提示 (需求 2.2)
-    this.eventBus?.emit("webrtc:connection-failed", { 
-      error, 
-      errorType,
-      debugContext,
-      showUI: false // 明确禁用UI显示
-    });
-
-    // 使用RetryManager决定是否重试 (需求 5.1, 5.2)
-    const retryDecision = this.retryManager.shouldRetry(errorType, debugContext);
-    
-    console.log("🔍 [DEBUG] 重试决策分析:", {
-      shouldRetry: retryDecision.shouldRetry,
-      reason: retryDecision.reason,
-      retryType: retryDecision.retryType,
-      maxRetries: retryDecision.maxRetries,
-      connectionEstablished: this.retryManager.connectionEstablished
-    });
-
-    if (retryDecision.shouldRetry && this.retryManager.canRetry(errorType)) {
-      const retryInfo = this.retryManager.executeRetry(errorType);
-      
-      console.log(`🔄 [DEBUG] 执行重试策略:`, {
-        attempt: retryInfo.attempt,
-        maxRetries: retryInfo.maxRetries,
-        retryType: retryInfo.type,
-        delay: retryInfo.delay,
-        reason: retryDecision.reason,
-        nextRetryTime: new Date(Date.now() + retryInfo.delay).toISOString()
-      });
-
-      // 更新统计
-      this.connectionStats.reconnectAttempts++;
-      
-      // 发出重连事件，但不显示UI通知 (需求 2.2)
-      this.eventBus?.emit("webrtc:connection-retry", {
-        retryInfo,
-        retryDecision,
-        debugContext,
-        showUI: false // 禁用UI显示
-      });
-
-      // 设置重连定时器
-      this._setTimer(
-        "reconnectTimer",
-        () => {
-          console.log("⏰ [DEBUG] 重连定时器触发，开始重连尝试");
-          this._attemptReconnection(debugContext);
-        },
-        retryInfo.delay
-      );
-    } else {
-      // 停止重试，记录详细的失败信息 - 仅控制台日志 (需求 2.1)
-      const finalStats = this.retryManager.getRetryStats();
-      
-      console.error(`🛑 [DEBUG] 连接最终失败，停止重试:`, {
-        finalError: error.message,
-        stopReason: retryDecision.reason,
-        retryType: retryDecision.retryType,
-        totalRetries: finalStats.totalRetries,
-        initialRetries: finalStats.initialRetries,
-        networkRetries: finalStats.networkRetries,
-        connectionHistory: this._getConnectionHistory?.() || "unavailable"
-      });
-      
-      // 发出最终失败事件，但不显示UI错误提示 (需求 2.2)
-      this.eventBus?.emit("webrtc:connection-failed-final", {
-        error: error.message,
-        errorType,
-        debugContext,
-        retryDecision,
-        retryStats: finalStats,
-        showUI: false // 明确禁用UI错误提示
-      });
-    }
-    
-    // 记录错误历史用于调试分析
-    this._recordErrorHistory?.(debugContext);
-    
-    return debugContext;
-  }
-
-  /**
-   * 格式化WebRTC错误信息
-   * @private
-   */
-  _formatWebRTCError(error, errorType, context, timestamp) {
-    const errorObj = typeof error === 'string' ? new Error(error) : error;
-    
-    return {
-      category: this._categorizeWebRTCError(errorObj, errorType),
-      type: errorType,
-      message: errorObj.message || '未知WebRTC错误',
-      context: {
-        ...context,
-        connectionState: this.connectionState,
-        iceConnectionState: this.iceConnectionState,
-        signalingState: this.signalingState,
-        retryManagerStatus: this.retryManager.getRetryStatus(),
-        connectionAttempts: this.connectionAttempts
-      },
-      retryInfo: this.retryManager.getRetryStatus(),
-      connectionState: this._getCurrentConnectionState(),
-      timestamp: new Date(timestamp).toISOString(),
-      stack: errorObj.stack
-    };
-  }
-
-  /**
-   * WebRTC错误分类
-   * @private
-   */
-  _categorizeWebRTCError(error, errorType) {
-    const message = error.message?.toLowerCase() || '';
-    
-    if (errorType.includes('ice') || message.includes('ice')) {
-      return 'ICE_ERROR';
-    } else if (errorType.includes('sdp') || message.includes('sdp') || message.includes('offer') || message.includes('answer')) {
-      return 'SDP_ERROR';
-    } else if (errorType.includes('media') || message.includes('track') || message.includes('stream')) {
-      return 'MEDIA_ERROR';
-    } else if (errorType.includes('connection') || message.includes('connection')) {
-      return 'CONNECTION_ERROR';
-    } else if (errorType.includes('signaling') || message.includes('signaling')) {
-      return 'SIGNALING_ERROR';
-    } else if (errorType.includes('timeout') || message.includes('timeout')) {
-      return 'TIMEOUT_ERROR';
-    } else {
-      return 'WEBRTC_GENERAL_ERROR';
-    }
-  }
-
-  /**
-   * 获取当前连接状态快照
-   * @private
-   */
-  _getCurrentConnectionState() {
-    return {
-      pc: this.pc ? {
-        signalingState: this.pc.signalingState,
-        connectionState: this.pc.connectionState,
-        iceConnectionState: this.pc.iceConnectionState,
-        iceGatheringState: this.pc.iceGatheringState
-      } : null,
-      manager: {
-        connectionState: this.connectionState,
-        iceConnectionState: this.iceConnectionState,
-        signalingState: this.signalingState,
-        connectionAttempts: this.connectionAttempts
-      },
-      media: {
-        hasRemoteStream: !!this.remoteStream,
-        videoElement: this.videoElement ? {
-          readyState: this.videoElement.readyState,
-          paused: this.videoElement.paused,
-          currentTime: this.videoElement.currentTime
-        } : null
-      },
-      timers: {
-        connectionTimer: !!this.connectionTimer,
-        iceTimer: !!this.iceTimer,
-        reconnectTimer: !!this.reconnectTimer
-      }
-    };
-  }
-
-  /**
-   * 获取连接历史摘要
-   * @private
-   */
-  _getConnectionHistory() {
-    return {
-      totalConnections: this.connectionStats.totalConnections,
-      reconnectAttempts: this.connectionStats.reconnectAttempts,
-      iceFailureCount: this.connectionStats.iceFailureCount,
-      iceDisconnectCount: this.connectionStats.iceDisconnectCount,
-      recentIceStates: this.connectionStats.iceStateHistory.slice(-5)
-    };
-  }
-
-  /**
-   * 记录错误历史
-   * @private
-   */
-  _recordErrorHistory(errorInfo) {
-    if (!this.errorHistory) {
-      this.errorHistory = [];
-    }
-    
-    this.errorHistory.push(errorInfo);
-    
-    // 保持历史记录在合理范围内
-    if (this.errorHistory.length > 100) {
-      this.errorHistory = this.errorHistory.slice(-50);
-    }
-  }
-
-  /**
-   * 尝试重新连接
-   * 使用新的重置和重新初始化方法，保持RetryManager状态一致性
-   */
-  async _attemptReconnection() {
-    console.log("🔄 开始重新连接...");
-    
+  async connect() {
     try {
-      // 使用新的重置和重新初始化方法
-      await this._resetAndReinitializeConnection();
-      
-      // 重新开始连接
-      await this.connect();
-      
-      console.log("✅ 重新连接成功");
-      
+      this.logger.info("WebRTC", "开始建立 WebRTC 连接");
+
+      // 检查前置条件
+      if (!this.signalingManager) {
+        throw new Error("信令管理器未设置");
+      }
+
+      if (!verifyWebRTCAdapter()) {
+        throw new Error("WebRTC Adapter 不可用");
+      }
+
+      // 设置连接状态
+      this._setState("connecting");
+
+      // 清理现有连接
+      if (this.pc) {
+        await this.disconnect();
+      }
+
+      // 创建新的 PeerConnection
+      this._createPeerConnection();
+
+      // 创建发送数据通道
+      this._createSendDataChannel();
+
+      // 设置连接超时
+      this._setConnectionTimer();
+
+      // 开始信令握手（请求服务器创建 offer）
+      await this._requestOffer();
+
+      this.logger.info("WebRTC", "连接请求已发送，等待响应");
+
+      return Promise.resolve();
     } catch (error) {
-      console.error("❌ 重新连接失败:", error);
-      this._handleConnectionError(error, "reconnection-failed");
+      this.logger.error("WebRTC", "连接失败", error);
+
+      // 分类连接错误
+      const connectionError = new Error(`连接建立失败: ${error.message}`);
+      connectionError.code = "CONNECTION_SETUP_FAILED";
+      connectionError.originalError = error;
+
+      this._handleConnectionError(connectionError, {
+        isConnectionSetup: true,
+        phase: "initial_connection",
+      });
+
+      throw connectionError;
     }
   }
 
   /**
-   * 连接建立成功时调用
-   * 标记连接已建立，启用网络中断重试机制
+   * 断开连接
    */
-  _onConnectionEstablished() {
-    console.log("🎉 WebRTC连接建立成功");
-    
-    // 标记连接已建立，启用网络中断重试
-    this.retryManager.markConnectionEstablished();
-    this.retryManager.reset();
-    
-    // 更新连接统计
-    this.connectionStats.connectTime = Date.now();
-    this.connectionStats.totalConnections++;
-    
-    // 发出连接建立事件
-    this.eventBus?.emit("webrtc:connection-established", {
-      retryStatus: this.retryManager.getRetryStatus(),
-      connectionStats: this.connectionStats
-    });
-    
-    // 启动视频流监控
-    this._startVideoStreamMonitoring();
+  async disconnect() {
+    try {
+      this.logger.info("WebRTC", "开始断开 WebRTC 连接");
+
+      // 清理定时器
+      this._clearConnectionTimer();
+      this._clearRetryTimer();
+      this._stopStatsCollection();
+
+      // 关闭数据通道（使用增强的清理方法）
+      this._cleanupDataChannels();
+
+      // 关闭 PeerConnection
+      if (this.pc) {
+        this.pc.close();
+        this.pc = null;
+      }
+
+      // 清理媒体流和元素 - 使用增强的清理方法
+      this._cleanupMediaStreams();
+      this._cleanupMediaElementEvents();
+
+      // 更新状态
+      this.connectionEstablished = false;
+      this.connectionStats.disconnectTime = Date.now();
+      this._setState("disconnected");
+
+      this.logger.info("WebRTC", "连接已断开", {
+        disconnectTime: this.connectionStats.disconnectTime,
+      });
+
+      // 触发断开事件
+      this.eventBus?.emit("webrtc:disconnected", {
+        disconnectTime: this.connectionStats.disconnectTime,
+        stats: this.getConnectionStats(),
+      });
+
+      return Promise.resolve();
+    } catch (error) {
+      this.logger.error("WebRTC", "断开连接失败", error);
+
+      // 记录断开连接错误，但不触发重试
+      const disconnectError = this._classifyError(error, {
+        isDisconnect: true,
+        phase: "cleanup",
+      });
+      disconnectError.shouldRetry = false; // 断开连接错误不应重试
+
+      this._recordError(disconnectError);
+
+      // 确保状态正确设置
+      this._setState("disconnected");
+
+      throw error;
+    }
   }
 
   /**
-   * 启动视频流监控
-   * 监控视频流状态，检测网络中断
+   * 创建发送数据通道（增强版）
+   * 支持更灵活的配置和更好的错误处理
+   * @private
    */
-  _startVideoStreamMonitoring() {
-    console.log("📹 启动视频流监控");
-    
-    // 这里可以添加视频流质量监控逻辑
-    // 当检测到视频流中断时，可以触发网络中断重试
-    this.eventBus?.emit("webrtc:video-stream-monitoring-started");
-  }
-
-  /**
-   * 开始统计收集 - 增强版本，包含连接质量监控
-   */
-  _startStatsCollection() {
+  _createSendDataChannel(options = {}) {
     if (!this.pc) {
-      console.warn("⚠️ PeerConnection不存在，无法开始统计收集");
-      return;
+      throw new Error("PeerConnection not created");
     }
 
-    console.log("📊 开始WebRTC统计收集和连接质量监控");
+    const {
+      label = "input", // 通道标签，保持与现有协议兼容
+      ordered = true, // 是否保证消息顺序
+      maxRetransmits = 3, // 最大重传次数
+      maxPacketLifeTime = null, // 最大包生存时间
+      protocol = "", // 子协议
+      negotiated = false, // 是否预协商
+      id = null, // 通道 ID
+    } = options;
 
-    // 初始化连接质量监控数据
-    this._initializeConnectionQualityMonitoring();
+    try {
+      // 准备数据通道配置
+      const channelConfig = {
+        ordered: ordered,
+        protocol: protocol,
+        negotiated: negotiated,
+      };
 
-    const collectStats = async () => {
-      try {
-        const stats = await this.pc.getStats();
-        await this._processEnhancedStats(stats);
-      } catch (error) {
-        console.error("❌ WebRTC统计收集失败:", error);
-        this.eventBus?.emit("webrtc:stats-collection-error", { 
-          error: error.message,
-          timestamp: Date.now()
+      // 设置重传策略（互斥选项）
+      if (maxPacketLifeTime !== null) {
+        channelConfig.maxPacketLifeTime = maxPacketLifeTime;
+      } else {
+        channelConfig.maxRetransmits = maxRetransmits;
+      }
+
+      // 设置通道 ID（如果指定）
+      if (id !== null) {
+        channelConfig.id = id;
+      }
+
+      this.logger.info("WebRTC", "创建发送数据通道", {
+        label: label,
+        config: channelConfig,
+      });
+
+      // 创建数据通道
+      this.sendChannel = this.pc.createDataChannel(label, channelConfig);
+
+      // 设置事件处理器
+      this._setupDataChannelEvents(this.sendChannel);
+
+      // 添加通道状态监控
+      this._monitorDataChannelState(this.sendChannel);
+
+      this.logger.info("WebRTC", "发送数据通道已创建", {
+        label: this.sendChannel.label,
+        id: this.sendChannel.id,
+        readyState: this.sendChannel.readyState,
+        ordered: this.sendChannel.ordered,
+        maxRetransmits: this.sendChannel.maxRetransmits,
+        maxPacketLifeTime: this.sendChannel.maxPacketLifeTime,
+        protocol: this.sendChannel.protocol,
+      });
+
+      // 触发数据通道创建事件
+      this.eventBus?.emit("webrtc:datachannel-created", {
+        type: "send",
+        label: this.sendChannel.label,
+        channel: this.sendChannel,
+        config: channelConfig,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "创建发送数据通道失败", {
+        error: error.message,
+        label: label,
+        config: options,
+      });
+
+      // 触发创建失败事件
+      this.eventBus?.emit("webrtc:datachannel-create-failed", {
+        type: "send",
+        label: label,
+        error: error,
+        timestamp: Date.now(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * 重新创建发送数据通道
+   * @private
+   */
+  _recreateSendDataChannel() {
+    this.logger.info("WebRTC", "重新创建发送数据通道");
+
+    try {
+      // 清理旧的通道
+      if (this.sendChannel) {
+        this.sendChannel.close();
+        this.sendChannel = null;
+      }
+
+      // 创建新的通道
+      this._createSendDataChannel();
+
+      this.logger.info("WebRTC", "发送数据通道重新创建成功");
+
+      // 触发重新创建成功事件
+      this.eventBus?.emit("webrtc:datachannel-recreated", {
+        type: "send",
+        label: this.sendChannel.label,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.error("WebRTC", "重新创建发送数据通道失败", error);
+
+      // 触发重新创建失败事件
+      this.eventBus?.emit("webrtc:datachannel-recreate-failed", {
+        type: "send",
+        error: error,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  /**
+   * 监控数据通道状态
+   * @private
+   */
+  _monitorDataChannelState(channel) {
+    const checkInterval = 5000; // 5秒检查一次
+
+    const monitor = () => {
+      if (!channel) return;
+
+      const currentState = channel.readyState;
+
+      this.logger.debug("WebRTC", "数据通道状态监控", {
+        label: channel.label,
+        readyState: currentState,
+        bufferedAmount: channel.bufferedAmount,
+        bufferedAmountLowThreshold: channel.bufferedAmountLowThreshold,
+      });
+
+      // 检查缓冲区状态
+      if (channel.bufferedAmount > 0) {
+        this.logger.debug("WebRTC", "数据通道缓冲区状态", {
+          label: channel.label,
+          bufferedAmount: channel.bufferedAmount,
+          threshold: channel.bufferedAmountLowThreshold,
         });
+      }
+
+      // 如果通道仍然存在且未关闭，继续监控
+      if (currentState !== "closed" && currentState !== "closing") {
+        setTimeout(monitor, checkInterval);
       }
     };
 
-    // 立即收集一次
-    collectStats();
-
-    // 定期收集（每5秒）
-    this.statsTimer = setInterval(collectStats, 5000);
-
-    // 启动连接质量监控（每秒检查）
-    this._startConnectionQualityMonitoring();
-
-    this.eventBus?.emit("webrtc:stats-collection-started", {
-      timestamp: Date.now()
-    });
+    // 开始监控
+    setTimeout(monitor, checkInterval);
   }
 
   /**
-   * 初始化连接质量监控
+   * 获取数据通道状态信息
+   */
+  getDataChannelStatus() {
+    const sendChannelStatus = this.sendChannel
+      ? {
+          label: this.sendChannel.label,
+          id: this.sendChannel.id,
+          readyState: this.sendChannel.readyState,
+          bufferedAmount: this.sendChannel.bufferedAmount,
+          bufferedAmountLowThreshold:
+            this.sendChannel.bufferedAmountLowThreshold,
+          ordered: this.sendChannel.ordered,
+          maxRetransmits: this.sendChannel.maxRetransmits,
+          maxPacketLifeTime: this.sendChannel.maxPacketLifeTime,
+          protocol: this.sendChannel.protocol,
+        }
+      : null;
+
+    const receiveChannelStatus = this.receiveChannel
+      ? {
+          label: this.receiveChannel.label,
+          id: this.receiveChannel.id,
+          readyState: this.receiveChannel.readyState,
+          bufferedAmount: this.receiveChannel.bufferedAmount,
+          bufferedAmountLowThreshold:
+            this.receiveChannel.bufferedAmountLowThreshold,
+          ordered: this.receiveChannel.ordered,
+          maxRetransmits: this.receiveChannel.maxRetransmits,
+          maxPacketLifeTime: this.receiveChannel.maxPacketLifeTime,
+          protocol: this.receiveChannel.protocol,
+        }
+      : null;
+
+    return {
+      sendChannel: sendChannelStatus,
+      receiveChannel: receiveChannelStatus,
+      statistics: this.connectionStats.dataChannelStats || null,
+      connectionStats: this.connectionStats.dataChannelConnectionStats || null,
+      isReady: !!(this.sendChannel && this.sendChannel.readyState === "open"),
+      canReceive: !!(
+        this.receiveChannel && this.receiveChannel.readyState === "open"
+      ),
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
+   * 清理数据通道资源
    * @private
    */
-  _initializeConnectionQualityMonitoring() {
-    this.connectionQuality = {
-      score: 100, // 0-100分
-      status: 'excellent', // excellent, good, fair, poor
-      metrics: {
-        latency: { current: 0, average: 0, max: 0, samples: [] },
-        packetLoss: { current: 0, average: 0, max: 0, samples: [] },
-        jitter: { current: 0, average: 0, max: 0, samples: [] },
-        bandwidth: { 
-          video: { inbound: 0, outbound: 0 },
-          audio: { inbound: 0, outbound: 0 }
-        },
-        frameRate: { current: 0, target: 30, drops: 0 },
-        resolution: { width: 0, height: 0 }
+  _cleanupDataChannels() {
+    this.logger.info("WebRTC", "清理数据通道资源");
+
+    // 关闭发送通道
+    if (this.sendChannel) {
+      try {
+        if (
+          this.sendChannel.readyState === "open" ||
+          this.sendChannel.readyState === "connecting"
+        ) {
+          this.sendChannel.close();
+        }
+      } catch (error) {
+        this.logger.warn("WebRTC", "关闭发送数据通道时出错", error);
+      }
+      this.sendChannel = null;
+    }
+
+    // 关闭接收通道
+    if (this.receiveChannel) {
+      try {
+        if (
+          this.receiveChannel.readyState === "open" ||
+          this.receiveChannel.readyState === "connecting"
+        ) {
+          this.receiveChannel.close();
+        }
+      } catch (error) {
+        this.logger.warn("WebRTC", "关闭接收数据通道时出错", error);
+      }
+      this.receiveChannel = null;
+    }
+
+    // 清理统计信息
+    if (this.connectionStats.dataChannelStats) {
+      this.connectionStats.dataChannelStats.lastActivity = Date.now();
+    }
+
+    this.logger.info("WebRTC", "数据通道资源清理完成");
+  }
+
+  /**
+   * 发送 ping 消息测试数据通道延迟
+   */
+  pingDataChannel() {
+    const pingMessage = {
+      type: "ping",
+      timestamp: Date.now(),
+      id: Math.random().toString(36).substr(2, 9),
+    };
+
+    const success = this.sendDataChannelMessage(pingMessage, {
+      validateMessage: false,
+    });
+
+    if (success) {
+      this.logger.debug("WebRTC", "Ping 消息已发送", {
+        id: pingMessage.id,
+        timestamp: pingMessage.timestamp,
+      });
+    }
+
+    return success;
+  }
+
+  /**
+   * 获取数据通道统计信息
+   */
+  getDataChannelStats() {
+    const stats = this.connectionStats.dataChannelStats || {};
+    const connectionStats =
+      this.connectionStats.dataChannelConnectionStats || {};
+    const latencyStats = this.connectionStats.latencyStats || {};
+
+    return {
+      // 消息统计
+      messages: {
+        sent: stats.messagesSent || 0,
+        received: stats.messagesReceived || 0,
+        failed: stats.messagesFailed || 0,
+        total: (stats.messagesSent || 0) + (stats.messagesReceived || 0),
       },
-      history: [],
-      lastUpdate: Date.now()
+
+      // 数据传输统计
+      bytes: {
+        sent: stats.bytesSent || 0,
+        received: stats.bytesReceived || 0,
+        total: (stats.bytesSent || 0) + (stats.bytesReceived || 0),
+        sentFormatted: this._formatBytes(stats.bytesSent || 0),
+        receivedFormatted: this._formatBytes(stats.bytesReceived || 0),
+        totalFormatted: this._formatBytes(
+          (stats.bytesSent || 0) + (stats.bytesReceived || 0)
+        ),
+      },
+
+      // 消息类型统计
+      messageTypes: stats.messageTypes || {},
+
+      // 连接统计
+      connections: {
+        totalOpened: connectionStats.totalOpened || 0,
+        totalClosed: connectionStats.totalClosed || 0,
+        totalErrors: connectionStats.totalErrors || 0,
+        channels: connectionStats.channels || {},
+      },
+
+      // 延迟统计
+      latency: {
+        current: latencyStats.current || 0,
+        average: Math.round(latencyStats.average || 0),
+        min: latencyStats.min === Infinity ? 0 : latencyStats.min || 0,
+        max: latencyStats.max || 0,
+        samples: latencyStats.samples ? latencyStats.samples.length : 0,
+      },
+
+      // 活动状态
+      lastActivity: stats.lastActivity,
+      lastActivityFormatted: stats.lastActivity
+        ? new Date(stats.lastActivity).toLocaleString()
+        : "Never",
+
+      // 当前状态
+      currentStatus: this.getDataChannelStatus(),
+
+      // 时间戳
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
+   * 重置数据通道统计信息
+   */
+  resetDataChannelStats() {
+    this.connectionStats.dataChannelStats = {
+      messagesSent: 0,
+      messagesReceived: 0,
+      messagesFailed: 0,
+      bytesSent: 0,
+      bytesReceived: 0,
+      messageTypes: {},
+      lastActivity: null,
     };
 
-    // 初始化ping统计
-    this.pingStats = {
-      sent: 0,
-      received: 0,
-      lost: 0,
-      averageRtt: 0,
-      lastPingTime: null,
-      lastPongTime: null,
-      rttHistory: []
+    this.connectionStats.dataChannelConnectionStats = {
+      channels: {},
+      totalOpened: 0,
+      totalClosed: 0,
+      totalErrors: 0,
     };
 
-    // 初始化延迟统计
-    this.latencyStats = {
-      samples: [],
+    this.connectionStats.latencyStats = {
       current: 0,
       average: 0,
       min: Infinity,
       max: 0,
-      jitter: 0
+      samples: [],
     };
-  }
 
-  /**
-   * 启动连接质量监控
-   * @private
-   */
-  _startConnectionQualityMonitoring() {
-    if (this.qualityMonitorTimer) {
-      clearInterval(this.qualityMonitorTimer);
-    }
+    this.logger.info("WebRTC", "数据通道统计信息已重置");
 
-    this.qualityMonitorTimer = setInterval(() => {
-      this._updateConnectionQuality();
-    }, 1000); // 每秒更新一次连接质量
-  }
-
-  /**
-   * 更新连接质量评分
-   * @private
-   */
-  _updateConnectionQuality() {
-    if (!this.connectionQuality) return;
-
-    const metrics = this.connectionQuality.metrics;
-    let score = 100;
-    let status = 'excellent';
-
-    // 基于延迟评分 (权重: 30%)
-    const latencyScore = this._calculateLatencyScore(metrics.latency.current);
-    score -= (100 - latencyScore) * 0.3;
-
-    // 基于丢包率评分 (权重: 40%)
-    const packetLossScore = this._calculatePacketLossScore(metrics.packetLoss.current);
-    score -= (100 - packetLossScore) * 0.4;
-
-    // 基于抖动评分 (权重: 20%)
-    const jitterScore = this._calculateJitterScore(metrics.jitter.current);
-    score -= (100 - jitterScore) * 0.2;
-
-    // 基于帧率评分 (权重: 10%)
-    const frameRateScore = this._calculateFrameRateScore(metrics.frameRate.current, metrics.frameRate.target);
-    score -= (100 - frameRateScore) * 0.1;
-
-    // 确保分数在0-100范围内
-    score = Math.max(0, Math.min(100, score));
-
-    // 确定连接状态
-    if (score >= 80) status = 'excellent';
-    else if (score >= 60) status = 'good';
-    else if (score >= 40) status = 'fair';
-    else status = 'poor';
-
-    // 更新连接质量
-    const previousScore = this.connectionQuality.score;
-    const previousStatus = this.connectionQuality.status;
-    
-    this.connectionQuality.score = Math.round(score);
-    this.connectionQuality.status = status;
-    this.connectionQuality.lastUpdate = Date.now();
-
-    // 添加到历史记录
-    this.connectionQuality.history.push({
+    // 触发统计重置事件
+    this.eventBus?.emit("webrtc:datachannel-stats-reset", {
       timestamp: Date.now(),
-      score: this.connectionQuality.score,
-      status: status,
-      metrics: JSON.parse(JSON.stringify(metrics)) // 深拷贝
     });
+  }
 
-    // 保持历史记录在合理范围内
-    if (this.connectionQuality.history.length > 300) { // 5分钟的历史记录
-      this.connectionQuality.history = this.connectionQuality.history.slice(-150);
+  /**
+   * 检查数据通道健康状态
+   */
+  checkDataChannelHealth() {
+    const status = this.getDataChannelStatus();
+    const stats = this.getDataChannelStats();
+
+    const health = {
+      overall: "unknown",
+      issues: [],
+      recommendations: [],
+      score: 0,
+      details: {
+        sendChannel: "unknown",
+        receiveChannel: "unknown",
+        latency: "unknown",
+        errorRate: "unknown",
+      },
+    };
+
+    // 检查发送通道
+    if (status.sendChannel) {
+      if (status.sendChannel.readyState === "open") {
+        health.details.sendChannel = "healthy";
+        health.score += 25;
+      } else if (status.sendChannel.readyState === "connecting") {
+        health.details.sendChannel = "connecting";
+        health.score += 10;
+        health.issues.push("发送通道正在连接中");
+      } else {
+        health.details.sendChannel = "unhealthy";
+        health.issues.push("发送通道未就绪");
+      }
+    } else {
+      health.details.sendChannel = "missing";
+      health.issues.push("发送通道不存在");
     }
 
-    // 如果质量发生显著变化，触发事件
-    if (Math.abs(score - previousScore) > 5 || status !== previousStatus) {
-      console.log(`📊 连接质量变化: ${previousStatus}(${Math.round(previousScore)}) -> ${status}(${this.connectionQuality.score})`);
-      
-      this.eventBus?.emit("webrtc:connection-quality-changed", {
-        score: this.connectionQuality.score,
-        status: status,
-        previousScore: Math.round(previousScore),
-        previousStatus: previousStatus,
-        metrics: metrics,
-        timestamp: Date.now()
+    // 检查接收通道
+    if (status.receiveChannel) {
+      if (status.receiveChannel.readyState === "open") {
+        health.details.receiveChannel = "healthy";
+        health.score += 25;
+      } else if (status.receiveChannel.readyState === "connecting") {
+        health.details.receiveChannel = "connecting";
+        health.score += 10;
+        health.issues.push("接收通道正在连接中");
+      } else {
+        health.details.receiveChannel = "unhealthy";
+        health.issues.push("接收通道未就绪");
+      }
+    } else {
+      health.details.receiveChannel = "missing";
+      health.issues.push("接收通道不存在");
+    }
+
+    // 检查延迟
+    const avgLatency = stats.latency.average;
+    if (avgLatency > 0) {
+      if (avgLatency < 50) {
+        health.details.latency = "excellent";
+        health.score += 25;
+      } else if (avgLatency < 100) {
+        health.details.latency = "good";
+        health.score += 20;
+      } else if (avgLatency < 200) {
+        health.details.latency = "fair";
+        health.score += 15;
+        health.issues.push("延迟较高");
+      } else {
+        health.details.latency = "poor";
+        health.score += 5;
+        health.issues.push("延迟过高");
+        health.recommendations.push("检查网络连接质量");
+      }
+    } else {
+      health.details.latency = "unknown";
+      health.score += 10;
+    }
+
+    // 检查错误率
+    const totalMessages = stats.messages.total;
+    const failedMessages = stats.messages.failed;
+    if (totalMessages > 0) {
+      const errorRate = (failedMessages / totalMessages) * 100;
+      if (errorRate < 1) {
+        health.details.errorRate = "excellent";
+        health.score += 25;
+      } else if (errorRate < 5) {
+        health.details.errorRate = "good";
+        health.score += 20;
+      } else if (errorRate < 10) {
+        health.details.errorRate = "fair";
+        health.score += 15;
+        health.issues.push("消息失败率较高");
+      } else {
+        health.details.errorRate = "poor";
+        health.score += 5;
+        health.issues.push("消息失败率过高");
+        health.recommendations.push("检查数据通道稳定性");
+      }
+    } else {
+      health.details.errorRate = "unknown";
+      health.score += 15;
+    }
+
+    // 确定整体健康状态
+    if (health.score >= 90) {
+      health.overall = "excellent";
+    } else if (health.score >= 70) {
+      health.overall = "good";
+    } else if (health.score >= 50) {
+      health.overall = "fair";
+    } else if (health.score >= 30) {
+      health.overall = "poor";
+    } else {
+      health.overall = "critical";
+    }
+
+    // 添加通用建议
+    if (health.issues.length === 0) {
+      health.recommendations.push("数据通道运行正常");
+    } else if (health.overall === "critical") {
+      health.recommendations.push("建议重新建立连接");
+    }
+
+    return health;
+  }
+
+  /**
+   * 创建并发送 Offer（当作为发起方时使用）
+   * @private
+   */
+  async _createAndSendOffer() {
+    if (!this.pc || !this.signalingManager) {
+      throw new Error("PeerConnection or SignalingManager not available");
+    }
+
+    try {
+      this.logger.info("WebRTC", "创建 SDP Offer");
+
+      // 创建 offer
+      const offer = await this.pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
       });
+
+      // 设置本地描述
+      await this.pc.setLocalDescription(offer);
+
+      this.logger.info("WebRTC", "本地描述已设置", {
+        type: offer.type,
+        sdpLength: offer.sdp.length,
+      });
+
+      // 发送 offer 到信令服务器
+      await this._sendOffer(offer);
+
+      this.logger.info("WebRTC", "SDP Offer 已发送");
+    } catch (error) {
+      this.logger.error("WebRTC", "创建或发送 Offer 失败", error);
+      throw error;
     }
-
-    // 定期发送质量更新事件
-    this.eventBus?.emit("webrtc:connection-quality-updated", {
-      quality: this.connectionQuality,
-      timestamp: Date.now()
-    });
   }
 
   /**
-   * 计算延迟评分
-   * @param {number} latency - 当前延迟（毫秒）
-   * @returns {number} 评分 (0-100)
+   * 设置连接超时定时器（增强版）
    * @private
    */
-  _calculateLatencyScore(latency) {
-    if (latency <= 50) return 100;
-    if (latency <= 100) return 90;
-    if (latency <= 150) return 75;
-    if (latency <= 200) return 60;
-    if (latency <= 300) return 40;
-    if (latency <= 500) return 20;
-    return 0;
-  }
+  _setConnectionTimer() {
+    this._clearConnectionTimer();
 
-  /**
-   * 计算丢包率评分
-   * @param {number} packetLoss - 丢包率 (0-1)
-   * @returns {number} 评分 (0-100)
-   * @private
-   */
-  _calculatePacketLossScore(packetLoss) {
-    const lossPercent = packetLoss * 100;
-    if (lossPercent <= 0.1) return 100;
-    if (lossPercent <= 0.5) return 90;
-    if (lossPercent <= 1.0) return 75;
-    if (lossPercent <= 2.0) return 60;
-    if (lossPercent <= 5.0) return 40;
-    if (lossPercent <= 10.0) return 20;
-    return 0;
-  }
+    // 根据重试次数调整超时时间
+    const timeoutMultiplier = Math.min(1 + this.retryCount * 0.5, 3); // 最多3倍超时
+    const adjustedTimeout = this.connectionTimeout * timeoutMultiplier;
 
-  /**
-   * 计算抖动评分
-   * @param {number} jitter - 抖动（毫秒）
-   * @returns {number} 评分 (0-100)
-   * @private
-   */
-  _calculateJitterScore(jitter) {
-    if (jitter <= 10) return 100;
-    if (jitter <= 20) return 90;
-    if (jitter <= 30) return 75;
-    if (jitter <= 50) return 60;
-    if (jitter <= 100) return 40;
-    if (jitter <= 200) return 20;
-    return 0;
-  }
+    this.connectionTimer = setTimeout(() => {
+      if (this.connectionState === "connecting") {
+        this.logger.error("WebRTC", "连接超时", {
+          timeout: adjustedTimeout,
+          originalTimeout: this.connectionTimeout,
+          retryCount: this.retryCount,
+          iceConnectionState: this.iceConnectionState,
+          signalingState: this.signalingState,
+        });
 
-  /**
-   * 计算帧率评分
-   * @param {number} current - 当前帧率
-   * @param {number} target - 目标帧率
-   * @returns {number} 评分 (0-100)
-   * @private
-   */
-  _calculateFrameRateScore(current, target) {
-    if (current >= target) return 100;
-    const ratio = current / target;
-    if (ratio >= 0.9) return 90;
-    if (ratio >= 0.8) return 75;
-    if (ratio >= 0.7) return 60;
-    if (ratio >= 0.5) return 40;
-    if (ratio >= 0.3) return 20;
-    return 0;
-  }
+        // 创建详细的超时错误
+        const timeoutError = new Error(`连接超时 (${adjustedTimeout}ms)`);
+        timeoutError.code = "CONNECTION_TIMEOUT";
+        timeoutError.details = {
+          timeout: adjustedTimeout,
+          retryCount: this.retryCount,
+          iceConnectionState: this.iceConnectionState,
+          signalingState: this.signalingState,
+        };
 
-  /**
-   * 处理增强的统计数据 - 包含连接质量监控
-   * @param {RTCStatsReport} stats - WebRTC统计报告
-   * @private
-   */
-  async _processEnhancedStats(stats) {
-    const timestamp = Date.now();
-    let bytesReceived = 0;
-    let packetsLost = 0;
-    let totalPackets = 0;
-    let jitter = 0;
-    let frameRate = 0;
-    let frameWidth = 0;
-    let frameHeight = 0;
-    let videoBitrate = 0;
-    let audioBitrate = 0;
-
-    // 处理各种统计类型
-    stats.forEach((stat) => {
-      switch (stat.type) {
-        case "inbound-rtp":
-          if (stat.mediaType === "video") {
-            bytesReceived += stat.bytesReceived || 0;
-            packetsLost += stat.packetsLost || 0;
-            totalPackets += stat.packetsReceived || 0;
-            jitter = Math.max(jitter, stat.jitter || 0);
-            frameRate = stat.framesPerSecond || 0;
-            frameWidth = stat.frameWidth || 0;
-            frameHeight = stat.frameHeight || 0;
-            
-            // 计算视频比特率
-            if (this._lastVideoStats && stat.bytesReceived) {
-              const timeDiff = (timestamp - this._lastVideoStats.timestamp) / 1000;
-              const bytesDiff = stat.bytesReceived - this._lastVideoStats.bytesReceived;
-              if (timeDiff > 0) {
-                videoBitrate = (bytesDiff * 8) / timeDiff; // bps
-              }
-            }
-            this._lastVideoStats = { bytesReceived: stat.bytesReceived, timestamp };
-          } else if (stat.mediaType === "audio") {
-            // 计算音频比特率
-            if (this._lastAudioStats && stat.bytesReceived) {
-              const timeDiff = (timestamp - this._lastAudioStats.timestamp) / 1000;
-              const bytesDiff = stat.bytesReceived - this._lastAudioStats.bytesReceived;
-              if (timeDiff > 0) {
-                audioBitrate = (bytesDiff * 8) / timeDiff; // bps
-              }
-            }
-            this._lastAudioStats = { bytesReceived: stat.bytesReceived, timestamp };
-          }
-          break;
-
-        case "candidate-pair":
-          if (stat.state === "succeeded" && stat.currentRoundTripTime) {
-            const rtt = stat.currentRoundTripTime * 1000; // 转换为毫秒
-            this._updateLatencyStats(rtt);
-          }
-          break;
-
-        case "remote-inbound-rtp":
-          if (stat.roundTripTime) {
-            const rtt = stat.roundTripTime * 1000; // 转换为毫秒
-            this._updateLatencyStats(rtt);
-          }
-          break;
+        this._handleConnectionError(timeoutError, {
+          isTimeout: true,
+          adjustedTimeout: adjustedTimeout,
+        });
       }
-    });
+    }, adjustedTimeout);
 
-    // 更新基本连接统计
-    this.connectionStats.bytesReceived = bytesReceived;
-    this.connectionStats.packetsLost = packetsLost;
-    this.connectionStats.totalPackets = totalPackets;
-
-    // 更新连接质量指标
-    if (this.connectionQuality) {
-      const metrics = this.connectionQuality.metrics;
-      
-      // 更新丢包率
-      const currentPacketLoss = totalPackets > 0 ? packetsLost / totalPackets : 0;
-      this._updateMetricSample(metrics.packetLoss, currentPacketLoss);
-      
-      // 更新抖动
-      this._updateMetricSample(metrics.jitter, jitter * 1000); // 转换为毫秒
-      
-      // 更新帧率
-      metrics.frameRate.current = frameRate;
-      if (frameRate < metrics.frameRate.target * 0.8) {
-        metrics.frameRate.drops++;
-      }
-      
-      // 更新分辨率
-      metrics.resolution.width = frameWidth;
-      metrics.resolution.height = frameHeight;
-      
-      // 更新带宽
-      metrics.bandwidth.video.inbound = videoBitrate;
-      metrics.bandwidth.audio.inbound = audioBitrate;
-    }
-
-    // 触发统计更新事件
-    this.eventBus?.emit("webrtc:stats-updated", {
-      connectionStats: this.connectionStats,
-      connectionQuality: this.connectionQuality,
-      timestamp: timestamp
+    this.logger.debug("WebRTC", "连接超时定时器已设置", {
+      timeout: adjustedTimeout,
+      originalTimeout: this.connectionTimeout,
+      multiplier: timeoutMultiplier,
+      retryCount: this.retryCount,
     });
   }
 
   /**
-   * 更新指标样本
-   * @param {Object} metric - 指标对象
-   * @param {number} value - 新值
+   * 清理连接超时定时器
    * @private
    */
-  _updateMetricSample(metric, value) {
-    metric.current = value;
-    metric.samples.push(value);
-    
-    // 保持样本数量在合理范围内
-    if (metric.samples.length > 60) { // 保留最近60个样本（5分钟）
-      metric.samples = metric.samples.slice(-30);
-    }
-    
-    // 计算统计值
-    if (metric.samples.length > 0) {
-      metric.average = metric.samples.reduce((a, b) => a + b, 0) / metric.samples.length;
-      metric.max = Math.max(...metric.samples);
+  _clearConnectionTimer() {
+    if (this.connectionTimer) {
+      clearTimeout(this.connectionTimer);
+      this.connectionTimer = null;
     }
   }
 
   /**
-   * 更新延迟统计
-   * @param {number} rtt - 往返时间（毫秒）
+   * 清理重试定时器
    * @private
    */
-  _updateLatencyStats(rtt) {
-    if (!this.latencyStats) return;
-    
-    this.latencyStats.current = rtt;
-    this.latencyStats.samples.push(rtt);
-    
-    // 保持样本数量在合理范围内
-    if (this.latencyStats.samples.length > 100) {
-      this.latencyStats.samples = this.latencyStats.samples.slice(-50);
-    }
-    
-    // 计算统计值
-    if (this.latencyStats.samples.length > 0) {
-      this.latencyStats.average = this.latencyStats.samples.reduce((a, b) => a + b, 0) / this.latencyStats.samples.length;
-      this.latencyStats.min = Math.min(this.latencyStats.min, rtt);
-      this.latencyStats.max = Math.max(this.latencyStats.max, rtt);
-      
-      // 计算抖动（标准差）
-      const mean = this.latencyStats.average;
-      const variance = this.latencyStats.samples.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / this.latencyStats.samples.length;
-      this.latencyStats.jitter = Math.sqrt(variance);
-    }
-    
-    // 更新连接质量中的延迟指标
-    if (this.connectionQuality) {
-      this._updateMetricSample(this.connectionQuality.metrics.latency, rtt);
+  _clearRetryTimer() {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 
   /**
-   * 更新ping统计
-   * @param {string} type - 统计类型 ('ping_sent', 'ping_received', 'pong_received')
-   * @param {number} timestamp - 时间戳
+   * 开始统计收集
    * @private
    */
-  _updatePingStats(type, timestamp) {
-    if (!this.pingStats) return;
-    
-    switch (type) {
-      case 'ping_sent':
-        this.pingStats.sent++;
-        this.pingStats.lastPingTime = timestamp;
-        break;
-        
-      case 'ping_received':
-        this.pingStats.received++;
-        break;
-        
-      case 'pong_received':
-        this.pingStats.lastPongTime = timestamp;
-        
-        // 计算丢失的ping
-        if (this.pingStats.sent > this.pingStats.received) {
-          this.pingStats.lost = this.pingStats.sent - this.pingStats.received;
-        }
-        break;
-    }
-    
-    // 触发ping统计更新事件
-    this.eventBus?.emit("webrtc:ping-stats-updated", {
-      pingStats: this.pingStats,
-      timestamp: timestamp
+  _startStatsCollection() {
+    // 清理现有定时器
+    this._stopStatsCollection();
+
+    this.logger.info("WebRTC", "开始收集连接统计信息", {
+      interval: this.statsCollectionInterval,
+    });
+
+    // 立即收集一次统计
+    this._collectStats();
+
+    // 设置定期收集
+    this.statsCollectionTimer = setInterval(() => {
+      this._collectStats();
+    }, this.statsCollectionInterval);
+
+    // 触发统计收集开始事件
+    this.eventBus?.emit("webrtc:stats-collection-started", {
+      interval: this.statsCollectionInterval,
     });
   }
 
   /**
-   * 停止统计收集 - 增强版本，包含连接质量监控清理
+   * 停止统计收集
    * @private
    */
   _stopStatsCollection() {
-    console.log("📊 停止WebRTC统计收集和连接质量监控");
-    
-    // 停止统计收集定时器
-    if (this.statsTimer) {
-      clearInterval(this.statsTimer);
-      this.statsTimer = null;
+    if (this.statsCollectionTimer) {
+      clearInterval(this.statsCollectionTimer);
+      this.statsCollectionTimer = null;
+
+      this.logger.info("WebRTC", "统计收集已停止");
+
+      // 触发统计收集停止事件
+      this.eventBus?.emit("webrtc:stats-collection-stopped");
     }
-    
-    // 停止连接质量监控定时器
-    if (this.qualityMonitorTimer) {
-      clearInterval(this.qualityMonitorTimer);
-      this.qualityMonitorTimer = null;
-    }
-    
-    // 触发统计收集停止事件
-    this.eventBus?.emit("webrtc:stats-collection-stopped", {
-      timestamp: Date.now(),
-      finalStats: {
-        connectionStats: this.connectionStats,
-        connectionQuality: this.connectionQuality,
-        pingStats: this.pingStats,
-        latencyStats: this.latencyStats
-      }
-    });
   }
 
   /**
-   * 执行错误清理 - 清理所有资源和状态
+   * 收集统计信息
    * @private
    */
-  _performErrorCleanup() {
-    console.log("🧹 执行WebRTC错误清理");
-    
-    // 清理所有定时器
-    this._clearTimers();
-    
-    // 清理数据通道
-    this._cleanupDataChannel();
-    
-    // 重新加载媒体元素
-    this._reloadMediaElement();
-    
-    // 停止统计收集
-    this._stopStatsCollection();
-    
-    // 清理ICE候选缓存
-    this.pendingIceCandidates = [];
-    
-    // 重置连接标志
-    this._connected = false;
-    
-    // 触发错误清理完成事件
-    this.eventBus?.emit("webrtc:error-cleanup-completed", {
-      timestamp: Date.now()
-    });
-    
-    console.log("✅ WebRTC错误清理完成");
+  async _collectStats() {
+    try {
+      if (!this.pc || this.connectionState !== "connected") {
+        return;
+      }
+
+      // 获取实时统计
+      const realTimeStats = await this.getRealTimeStats();
+
+      if (realTimeStats) {
+        // 触发统计更新事件
+        this.eventBus?.emit("webrtc:stats-updated", {
+          stats: this.getConnectionStats(),
+          realTimeStats: realTimeStats,
+          timestamp: Date.now(),
+        });
+
+        // 记录详细统计到日志（调试级别）
+        this.logger.debug("WebRTC", "统计信息已更新", {
+          quality: this.connectionStats.connectionQuality,
+          score: this.connectionStats.qualityScore,
+          rtt: this.connectionStats.currentRoundTripTime,
+          packetLoss: this.connectionStats.packetsLost,
+          bitrate: {
+            incoming: this.connectionStats.availableIncomingBitrate,
+            outgoing: this.connectionStats.availableOutgoingBitrate,
+          },
+        });
+      }
+    } catch (error) {
+      this.logger.error("WebRTC", "收集统计信息失败", error);
+    }
   }
 
   /**
-   * 获取连接统计 - 增强版本，包含连接质量和详细统计
+   * 设置统计收集间隔
    */
-  getConnectionStats() {
+  setStatsCollectionInterval(intervalMs) {
+    if (intervalMs < 100 || intervalMs > 10000) {
+      this.logger.warn("WebRTC", "统计收集间隔超出范围，使用默认值", {
+        requested: intervalMs,
+        default: this.statsCollectionInterval,
+      });
+      return;
+    }
+
+    const oldInterval = this.statsCollectionInterval;
+    this.statsCollectionInterval = intervalMs;
+
+    this.logger.info("WebRTC", "统计收集间隔已更新", {
+      oldInterval: oldInterval,
+      newInterval: intervalMs,
+    });
+
+    // 如果正在收集统计，重启定时器
+    if (this.statsCollectionTimer) {
+      this._startStatsCollection();
+    }
+
+    // 触发间隔更新事件
+    this.eventBus?.emit("webrtc:stats-interval-changed", {
+      oldInterval: oldInterval,
+      newInterval: intervalMs,
+    });
+  }
+
+  /**
+   * 获取连接质量监控信息
+   */
+  getConnectionQualityMonitoring() {
+    const stats = this.getConnectionStats();
+    const assessment = stats.qualityAssessment;
+
     return {
-      connectionState: this.connectionState,
+      // 当前质量状态
+      currentQuality: {
+        level: assessment.quality,
+        score: assessment.score,
+        description: assessment.recommendation,
+      },
+
+      // 关键指标
+      keyMetrics: {
+        latency: {
+          current: assessment.metrics.rtt,
+          average: stats.performanceMetrics.averageRtt * 1000,
+          unit: "ms",
+          status:
+            assessment.metrics.rtt < 100
+              ? "good"
+              : assessment.metrics.rtt < 200
+              ? "fair"
+              : "poor",
+        },
+        packetLoss: {
+          current: assessment.metrics.packetLoss,
+          rate: stats.performanceMetrics.packetLossRate,
+          unit: "%",
+          status:
+            assessment.metrics.packetLoss < 1
+              ? "good"
+              : assessment.metrics.packetLoss < 3
+              ? "fair"
+              : "poor",
+        },
+        jitter: {
+          current: assessment.metrics.jitter,
+          unit: "ms",
+          status:
+            assessment.metrics.jitter < 20
+              ? "good"
+              : assessment.metrics.jitter < 50
+              ? "fair"
+              : "poor",
+        },
+        bandwidth: {
+          incoming: stats.performanceMetrics.bitrateMbps.incoming,
+          outgoing: stats.performanceMetrics.bitrateMbps.outgoing,
+          unit: "Mbps",
+        },
+      },
+
+      // 问题和建议
+      issues: assessment.issues,
+
+      // 连接稳定性
+      stability: {
+        uptime: stats.uptime,
+        uptimeFormatted: stats.uptimeFormatted,
+        reconnectAttempts: stats.reconnectAttempts,
+        totalConnections: stats.totalConnections,
+        errorRate:
+          stats.errorStats.totalErrors / Math.max(1, stats.totalConnections),
+      },
+
+      // 媒体质量
+      mediaQuality: {
+        video: {
+          resolution: stats.media.video.resolution,
+          frameRate: stats.media.video.frameRate,
+          bitrate: stats.media.video.bitrateFormatted,
+          droppedFrames: stats.media.video.framesDropped,
+          status: stats.media.video.framesDropped < 10 ? "good" : "poor",
+        },
+        audio: {
+          bitrate: stats.media.audio.bitrateFormatted,
+          level: stats.media.audio.audioLevel,
+          status: "good", // 音频通常比较稳定
+        },
+      },
+
+      // 网络信息
+      networkInfo: {
+        connectionType: stats.network.connectionType,
+        localCandidate: stats.network.localCandidateType,
+        remoteCandidate: stats.network.remoteCandidateType,
+        transport: stats.network.transportType,
+      },
+
+      // 时间戳
+      timestamp: stats.lastUpdated,
+      lastUpdated: stats.lastUpdatedFormatted,
+    };
+  }
+
+  /**
+   * 获取性能指标（与现有监控接口兼容）
+   */
+  getPerformanceMetrics() {
+    const stats = this.getConnectionStats();
+
+    return {
+      // 连接时间和性能指标
+      connectionTime: stats.connectTime,
+      uptime: stats.uptime,
+      uptimeSeconds: Math.floor(stats.uptime / 1000),
+
+      // 网络性能
+      latency: stats.performanceMetrics.averageRtt * 1000, // 转换为毫秒
+      currentLatency: stats.currentRoundTripTime * 1000,
+      jitter: stats.jitter * 1000,
+      packetLossRate: stats.performanceMetrics.packetLossRate,
+
+      // 带宽
+      incomingBitrate: stats.availableIncomingBitrate,
+      outgoingBitrate: stats.availableOutgoingBitrate,
+      incomingBitrateMbps: parseFloat(
+        stats.performanceMetrics.bitrateMbps.incoming
+      ),
+      outgoingBitrateMbps: parseFloat(
+        stats.performanceMetrics.bitrateMbps.outgoing
+      ),
+
+      // 数据传输
+      bytesReceived: stats.bytesReceived,
+      bytesSent: stats.bytesSent,
+      packetsReceived: stats.packetsReceived,
+      packetsSent: stats.packetsSent,
+      packetsLost: stats.packetsLost,
+
+      // 连接质量
+      qualityScore: stats.qualityScore,
+      qualityLevel: stats.connectionQuality,
+
+      // 媒体统计
+      videoFrameRate: stats.videoStats.frameRate,
+      videoResolution: `${stats.videoStats.frameWidth}x${stats.videoStats.frameHeight}`,
+      videoFramesReceived: stats.videoStats.framesReceived,
+      videoFramesDecoded: stats.videoStats.framesDecoded,
+      videoFramesDropped: stats.videoStats.framesDropped,
+
+      // 连接信息
+      connectionType: this._getConnectionType(),
       iceConnectionState: this.iceConnectionState,
       signalingState: this.signalingState,
-      ...this.connectionStats,
-      connectionQuality: this.connectionQuality,
-      pingStats: this.pingStats,
-      latencyStats: this.latencyStats,
-      retryManager: this.retryManager.getRetryStats(),
-      timestamp: Date.now()
+      connectionState: this.connectionState,
+
+      // 错误统计
+      totalErrors: stats.errorStats.totalErrors,
+      reconnectAttempts: stats.reconnectAttempts,
+      totalConnections: stats.totalConnections,
+
+      // 时间戳
+      timestamp: Date.now(),
+      lastStatsUpdate: this.lastStatsTimestamp,
     };
   }
 
   /**
-   * 获取连接状态诊断信息
-   * @returns {Object} 包含状态验证和诊断信息的对象
+   * 重置统计信息
    */
-  getConnectionStateDiagnostics() {
-    if (!this.pc) {
-      return {
-        available: false,
-        reason: "PeerConnection不存在",
-        timestamp: Date.now()
-      };
-    }
+  resetStats() {
+    this.logger.info("WebRTC", "重置连接统计信息");
 
-    const diagnostic = ConnectionStateValidator.getDiagnosticInfo(this.pc);
-    
-    return {
-      ...diagnostic,
-      connectionStats: this.getConnectionStats(),
-      resetScheduled: this._resetScheduled || false
-    };
-  }
+    // 保留基本连接信息，重置累计统计
+    const connectTime = this.connectionStats.connectTime;
+    const totalConnections = this.connectionStats.totalConnections;
 
-  /**
-   * 手动触发状态验证
-   * @returns {Object} 验证结果
-   */
-  validateCurrentState() {
-    console.log("🔍 手动触发状态验证");
-    
-    const diagnostic = this.getConnectionStateDiagnostics();
-    
-    if (diagnostic.available && diagnostic.resetCheck?.needsReset) {
-      console.warn("⚠️ 手动验证发现需要重置连接:", diagnostic.resetCheck.reason);
-      this.eventBus?.emit("webrtc:manual-validation-reset-needed", diagnostic);
-    }
-    
-    return diagnostic;
-  }
-
-  /**
-   * 获取连接质量信息
-   * @returns {Object} 连接质量详细信息
-   */
-  getConnectionQuality() {
-    if (!this.connectionQuality) {
-      return {
-        score: 0,
-        status: 'unknown',
-        message: 'Connection quality monitoring not initialized'
-      };
-    }
-
-    return {
-      score: this.connectionQuality.score,
-      status: this.connectionQuality.status,
-      metrics: this.connectionQuality.metrics,
-      lastUpdate: this.connectionQuality.lastUpdate,
-      summary: this._generateQualitySummary()
-    };
-  }
-
-  /**
-   * 生成连接质量摘要
-   * @returns {Object} 质量摘要信息
-   * @private
-   */
-  _generateQualitySummary() {
-    if (!this.connectionQuality) return {};
-
-    const metrics = this.connectionQuality.metrics;
-    
-    return {
-      latency: {
-        current: `${Math.round(metrics.latency.current)}ms`,
-        average: `${Math.round(metrics.latency.average)}ms`,
-        status: this._getLatencyStatus(metrics.latency.current)
-      },
-      packetLoss: {
-        current: `${(metrics.packetLoss.current * 100).toFixed(2)}%`,
-        average: `${(metrics.packetLoss.average * 100).toFixed(2)}%`,
-        status: this._getPacketLossStatus(metrics.packetLoss.current)
-      },
-      jitter: {
-        current: `${Math.round(metrics.jitter.current)}ms`,
-        average: `${Math.round(metrics.jitter.average)}ms`,
-        status: this._getJitterStatus(metrics.jitter.current)
-      },
-      frameRate: {
-        current: `${Math.round(metrics.frameRate.current)}fps`,
-        target: `${metrics.frameRate.target}fps`,
-        status: this._getFrameRateStatus(metrics.frameRate.current, metrics.frameRate.target)
-      },
-      bandwidth: {
-        video: `${Math.round(metrics.bandwidth.video.inbound / 1000)}kbps`,
-        audio: `${Math.round(metrics.bandwidth.audio.inbound / 1000)}kbps`
-      },
-      resolution: `${metrics.resolution.width}x${metrics.resolution.height}`
-    };
-  }
-
-  /**
-   * 获取延迟状态描述
-   * @param {number} latency - 延迟值
-   * @returns {string} 状态描述
-   * @private
-   */
-  _getLatencyStatus(latency) {
-    if (latency <= 50) return 'excellent';
-    if (latency <= 100) return 'good';
-    if (latency <= 200) return 'fair';
-    return 'poor';
-  }
-
-  /**
-   * 获取丢包率状态描述
-   * @param {number} packetLoss - 丢包率
-   * @returns {string} 状态描述
-   * @private
-   */
-  _getPacketLossStatus(packetLoss) {
-    const lossPercent = packetLoss * 100;
-    if (lossPercent <= 0.5) return 'excellent';
-    if (lossPercent <= 1.0) return 'good';
-    if (lossPercent <= 2.0) return 'fair';
-    return 'poor';
-  }
-
-  /**
-   * 获取抖动状态描述
-   * @param {number} jitter - 抖动值
-   * @returns {string} 状态描述
-   * @private
-   */
-  _getJitterStatus(jitter) {
-    if (jitter <= 20) return 'excellent';
-    if (jitter <= 50) return 'good';
-    if (jitter <= 100) return 'fair';
-    return 'poor';
-  }
-
-  /**
-   * 获取帧率状态描述
-   * @param {number} current - 当前帧率
-   * @param {number} target - 目标帧率
-   * @returns {string} 状态描述
-   * @private
-   */
-  _getFrameRateStatus(current, target) {
-    const ratio = current / target;
-    if (ratio >= 0.9) return 'excellent';
-    if (ratio >= 0.8) return 'good';
-    if (ratio >= 0.7) return 'fair';
-    return 'poor';
-  }
-
-  /**
-   * 设置状态
-   */
-  _setState(newState) {
-    const oldState = this.connectionState;
-    this.connectionState = newState;
-
-    console.log(`📊 WebRTC状态变化: ${oldState} -> ${newState}`);
-    this.eventBus?.emit("webrtc:state-changed", {
-      from: oldState,
-      to: newState,
-    });
-  }
-
-  /**
-   * 设置定时器
-   */
-  _setTimer(name, callback, delay) {
-    this._clearTimer(name);
-    this[name] = setTimeout(callback, delay);
-  }
-
-  /**
-   * 清除定时器
-   */
-  _clearTimer(name) {
-    if (this[name]) {
-      clearTimeout(this[name]);
-      this[name] = null;
-    }
-  }
-
-  /**
-   * 清除所有定时器 - 增强版本，包含所有新增的定时器
-   */
-  _clearTimers() {
-    this._clearTimer("connectionTimer");
-    this._clearTimer("iceTimer");
-    this._clearTimer("iceCheckingTimer");
-    this._clearTimer("reconnectTimer");
-
-    if (this.statsTimer) {
-      clearInterval(this.statsTimer);
-      this.statsTimer = null;
-    }
-
-    if (this.qualityMonitorTimer) {
-      clearInterval(this.qualityMonitorTimer);
-      this.qualityMonitorTimer = null;
-    }
-  }
-
-  /**
-   * 停止重连
-   * 使用RetryManager停止重试机制
-   */
-  stopReconnecting() {
-    console.log("🛑 手动停止重连");
-    this._clearTimer("reconnectTimer");
-    
-    // 使用RetryManager停止重试 - 设置重试次数到最大值
-    this.retryManager.currentRetries = this.retryManager.connectionEstablished 
-      ? this.retryManager.networkInterruptionRetries 
-      : this.retryManager.initialConnectionRetries;
-    
-    console.log(`🛑 重试已停止，当前模式: ${this.retryManager.retryType}`);
-    
-    this.eventBus?.emit("webrtc:reconnection-stopped", {
-      retryStatus: this.retryManager.getRetryStatus(),
-      reason: "manual-stop"
-    });
-  }
-
-  /**
-   * 重置WebRTC连接
-   * 实现完整的资源清理，包括PeerConnection、定时器和媒体元素
-   */
-  reset() {
-    console.log("🔄 重置WebRTC连接");
-
-    // 清理定时器
-    this._clearTimers();
-
-    // 清理数据通道
-    this._cleanupDataChannel();
-
-    // 关闭PeerConnection
-    if (this.pc) {
-      try {
-        this.pc.close();
-      } catch (error) {
-        console.warn("⚠️ 关闭PeerConnection时出错:", error);
-      }
-      this.pc = null;
-    }
-
-    // 重置状态
-    this.connectionState = "disconnected";
-    this.iceConnectionState = "closed";
-    this.signalingState = "closed";
-    this.connectionAttempts = 0;
-
-    // 完全重置RetryManager
-    this.retryManager.fullReset();
-
-    // 清理媒体元素
-    if (this.videoElement) {
-      try {
-        this.videoElement.srcObject = null;
-        this.videoElement.pause();
-      } catch (error) {
-        console.warn("⚠️ 清理视频元素时出错:", error);
-      }
-    }
-
-    if (this.audioElement) {
-      try {
-        this.audioElement.srcObject = null;
-        this.audioElement.pause();
-      } catch (error) {
-        console.warn("⚠️ 清理音频元素时出错:", error);
-      }
-    }
-
-    // 清理远程流
-    if (this.remoteStream) {
-      try {
-        this.remoteStream.getTracks().forEach((track) => {
-          track.stop();
-        });
-      } catch (error) {
-        console.warn("⚠️ 停止远程流轨道时出错:", error);
-      }
-      this.remoteStream = null;
-    }
-
-    // 清理缓存的ICE候选
-    this.pendingIceCandidates = [];
-
-    // 重置统计信息
     this.connectionStats = {
-      connectTime: null,
-      disconnectTime: Date.now(),
-      bytesReceived: 0,
-      packetsLost: 0,
-      totalConnections: 0,
+      connectTime: connectTime,
+      disconnectTime: null,
+      totalConnections: totalConnections,
       reconnectAttempts: 0,
+      connectionDuration: 0,
+      bytesReceived: 0,
+      bytesSent: 0,
+      packetsReceived: 0,
+      packetsSent: 0,
+      packetsLost: 0,
+      jitter: 0,
+      roundTripTime: 0,
+      availableIncomingBitrate: 0,
+      availableOutgoingBitrate: 0,
+      currentRoundTripTime: 0,
+      totalRoundTripTime: 0,
+      roundTripTimeMeasurements: 0,
+      connectionQuality: "unknown",
+      qualityScore: 0,
+      videoStats: {
+        framesReceived: 0,
+        framesDecoded: 0,
+        framesDropped: 0,
+        frameWidth: 0,
+        frameHeight: 0,
+        frameRate: 0,
+        bitrate: 0,
+      },
+      audioStats: {
+        samplesReceived: 0,
+        samplesDecoded: 0,
+        audioLevel: 0,
+        bitrate: 0,
+      },
+      networkStats: {
+        candidatePairs: 0,
+        selectedCandidatePair: null,
+        localCandidateType: "unknown",
+        remoteCandidateType: "unknown",
+        transportType: "unknown",
+      },
     };
 
-    // 发出重置完成事件
-    this.eventBus?.emit("webrtc:reset-completed");
+    // 重置时间戳
+    this.lastStatsTimestamp = 0;
+    this._lastBytes = 0;
 
-    console.log("✅ WebRTC重置完成");
+    // 清除错误历史
+    this.clearErrorHistory();
+
+    // 触发统计重置事件
+    this.eventBus?.emit("webrtc:stats-reset", {
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * 重置重试状态
+   * @private
+   */
+  _resetRetryState() {
+    const previousRetryCount = this.retryCount;
+    this.retryCount = 0;
+    this._clearRetryTimer();
+
+    if (previousRetryCount > 0) {
+      this.logger.info("WebRTC", "连接成功，重试状态已重置", {
+        previousRetryCount: previousRetryCount,
+        totalReconnectAttempts: this.connectionStats.reconnectAttempts,
+      });
+
+      // 触发重试状态重置事件
+      this.eventBus?.emit("webrtc:retry-state-reset", {
+        previousRetryCount: previousRetryCount,
+        totalReconnectAttempts: this.connectionStats.reconnectAttempts,
+      });
+    }
+  }
+
+  /**
+   * 处理接收到的 Offer
+   * @private
+   */
+  async _handleOffer(sdp) {
+    if (!this.pc) {
+      this.logger.warn("WebRTC", "接收到 Offer 但 PeerConnection 未创建");
+      return;
+    }
+
+    try {
+      this.logger.info("WebRTC", "处理接收到的 Offer", {
+        type: sdp.type,
+        sdpLength: sdp.sdp?.length || 0,
+      });
+
+      // 如果已经是 RTCSessionDescription 对象，直接使用；否则创建新的
+      const sessionDescription =
+        sdp instanceof RTCSessionDescription
+          ? sdp
+          : new RTCSessionDescription({
+              type: sdp.type,
+              sdp: sdp.sdp,
+            });
+
+      // 设置远程描述
+      await this.pc.setRemoteDescription(sessionDescription);
+
+      // 创建并发送 answer
+      const answer = await this.pc.createAnswer();
+      await this.pc.setLocalDescription(answer);
+
+      await this._sendAnswer(answer);
+
+      this.logger.info("WebRTC", "Answer 已创建并发送");
+    } catch (error) {
+      this.logger.error("WebRTC", "处理 Offer 失败", error);
+      throw error;
+    }
+  }
+
+  /**
+   * 处理接收到的 Answer
+   * @private
+   */
+  async _handleAnswer(sdp) {
+    if (!this.pc) {
+      this.logger.warn("WebRTC", "接收到 Answer 但 PeerConnection 未创建");
+      return;
+    }
+
+    try {
+      this.logger.info("WebRTC", "处理接收到的 Answer", {
+        type: sdp.type,
+        sdpLength: sdp.sdp?.length || 0,
+      });
+
+      // 如果已经是 RTCSessionDescription 对象，直接使用；否则创建新的
+      const sessionDescription =
+        sdp instanceof RTCSessionDescription
+          ? sdp
+          : new RTCSessionDescription({
+              type: sdp.type,
+              sdp: sdp.sdp,
+            });
+
+      // 设置远程描述
+      await this.pc.setRemoteDescription(sessionDescription);
+
+      this.logger.info("WebRTC", "远程描述已设置");
+    } catch (error) {
+      this.logger.error("WebRTC", "处理 Answer 失败", error);
+      throw error;
+    }
+  }
+
+  /**
+   * 处理接收到的 ICE 候选
+   * @private
+   */
+  async _handleIceCandidate(candidate) {
+    if (!this.pc) {
+      this.logger.warn("WebRTC", "接收到 ICE 候选但 PeerConnection 未创建");
+      return;
+    }
+
+    try {
+      if (candidate && candidate.candidate) {
+        this.logger.debug("WebRTC", "添加 ICE 候选", {
+          candidate: candidate.candidate,
+          sdpMLineIndex: candidate.sdpMLineIndex,
+          sdpMid: candidate.sdpMid,
+        });
+
+        // 如果已经是 RTCIceCandidate 对象，直接使用；否则创建新的
+        const iceCandidate =
+          candidate instanceof RTCIceCandidate
+            ? candidate
+            : new RTCIceCandidate({
+                candidate: candidate.candidate,
+                sdpMLineIndex: candidate.sdpMLineIndex,
+                sdpMid: candidate.sdpMid,
+              });
+
+        await this.pc.addIceCandidate(iceCandidate);
+        this.logger.debug("WebRTC", "ICE 候选已添加");
+      } else {
+        this.logger.info("WebRTC", "接收到空 ICE 候选，候选收集完成");
+      }
+    } catch (error) {
+      this.logger.error("WebRTC", "处理 ICE 候选失败", error);
+      // ICE 候选错误通常不是致命的，继续处理
+    }
+  }
+
+  /**
+   * 处理接收到的 Offer（公共接口）
+   * 这是对私有方法 _handleOffer 的公共包装
+   */
+  async handleOffer(sdp) {
+    this.logger.debug("WebRTC", "公共接口：处理 Offer", { type: sdp?.type });
+    return await this._handleOffer(sdp);
+  }
+
+  /**
+   * 处理接收到的 ICE 候选（公共接口）
+   * 这是对私有方法 _handleIceCandidate 的公共包装
+   */
+  async handleIceCandidate(candidate) {
+    this.logger.debug("WebRTC", "公共接口：处理 ICE 候选", { 
+      candidate: candidate?.candidate?.substring(0, 50) + "..." 
+    });
+    return await this._handleIceCandidate(candidate);
   }
 }
 
-// 导出
+// 导出 WebRTCManager 类
 if (typeof module !== "undefined" && module.exports) {
   module.exports = WebRTCManager;
 } else if (typeof window !== "undefined") {
   window.WebRTCManager = WebRTCManager;
-
-  // 添加全局调试函数
-  window.printWebRTCConfig = function () {
-    console.log("📋 当前WebRTC配置:");
-
-    if (window.appManager && window.appManager.modules.webrtc) {
-      const webrtc = window.appManager.modules.webrtc;
-      console.log("ICE服务器:", webrtc.iceServers);
-      console.log("连接超时:", webrtc.connectionTimeout);
-      console.log("最大重试次数:", webrtc.maxConnectionAttempts);
-      console.log("当前状态:", webrtc.getConnectionStats());
-    } else {
-      console.error("❌ WebRTC管理器不可用");
-    }
-  };
 }

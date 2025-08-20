@@ -137,6 +137,37 @@ func (ws *WebServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ws.writeJSON(w, health)
 }
 
+func (ws *WebServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	ws.mutex.RLock()
+	defer ws.mutex.RUnlock()
+
+	// 基本统计信息
+	stats := map[string]any{
+		"server": map[string]any{
+			"uptime":                time.Since(ws.startTime).Seconds(),
+			"start_time":            ws.startTime.Unix(),
+			"registered_components": len(ws.components),
+			"running":               ws.running,
+		},
+		"system": map[string]any{
+			"timestamp": time.Now().Unix(),
+			"version":   "1.0.0",
+		},
+		"components": make(map[string]any),
+	}
+
+	// 添加组件统计信息（如果有的话）
+	componentStats := make(map[string]any)
+	for name := range ws.components {
+		componentStats[name] = map[string]any{
+			"status": "registered",
+		}
+	}
+	stats["components"] = componentStats
+
+	ws.writeJSON(w, stats)
+}
+
 // handleComponentList 处理组件列表请求
 func (ws *WebServer) handleComponentList(w http.ResponseWriter, r *http.Request) {
 	// 组件管理由App层负责，这里返回提示信息
