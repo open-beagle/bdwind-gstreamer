@@ -527,77 +527,25 @@ class EnhancedErrorHandler {
     }
     
     /**
-     * 显示错误通知
+     * 显示错误通知 - 已禁用弹窗，仅记录到控制台
      * @private
      */
     _showErrorNotification(errorInfo) {
         const template = this.errorMessages[errorInfo.type] || this.errorMessages[ErrorTypes.UNKNOWN];
         
-        const notification = document.createElement('div');
-        notification.className = `error-notification severity-${errorInfo.severity}`;
-        notification.style.cssText = `
-            background: ${this._getSeverityColor(errorInfo.severity)};
-            color: white;
-            padding: 16px;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-            pointer-events: auto;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            border-left: 4px solid ${this._getSeverityAccentColor(errorInfo.severity)};
-        `;
-        
+        // 仅记录错误到控制台，不显示弹窗
+        const errorMessage = errorInfo.message || template.defaultMessage;
         const suggestions = this.feedbackConfig.enableSuggestions ? 
             this._getSuggestions(errorInfo) : [];
         
-        notification.innerHTML = `
-            <div class="error-header" style="display: flex; align-items: center; margin-bottom: 8px;">
-                <span class="error-icon" style="font-size: 18px; margin-right: 8px;">${template.icon}</span>
-                <span class="error-title" style="font-weight: bold;">${template.title}</span>
-                <button class="error-close" style="margin-left: auto; background: none; border: none; color: white; cursor: pointer; font-size: 18px;">×</button>
-            </div>
-            <div class="error-message" style="margin-bottom: ${suggestions.length > 0 ? '12px' : '0'};">
-                ${errorInfo.message || template.defaultMessage}
-            </div>
-            ${suggestions.length > 0 ? `
-                <div class="error-suggestions" style="font-size: 12px; opacity: 0.9;">
-                    <div style="font-weight: bold; margin-bottom: 4px;">建议解决方案:</div>
-                    <ul style="margin: 0; padding-left: 16px;">
-                        ${suggestions.map(s => `<li>${s}</li>`).join('')}
-                    </ul>
-                </div>
-            ` : ''}
-            ${this.feedbackConfig.showDetailedErrors && errorInfo.error ? `
-                <details style="margin-top: 8px; font-size: 11px; opacity: 0.8;">
-                    <summary style="cursor: pointer;">技术详情</summary>
-                    <pre style="margin-top: 4px; white-space: pre-wrap; font-family: monospace;">${errorInfo.error.message || errorInfo.error}</pre>
-                </details>
-            ` : ''}
-        `;
+        console.error(`ErrorHandler: ${template.title} - ${errorMessage}`);
         
-        // 添加事件监听器
-        const closeBtn = notification.querySelector('.error-close');
-        closeBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this._removeNotification(notification);
-        });
+        if (suggestions.length > 0) {
+            console.info('ErrorHandler: 建议解决方案:', suggestions);
+        }
         
-        notification.addEventListener('click', () => {
-            this._showErrorDetails(errorInfo);
-        });
-        
-        // 添加到容器
-        this.elements.errorContainer.appendChild(notification);
-        
-        // 限制通知数量
-        this._limitNotifications();
-        
-        // 自动隐藏
-        if (this.feedbackConfig.autoHideDelay > 0) {
-            setTimeout(() => {
-                this._removeNotification(notification);
-            }, this.feedbackConfig.autoHideDelay);
+        if (this.feedbackConfig.showDetailedErrors && errorInfo.error) {
+            console.error('ErrorHandler: 技术详情:', errorInfo.error);
         }
     }
     

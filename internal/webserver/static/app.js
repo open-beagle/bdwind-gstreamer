@@ -415,15 +415,31 @@ class ApplicationManager {
       } catch (error) {
         Logger.error("ApplicationManager: 处理offer失败", error);
 
-        // 更新UI显示错误
+        // 统一错误处理 - 仅记录到控制台，不显示UI弹窗 (需求 2.1, 2.2)
+        console.error("❌ [DEBUG] ApplicationManager: Offer处理失败", {
+          error: error.message,
+          stack: error.stack,
+          phase: "webrtc-negotiation",
+          context: "signaling:offer",
+          timestamp: new Date().toISOString(),
+          noUIPopup: true // 明确标记不显示UI弹窗
+        });
+
+        this._handleApplicationError("offer-processing-failed", error, {
+          phase: "webrtc-negotiation",
+          context: "signaling:offer",
+          showUI: false // 禁用UI错误显示
+        });
+
+        // 更新连接状态指示器（不显示错误弹窗）(需求 2.2)
         if (this.modules.ui) {
+          console.log("🔄 [DEBUG] 更新连接状态指示器（无弹窗）");
           this.modules.ui.updateConnectionStatus("error", {
-            error: `处理offer失败: ${error.message}`,
+            message: "Offer处理失败，正在重试...",
+            showPopup: false, // 明确禁用弹窗
+            consoleOnly: true // 仅控制台日志
           });
         }
-
-        // 触发错误恢复
-        this._handleWebRTCError("offer-processing-failed", error);
       }
     });
 
@@ -683,7 +699,7 @@ class ApplicationManager {
     this.core.eventBus.on("signaling:error", async (data) => {
       await this._handleSignalingError(
         "connection-failed",
-        new Error(data.error || "Signaling error")
+        new Error(data?.error?.message || data?.error || "Signaling error")
       );
     });
 
@@ -998,6 +1014,12 @@ class ApplicationManager {
     if (this.modules.signaling) {
       await this.modules.signaling.connect();
       this.state.modules.get("signaling").status = "running";
+    }
+
+    // 连接WebRTC和信令模块
+    if (this.modules.webrtc && this.modules.signaling) {
+      this.modules.webrtc.setSignalingManager(this.modules.signaling);
+      Logger.info("ApplicationManager: WebRTC和信令模块已连接");
     }
 
     Logger.info("ApplicationManager: 模块启动完成");
@@ -1396,26 +1418,29 @@ class ApplicationManager {
         },
       },
 
-      // 通用错误处理方法
+      // 统一错误处理方法 - 增强版本，包含详细的错误分类和上下文信息收集
       handleError: async (category, errorType, error, context = {}) => {
+        const timestamp = Date.now();
+        const errorInfo = this._formatApplicationError(category, errorType, error, context, timestamp);
+        
+        // 统一的错误日志格式
+        console.error(`❌ [${errorInfo.category}] 应用错误: ${errorInfo.message}`, {
+          type: errorInfo.type,
+          context: errorInfo.context,
+          timestamp: errorInfo.timestamp,
+          stack: errorInfo.stack,
+          moduleStates: this._getModuleStates()
+        });
+
         const handler = this.errorHandler[category]?.[errorType];
 
         if (!handler) {
-          Logger.error(
-            `ApplicationManager: 未知错误类型 ${category}:${errorType}`,
-            error
-          );
+          console.error(`⚠️ [错误处理] 未知错误类型: ${category}:${errorType}`, errorInfo);
           return false;
         }
 
-        // 记录错误
-        this.state.errors.push({
-          category,
-          errorType,
-          error,
-          context,
-          timestamp: Date.now(),
-        });
+        // 记录错误到状态历史
+        this.state.errors.push(errorInfo);
 
         // 检查重试次数
         const retryKey = `${category}:${errorType}`;
@@ -1434,30 +1459,76 @@ class ApplicationManager {
           handler.maxRetries &&
           this.retryCounters[retryKey] > handler.maxRetries
         ) {
-          Logger.error(
-            `ApplicationManager: ${category}:${errorType} 超过最大重试次数 (${handler.maxRetries})`
-          );
+          console.error(`🛑 [重试停止] ${category}:${errorType} 超过最大重试次数`, {
+            maxRetries: handler.maxRetries,
+            currentAttempt: this.retryCounters[retryKey],
+            errorInfo: errorInfo
+          });
 
+          // 仅更新连接状态，不显示错误弹窗
           if (this.modules.ui) {
             this.modules.ui.updateConnectionStatus("error", {
-              error: `连接失败，已达到最大重试次数`,
+              message: `连接失败，已达到最大重试次数 (${handler.maxRetries})`,
             });
           }
 
           return false;
         }
 
+        // 记录重试信息
+        console.log(`🔄 [错误重试] ${category}:${errorType}`, {
+          attempt: this.retryCounters[retryKey],
+          maxRetries: handler.maxRetries,
+          strategy: handler.strategy,
+          errorInfo: errorInfo
+        });
+
         // 执行错误处理动作
         try {
           await handler.action(error, this.retryCounters[retryKey], context);
+          
+          console.log(`✅ [错误处理] ${category}:${errorType} 处理成功`, {
+            attempt: this.retryCounters[retryKey],
+            strategy: handler.strategy
+          });
+          
           return true;
         } catch (actionError) {
-          Logger.error(
-            `ApplicationManager: 错误处理动作失败 ${category}:${errorType}`,
-            actionError
-          );
+          console.error(`❌ [错误处理] ${category}:${errorType} 处理动作失败`, {
+            actionError: actionError.message,
+            originalError: errorInfo,
+            attempt: this.retryCounters[retryKey]
+          });
           return false;
         }
+      },
+
+      // 格式化应用错误信息的辅助方法
+      _formatApplicationError: (category, errorType, error, context, timestamp) => {
+        const errorObj = typeof error === 'string' ? new Error(error) : error;
+        
+        return {
+          category: category.toUpperCase(),
+          type: errorType,
+          message: errorObj.message || '未知应用错误',
+          context: {
+            ...context,
+            appPhase: this.state.phase,
+            moduleCount: this.state.modules.size,
+            uptime: timestamp - this.state.startTime
+          },
+          timestamp: new Date(timestamp).toISOString(),
+          stack: errorObj.stack
+        };
+      },
+
+      // 获取模块状态摘要的辅助方法
+      _getModuleStates: () => {
+        const states = {};
+        this.state.modules.forEach((module, name) => {
+          states[name] = module.status;
+        });
+        return states;
       },
 
       // 重置重试计数器
@@ -1502,10 +1573,91 @@ class ApplicationManager {
   }
 
   /**
-   * 处理未捕获的错误
+   * 统一应用错误处理方法
+   * @private
+   */
+  _handleApplicationError(type, error, context = {}) {
+    const errorInfo = this._formatApplicationError("application", type, error, context);
+    
+    console.error(`❌ [应用错误] ${type}: ${errorInfo.message}`, {
+      context: errorInfo.context,
+      timestamp: errorInfo.timestamp,
+      moduleStates: this._getModuleStates(),
+      stack: errorInfo.stack
+    });
+    
+    // 发送错误事件供其他模块处理
+    this.core.eventBus?.emit('app:error-occurred', errorInfo);
+    
+    // 记录错误历史
+    this._recordApplicationError(errorInfo);
+    
+    return errorInfo;
+  }
+
+  /**
+   * 格式化应用错误信息
+   * @private
+   */
+  _formatApplicationError(category, type, error, context) {
+    const timestamp = Date.now();
+    const errorObj = typeof error === 'string' ? new Error(error) : error;
+    
+    return {
+      category: category.toUpperCase(),
+      type: type,
+      message: errorObj.message || '未知应用错误',
+      context: {
+        ...context,
+        appPhase: this.state.phase,
+        moduleCount: this.state.modules.size,
+        uptime: timestamp - this.state.startTime
+      },
+      timestamp: new Date(timestamp).toISOString(),
+      stack: errorObj.stack
+    };
+  }
+
+  /**
+   * 获取模块状态摘要
+   * @private
+   */
+  _getModuleStates() {
+    const states = {};
+    this.state.modules.forEach((module, name) => {
+      states[name] = module.status;
+    });
+    return states;
+  }
+
+  /**
+   * 记录应用错误历史
+   * @private
+   */
+  _recordApplicationError(errorInfo) {
+    if (!this.state.errorHistory) {
+      this.state.errorHistory = [];
+    }
+    
+    this.state.errorHistory.push(errorInfo);
+    
+    // 保持历史记录在合理范围内
+    if (this.state.errorHistory.length > 100) {
+      this.state.errorHistory = this.state.errorHistory.slice(-50);
+    }
+  }
+
+  /**
+   * 处理未捕获的错误 - 增强版本
    */
   handleError(event) {
-    Logger.error("ApplicationManager: 未捕获的错误:", event.error);
+    const errorInfo = this._handleApplicationError("uncaught-error", event.error, {
+      source: "global-error-handler",
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno
+    });
+    
     this.state.errors.push({
       type: "uncaught",
       error: event.error,
@@ -1778,24 +1930,46 @@ class ApplicationManager {
    * @private
    */
   async _handleSignalingError(errorType, error, context = {}) {
-    Logger.error(`ApplicationManager: 信令错误 - ${errorType}`, error);
+    // 添加默认错误处理机制，避免未捕获的异常
+    const safeError = error || new Error(`信令服务错误: ${errorType}`);
+    const safeErrorType = errorType || 'unknown-signaling-error';
+    const safeContext = context || {};
 
-    // 使用新的错误处理系统
-    const handled = await this.errorHandler.handleError(
-      "signaling",
-      errorType,
-      error,
-      context
-    );
+    Logger.error(`ApplicationManager: 信令错误 - ${safeErrorType}`, safeError);
 
-    if (!handled) {
-      Logger.error(`ApplicationManager: 信令错误处理失败 - ${errorType}`);
+    try {
+      // 使用新的错误处理系统
+      const handled = await this.errorHandler.handleError(
+        "signaling",
+        safeErrorType,
+        safeError,
+        safeContext
+      );
 
-      // 如果错误处理失败，显示错误给用户
-      if (this.modules.ui) {
-        this.modules.ui.updateConnectionStatus("error", {
-          error: `信令错误: ${error.message || errorType}`,
-        });
+      if (!handled) {
+        Logger.error(`ApplicationManager: 信令错误处理失败 - ${safeErrorType}`);
+
+        // 如果错误处理失败，显示错误给用户
+        if (this.modules.ui) {
+          this.modules.ui.updateConnectionStatus("error", {
+            error: `信令错误: ${safeError.message || safeErrorType}`,
+          });
+        }
+      }
+    } catch (handlingError) {
+      // 降级机制：如果错误处理本身失败，记录错误但不抛出异常
+      Logger.error(`ApplicationManager: 信令错误处理器异常 - ${safeErrorType}`, handlingError);
+      
+      // 尝试基本的用户通知
+      try {
+        if (this.modules.ui) {
+          this.modules.ui.updateConnectionStatus("error", {
+            error: `信令服务异常，请刷新页面重试`,
+          });
+        }
+      } catch (uiError) {
+        // 最后的降级：只记录错误，不做其他操作
+        Logger.error("ApplicationManager: UI错误通知失败", uiError);
       }
     }
   }

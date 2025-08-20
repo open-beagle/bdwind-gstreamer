@@ -44,6 +44,7 @@ class SignalingManager {
     };
 
     this._setupDefaultHandlers();
+    this._setupProtocolHandlers();
     this._loadConfig();
   }
 
@@ -90,10 +91,7 @@ class SignalingManager {
       this.eventBus?.emit("signaling:answer", data);
     });
 
-    this.registerHandler("ice-candidate", (data) => {
-      Logger.info("SignalingManager: 收到ICE候选");
-      this.eventBus?.emit("signaling:ice-candidate", data);
-    });
+
 
     this.registerHandler("status", (data) => {
       Logger.info("SignalingManager: 状态更新", data.message);
@@ -117,6 +115,74 @@ class SignalingManager {
     this.registerHandler("ice-ack", (data) => {
       Logger.info("SignalingManager: 收到ICE确认", data);
       this.eventBus?.emit("signaling:ice-ack", data);
+    });
+
+
+  }
+
+  /**
+   * 设置协议处理器
+   * 实现selkies信令协议的完整支持
+   * @private
+   */
+  _setupProtocolHandlers() {
+    // HELLO响应处理器 - 确认服务器注册成功
+    this.registerHandler("hello", (data) => {
+      Logger.info("SignalingManager: 已注册到服务器");
+      this.eventBus?.emit("signaling:registered");
+    });
+
+    // ERROR消息处理器 - 记录服务器错误并触发重连
+    this.registerHandler("server-error", (data) => {
+      Logger.error("SignalingManager: 服务器错误", data);
+      this.eventBus?.emit("signaling:server-error", data);
+      
+      // 如果是严重错误，触发重连
+      if (data && data.critical) {
+        Logger.warn("SignalingManager: 检测到严重错误，准备重连");
+        this._scheduleReconnect();
+      }
+    });
+
+    // SDP消息处理器 - 支持SDP offer/answer
+    this.registerHandler("sdp", (data) => {
+      Logger.info("SignalingManager: 收到SDP消息");
+      
+      // 验证SDP数据
+      if (!data || typeof data !== 'object') {
+        Logger.error("SignalingManager: SDP数据无效", data);
+        this.eventBus?.emit("signaling:error", { message: "SDP数据无效" });
+        return;
+      }
+
+      // 创建RTCSessionDescription对象
+      try {
+        const sdp = new RTCSessionDescription(data);
+        this.eventBus?.emit("signaling:sdp", sdp);
+      } catch (error) {
+        Logger.error("SignalingManager: 创建SDP描述失败", error);
+        this.eventBus?.emit("signaling:error", { message: `SDP解析失败: ${error.message}` });
+      }
+    });
+
+    // ICE候选消息处理器
+    this.registerHandler("ice-candidate", (data) => {
+      Logger.info("SignalingManager: 收到ICE候选");
+      
+      // 验证ICE候选数据
+      if (!data || typeof data !== 'object') {
+        Logger.error("SignalingManager: ICE候选数据无效", data);
+        this.eventBus?.emit("signaling:error", { message: "ICE候选数据无效" });
+        return;
+      }
+
+      try {
+        const candidate = new RTCIceCandidate(data);
+        this.eventBus?.emit("signaling:ice-candidate", candidate);
+      } catch (error) {
+        Logger.error("SignalingManager: 创建ICE候选失败", error);
+        this.eventBus?.emit("signaling:error", { message: `ICE候选解析失败: ${error.message}` });
+      }
     });
   }
 
@@ -388,12 +454,42 @@ class SignalingManager {
 
   /**
    * 处理消息接收
+   * 增强的消息处理，支持原始消息和JSON消息格式
    * @private
    */
   _handleMessage(event) {
+    const data = event.data;
+
+    // 首先尝试处理原始文本消息（兼容selkies协议）
+    if (typeof data === 'string') {
+      // 处理HELLO响应
+      if (data === "HELLO") {
+        Logger.info("SignalingManager: 收到HELLO响应");
+        this.eventBus?.emit("signaling:hello");
+        // 触发hello处理器
+        this._dispatchMessage({ type: "hello", data: null });
+        return;
+      }
+
+      // 处理ERROR消息
+      if (data.startsWith("ERROR")) {
+        Logger.error("SignalingManager: 收到ERROR消息", data);
+        const errorData = { message: data, critical: data.includes("CRITICAL") };
+        this.eventBus?.emit("signaling:server-error", errorData);
+        // 触发server-error处理器
+        this._dispatchMessage({ type: "server-error", data: errorData });
+        return;
+      }
+
+      // 处理其他原始文本消息
+      Logger.debug("SignalingManager: 收到原始文本消息", data);
+      this.eventBus?.emit("signaling:raw-message", { message: data });
+    }
+
+    // 尝试解析JSON消息
     try {
-      const message = JSON.parse(event.data);
-      Logger.debug("SignalingManager: 收到消息", message.type);
+      const message = JSON.parse(data);
+      Logger.debug("SignalingManager: 收到JSON消息", message.type || "unknown");
 
       // 处理响应消息
       if (message.id && this.pendingMessages.has(message.id)) {
@@ -409,11 +505,46 @@ class SignalingManager {
         return;
       }
 
+      // 增强的JSON消息解析 - 支持SDP和ICE候选消息
+      if (message.sdp) {
+        Logger.info("SignalingManager: 收到直接SDP消息");
+        try {
+          const sdp = new RTCSessionDescription(message.sdp);
+          this.eventBus?.emit("signaling:sdp", sdp);
+          // 触发sdp处理器
+          this._dispatchMessage({ type: "sdp", data: message.sdp });
+        } catch (error) {
+          Logger.error("SignalingManager: 解析直接SDP消息失败", error);
+          this.eventBus?.emit("signaling:error", { message: `SDP解析失败: ${error.message}` });
+        }
+        return;
+      }
+
+      if (message.ice) {
+        Logger.info("SignalingManager: 收到直接ICE候选消息");
+        try {
+          const candidate = new RTCIceCandidate(message.ice);
+          this.eventBus?.emit("signaling:ice-candidate", candidate);
+          // 触发ice-candidate处理器
+          this._dispatchMessage({ type: "ice-candidate", data: message.ice });
+        } catch (error) {
+          Logger.error("SignalingManager: 解析ICE候选失败", error);
+          this.eventBus?.emit("signaling:error", { message: `ICE候选解析失败: ${error.message}` });
+        }
+        return;
+      }
+
       // 分发消息到处理器
       this._dispatchMessage(message);
     } catch (error) {
-      Logger.error("SignalingManager: 消息解析失败", error, event.data);
-      this.eventBus?.emit("signaling:parse-error", { error, data: event.data });
+      // JSON解析失败，可能是其他格式的消息
+      Logger.warn("SignalingManager: 非JSON消息或解析失败", error.message);
+      this.eventBus?.emit("signaling:parse-error", { error, data });
+      
+      // 尝试作为原始消息处理
+      if (typeof data === 'string') {
+        this.eventBus?.emit("signaling:raw-message", { message: data });
+      }
     }
   }
 
@@ -454,8 +585,10 @@ class SignalingManager {
    * @private
    */
   _handleError(event) {
-    Logger.error("SignalingManager: WebSocket错误", event);
-    this.eventBus?.emit("signaling:error", { event });
+    // 添加空对象检查，提供默认错误处理
+    const error = event?.error || event || { message: '未知信令错误' };
+    Logger.error("SignalingManager: WebSocket错误", error);
+    this.eventBus?.emit("signaling:error", { error });
   }
 
   /**
