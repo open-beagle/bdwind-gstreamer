@@ -367,7 +367,7 @@ class ConfigManager {
         if (!this._config.signaling.url) {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
-            this._config.signaling.url = `${protocol}//${host}/ws`;
+            this._config.signaling.url = `${protocol}//${host}/api/signaling`;
         }
 
         // 根据设备类型调整配置

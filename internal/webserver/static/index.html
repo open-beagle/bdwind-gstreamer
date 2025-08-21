@@ -146,32 +146,6 @@
               <div class="health-status">良好</div>
             </div>
 
-            <!-- 监控工具栏 -->
-            <div class="monitoring-toolbar">
-              <div class="toolbar-group">
-                <button
-                  class="btn btn-sm btn-secondary"
-                  onclick="systemMonitor.exportMonitoringData()"
-                >
-                  导出数据
-                </button>
-                <button
-                  class="btn btn-sm btn-secondary"
-                  onclick="systemMonitor.resetMonitoringData()"
-                >
-                  重置数据
-                </button>
-              </div>
-              <div class="toolbar-group">
-                <span style="font-size: 12px; color: #666">运行时间:</span>
-                <span
-                  id="system-uptime"
-                  style="font-size: 12px; font-weight: bold"
-                  >0:00:00</span
-                >
-              </div>
-            </div>
-
             <div class="monitoring-tabs">
               <button
                 class="tab-btn active"
@@ -181,18 +155,9 @@
               </button>
               <button
                 class="tab-btn"
-                onclick="switchMonitoringTab('resources')"
-              >
-                资源
-              </button>
-              <button
-                class="tab-btn"
                 onclick="switchMonitoringTab('connections')"
               >
                 连接
-              </button>
-              <button class="tab-btn" onclick="switchMonitoringTab('logs')">
-                日志
               </button>
             </div>
 
@@ -218,73 +183,6 @@
                   <div class="metric-title">网络流量</div>
                   <div class="metric-value" id="network-usage">0 KB/s</div>
                   <div class="metric-chart" id="network-chart"></div>
-                </div>
-              </div>
-
-              <!-- 性能统计 -->
-              <div class="performance-stats">
-                <div class="performance-stat">
-                  <div class="performance-stat-value" id="system-load">
-                    0.00, 0.00, 0.00
-                  </div>
-                  <div class="performance-stat-label">系统负载</div>
-                </div>
-                <div class="performance-stat">
-                  <div class="performance-stat-value" id="process-count">0</div>
-                  <div class="performance-stat-label">进程数</div>
-                </div>
-                <div class="performance-stat">
-                  <div class="performance-stat-value" id="thread-count">0</div>
-                  <div class="performance-stat-label">线程数</div>
-                </div>
-                <div class="performance-stat">
-                  <div class="performance-stat-value" id="file-descriptors">
-                    0
-                  </div>
-                  <div class="performance-stat-label">文件描述符</div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 系统资源面板 -->
-            <div id="resources-panel" class="monitoring-panel">
-              <div class="resource-section">
-                <h4>CPU信息</h4>
-                <div class="resource-details" id="cpu-details">
-                  <div>核心数: <span id="cpu-cores">-</span></div>
-                  <div>频率: <span id="cpu-frequency">-</span> MHz</div>
-                  <div>温度: <span id="cpu-temperature">-</span>°C</div>
-                  <div>负载: <span id="cpu-load">-</span></div>
-                </div>
-              </div>
-
-              <div class="resource-section">
-                <h4>内存信息</h4>
-                <div class="resource-details" id="memory-details">
-                  <div>总计: <span id="memory-total">-</span></div>
-                  <div>已用: <span id="memory-used">-</span></div>
-                  <div>可用: <span id="memory-available">-</span></div>
-                  <div>缓存: <span id="memory-cached">-</span></div>
-                </div>
-              </div>
-
-              <div class="resource-section">
-                <h4>GPU信息</h4>
-                <div class="resource-details" id="gpu-details">
-                  <div>型号: <span id="gpu-name">-</span></div>
-                  <div>显存: <span id="gpu-memory">-</span></div>
-                  <div>温度: <span id="gpu-temperature">-</span>°C</div>
-                  <div>功耗: <span id="gpu-power">-</span>W</div>
-                </div>
-              </div>
-
-              <div class="resource-section">
-                <h4>磁盘信息</h4>
-                <div class="resource-details" id="disk-details">
-                  <div>总计: <span id="disk-total">-</span></div>
-                  <div>已用: <span id="disk-used">-</span></div>
-                  <div>可用: <span id="disk-available">-</span></div>
-                  <div>使用率: <span id="disk-usage">-</span></div>
                 </div>
               </div>
             </div>
@@ -345,122 +243,6 @@
                 </div>
               </div>
             </div>
-
-            <!-- 日志面板 -->
-            <div id="logs-panel" class="monitoring-panel">
-              <!-- 日志统计 -->
-              <div class="performance-stats" style="margin-bottom: 15px">
-                <div class="performance-stat">
-                  <div class="performance-stat-value" id="log-total">0</div>
-                  <div class="performance-stat-label">总计</div>
-                </div>
-                <div class="performance-stat">
-                  <div
-                    class="performance-stat-value"
-                    id="log-errors"
-                    style="color: #dc3545"
-                  >
-                    0
-                  </div>
-                  <div class="performance-stat-label">错误</div>
-                </div>
-                <div class="performance-stat">
-                  <div
-                    class="performance-stat-value"
-                    id="log-warnings"
-                    style="color: #ffc107"
-                  >
-                    0
-                  </div>
-                  <div class="performance-stat-label">警告</div>
-                </div>
-                <div class="performance-stat">
-                  <div
-                    class="performance-stat-value"
-                    id="log-info"
-                    style="color: #28a745"
-                  >
-                    0
-                  </div>
-                  <div class="performance-stat-label">信息</div>
-                </div>
-                <div class="performance-stat">
-                  <div
-                    class="performance-stat-value"
-                    id="log-debug"
-                    style="color: #6f42c1"
-                  >
-                    0
-                  </div>
-                  <div class="performance-stat-label">调试</div>
-                </div>
-              </div>
-
-              <div class="log-controls">
-                <div class="control-group">
-                  <label>级别:</label>
-                  <select id="log-level" onchange="filterLogs()">
-                    <option value="all">所有级别</option>
-                    <option value="DEBUG">调试</option>
-                    <option value="INFO">信息</option>
-                    <option value="WARN">警告</option>
-                    <option value="ERROR">错误</option>
-                  </select>
-                </div>
-                <div class="control-group">
-                  <label>组件:</label>
-                  <select id="log-component" onchange="filterLogs()">
-                    <option value="all">所有组件</option>
-                    <option value="capture">捕获</option>
-                    <option value="encoder">编码器</option>
-                    <option value="webrtc">WebRTC</option>
-                    <option value="server">服务器</option>
-                    <option value="signaling">信令</option>
-                  </select>
-                </div>
-                <div class="control-group">
-                  <label>搜索:</label>
-                  <input
-                    type="text"
-                    id="log-search"
-                    placeholder="搜索日志..."
-                    onchange="filterLogs()"
-                  />
-                </div>
-                <div class="control-group">
-                  <button
-                    class="btn btn-secondary btn-sm"
-                    onclick="clearLogs()"
-                  >
-                    清空
-                  </button>
-                  <button
-                    class="btn btn-secondary btn-sm"
-                    onclick="exportLogs()"
-                  >
-                    导出
-                  </button>
-                  <button
-                    class="btn btn-secondary btn-sm"
-                    onclick="refreshLogs()"
-                  >
-                    刷新
-                  </button>
-                  <button
-                    class="btn btn-secondary btn-sm"
-                    onclick="systemMonitor.startLogStream()"
-                  >
-                    实时
-                  </button>
-                </div>
-              </div>
-              <div class="log-container" id="log-container">
-                <div class="log-stats">
-                  <span>正在加载日志...</span>
-                  <span>最后更新: --:--:--</span>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -476,7 +258,6 @@
     <script src="/signaling.js"></script>
     <script src="/webrtc.js"></script>
     <script src="/error-handler.js"></script>
-    <script src="/user-feedback.js"></script>
     <script src="/ui.js"></script>
     <script src="/app.js"></script>
   </body>

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -46,21 +47,23 @@ type SignalingResponse struct {
 
 // SignalingClient 信令客户端
 type SignalingClient struct {
-	ID           string
-	AppName      string
-	Conn         *websocket.Conn
-	Send         chan []byte
-	Server       *SignalingServer
-	LastSeen     time.Time
-	ConnectedAt  time.Time
-	RemoteAddr   string
-	UserAgent    string
-	State        ClientState
-	MessageCount int64
-	ErrorCount   int64
-	LastError    *SignalingError
-	IsSelkies    bool // 标记是否为 selkies 客户端
-	mutex        sync.RWMutex
+	ID               string
+	AppName          string
+	Conn             *websocket.Conn
+	Send             chan []byte
+	Server           *SignalingServer
+	LastSeen         time.Time
+	ConnectedAt      time.Time
+	RemoteAddr       string
+	UserAgent        string
+	State            ClientState
+	MessageCount     int64
+	ErrorCount       int64
+	LastError        *SignalingError
+	IsSelkies        bool                     // 标记是否为 selkies 客户端
+	Protocol         protocol.ProtocolVersion // 客户端使用的协议版本
+	ProtocolDetected bool                     // 是否已检测到协议
+	mutex            sync.RWMutex
 }
 
 // ClientState 客户端连接状态
@@ -92,8 +95,75 @@ type SignalingServer struct {
 	sdpGenerator          *SDPGenerator
 	mediaStream           any // WebRTC 媒体流
 	peerConnectionManager *PeerConnectionManager
+	messageRouter         *MessageRouter
+	protocolManager       *protocol.ProtocolManager
+	protocolNegotiator    *ProtocolNegotiator
+	eventBus              EventBus // 事件总线
 	ctx                   context.Context
 	cancel                context.CancelFunc
+}
+
+// EventBus 简单的事件总线接口
+type EventBus interface {
+	Emit(event string, data any)
+	Subscribe(event string, handler func(data any))
+	Unsubscribe(event string, handler func(data any))
+}
+
+// SimpleEventBus 简单的事件总线实现
+type SimpleEventBus struct {
+	handlers map[string][]func(data any)
+	mutex    sync.RWMutex
+}
+
+// NewSimpleEventBus 创建简单事件总线
+func NewSimpleEventBus() *SimpleEventBus {
+	return &SimpleEventBus{
+		handlers: make(map[string][]func(data any)),
+	}
+}
+
+// Emit 发送事件
+func (eb *SimpleEventBus) Emit(event string, data any) {
+	eb.mutex.RLock()
+	handlers, exists := eb.handlers[event]
+	eb.mutex.RUnlock()
+
+	if exists {
+		for _, handler := range handlers {
+			go handler(data) // 异步调用处理器
+		}
+	}
+}
+
+// Subscribe 订阅事件
+func (eb *SimpleEventBus) Subscribe(event string, handler func(data any)) {
+	eb.mutex.Lock()
+	defer eb.mutex.Unlock()
+
+	if eb.handlers[event] == nil {
+		eb.handlers[event] = make([]func(data any), 0)
+	}
+	eb.handlers[event] = append(eb.handlers[event], handler)
+}
+
+// Unsubscribe 取消订阅事件
+func (eb *SimpleEventBus) Unsubscribe(event string, handler func(data any)) {
+	eb.mutex.Lock()
+	defer eb.mutex.Unlock()
+
+	handlers, exists := eb.handlers[event]
+	if !exists {
+		return
+	}
+
+	// 移除处理器（简单实现，实际应用中可能需要更复杂的匹配逻辑）
+	for i, h := range handlers {
+		if &h == &handler {
+			eb.handlers[event] = append(handlers[:i], handlers[i+1:]...)
+			break
+		}
+	}
 }
 
 // NewSignalingServer 创建信令服务器
@@ -104,18 +174,42 @@ func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConf
 
 	childCtx, cancel := context.WithCancel(ctx)
 
+	// 创建事件总线
+	eventBus := NewSimpleEventBus()
+
 	// 创建PeerConnection管理器
 	var pcManager *PeerConnectionManager
 	if ms, ok := mediaStream.(MediaStream); ok {
 		pcManager = NewPeerConnectionManager(ms, iceServers, log.Default())
 	}
 
-	return &SignalingServer{
+	// 创建协议管理器
+	protocolManagerConfig := protocol.DefaultManagerConfig()
+	protocolManagerConfig.EnableLogging = true
+	protocolManager := protocol.NewProtocolManager(protocolManagerConfig)
+
+	// 创建消息路由器
+	messageRouterConfig := DefaultMessageRouterConfig()
+	messageRouterConfig.EnableLogging = true
+	messageRouterConfig.AutoProtocolDetect = true
+	messageRouter := NewMessageRouter(protocolManager, messageRouterConfig)
+
+	// 创建协议协商器
+	negotiatorConfig := DefaultNegotiatorConfig()
+	negotiatorConfig.EnableAutoDetection = true
+	negotiatorConfig.EnableProtocolSwitch = true
+	protocolNegotiator := NewProtocolNegotiator(messageRouter, negotiatorConfig)
+
+	server := &SignalingServer{
 		clients:               make(map[string]*SignalingClient),
 		apps:                  make(map[string]map[string]*SignalingClient),
 		sdpGenerator:          NewSDPGenerator(sdpConfig),
 		mediaStream:           mediaStream,
 		peerConnectionManager: pcManager,
+		protocolManager:       protocolManager,
+		messageRouter:         messageRouter,
+		protocolNegotiator:    protocolNegotiator,
+		eventBus:              eventBus,
 		broadcast:             make(chan []byte),
 		register:              make(chan *SignalingClient),
 		unregister:            make(chan *SignalingClient),
@@ -127,6 +221,59 @@ func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConf
 			},
 		},
 	}
+
+	// 设置事件处理器
+	server.setupEventHandlers()
+
+	log.Printf("✅ Signaling server created with integrated protocol adapters")
+	log.Printf("📋 Supported protocols: %v", protocolManager.GetSupportedProtocols())
+
+	return server
+}
+
+// setupEventHandlers 设置事件处理器
+func (s *SignalingServer) setupEventHandlers() {
+	// 客户端协议检测事件
+	s.eventBus.Subscribe("client:protocol-detected", func(data any) {
+		if eventData, ok := data.(map[string]any); ok {
+			clientID := eventData["client_id"].(string)
+			protocol := eventData["protocol"].(protocol.ProtocolVersion)
+			log.Printf("📡 Event: Client %s protocol detected as %s", clientID, protocol)
+		}
+	})
+
+	// 协议降级事件
+	s.eventBus.Subscribe("client:protocol-downgraded", func(data any) {
+		if eventData, ok := data.(map[string]any); ok {
+			clientID := eventData["client_id"].(string)
+			fromProtocol := eventData["from_protocol"].(protocol.ProtocolVersion)
+			toProtocol := eventData["to_protocol"].(protocol.ProtocolVersion)
+			reason := eventData["reason"].(string)
+			log.Printf("⬇️ Event: Client %s protocol downgraded from %s to %s (reason: %s)",
+				clientID, fromProtocol, toProtocol, reason)
+		}
+	})
+
+	// 连接状态变化事件
+	s.eventBus.Subscribe("client:state-changed", func(data any) {
+		if eventData, ok := data.(map[string]any); ok {
+			clientID := eventData["client_id"].(string)
+			oldState := eventData["old_state"].(ClientState)
+			newState := eventData["new_state"].(ClientState)
+			log.Printf("🔄 Event: Client %s state changed from %s to %s", clientID, oldState, newState)
+		}
+	})
+
+	// 消息处理错误事件
+	s.eventBus.Subscribe("message:processing-error", func(data any) {
+		if eventData, ok := data.(map[string]any); ok {
+			clientID := eventData["client_id"].(string)
+			errorType := eventData["error_type"].(string)
+			errorMessage := eventData["error_message"].(string)
+			log.Printf("❌ Event: Message processing error for client %s: %s - %s",
+				clientID, errorType, errorMessage)
+		}
+	})
 }
 
 // Start 启动信令服务器
@@ -542,6 +689,9 @@ func validateSignalingMessage(message *SignalingMessage) *SignalingError {
 		"hello": true,
 		"sdp":   true,
 		"ice":   true,
+		// 协议协商支持
+		"protocol-negotiation":          true,
+		"protocol-negotiation-response": true,
 	}
 
 	if !validTypes[message.Type] {
@@ -827,6 +977,42 @@ func (c *SignalingClient) sendMessage(message SignalingMessage) error {
 	}
 }
 
+// sendStandardMessage 发送标准化消息给客户端
+func (c *SignalingClient) sendStandardMessage(message *protocol.StandardMessage) error {
+	if message == nil {
+		return fmt.Errorf("message is nil")
+	}
+
+	// 获取客户端协议版本
+	c.mutex.RLock()
+	clientProtocol := c.Protocol
+	c.mutex.RUnlock()
+
+	// 如果未检测到协议，使用默认协议
+	if clientProtocol == "" {
+		clientProtocol = protocol.ProtocolVersionGStreamer10
+	}
+
+	// 使用消息路由器格式化消息
+	messageBytes, err := c.Server.messageRouter.FormatResponse(message, clientProtocol)
+	if err != nil {
+		return fmt.Errorf("failed to format standard message: %w", err)
+	}
+
+	if len(messageBytes) > MaxMessageSize {
+		return fmt.Errorf("message too large: %d bytes (max: %d)", len(messageBytes), MaxMessageSize)
+	}
+
+	select {
+	case c.Send <- messageBytes:
+		log.Printf("📤 Standard message sent to client %s: type=%s, protocol=%s",
+			c.ID, message.Type, clientProtocol)
+		return nil
+	default:
+		return ErrSignalingSendChannelFull
+	}
+}
+
 // sendError 发送错误消息给客户端
 func (c *SignalingClient) sendError(signalingError *SignalingError) {
 	errorMessage := SignalingMessage{
@@ -986,31 +1172,8 @@ func (c *SignalingClient) readPump() {
 			// 增加消息计数
 			c.incrementMessageCount()
 
-			// 尝试处理 selkies 协议消息
-			messageText := string(messageBytes)
-			if c.handleSelkiesMessage(messageText) {
-				continue
-			}
-
-			// 解析JSON消息 (原有协议)
-			var message SignalingMessage
-			if err := json.Unmarshal(messageBytes, &message); err != nil {
-				log.Printf("❌ Failed to parse JSON message from client %s: %v", c.ID, err)
-				signalingError := &SignalingError{
-					Code:    ErrorCodeMessageParsingFailed,
-					Message: "Failed to parse JSON message",
-					Details: err.Error(),
-					Type:    "validation_error",
-				}
-				c.recordError(signalingError)
-				c.sendError(signalingError)
-				continue
-			}
-
-			log.Printf("✅ JSON message parsed successfully from client %s", c.ID)
-
-			// 处理消息
-			c.handleMessage(message)
+			// 使用消息路由器处理消息
+			c.handleMessageWithRouter(messageBytes)
 		} else {
 			log.Printf("Received non-text message from client %s (type: %d, length: %d)", c.ID, messageType, len(messageBytes))
 			signalingError := &SignalingError{
@@ -1079,7 +1242,473 @@ func (c *SignalingClient) writePump() {
 	}
 }
 
-// handleMessage 处理客户端消息
+// handleMessageWithRouter 使用消息路由器处理客户端消息
+func (c *SignalingClient) handleMessageWithRouter(messageBytes []byte) {
+	// 如果是第一条消息且未检测协议，进行协议自动检测
+	if c.MessageCount == 1 && !c.ProtocolDetected {
+		c.autoDetectProtocol(messageBytes)
+	}
+
+	// 使用消息路由器解析消息
+	routeResult, err := c.Server.messageRouter.RouteMessage(messageBytes, c.ID)
+	if err != nil {
+		log.Printf("❌ Failed to route message from client %s: %v", c.ID, err)
+
+		// 尝试协议降级处理
+		c.handleProtocolError("MESSAGE_ROUTING_FAILED", err.Error())
+		return
+	}
+
+	// 记录路由结果中的警告
+	for _, warning := range routeResult.Warnings {
+		log.Printf("⚠️ Message routing warning for client %s: %s", c.ID, warning)
+	}
+
+	// 处理标准化消息
+	c.handleStandardMessage(routeResult.Message, routeResult.OriginalProtocol)
+}
+
+// autoDetectProtocol 自动检测客户端协议
+func (c *SignalingClient) autoDetectProtocol(messageBytes []byte) {
+	if c.Server.protocolNegotiator == nil {
+		log.Printf("⚠️ Protocol negotiator not available for client %s", c.ID)
+		return
+	}
+
+	// 使用协议协商器检测协议
+	negotiationResult := c.Server.protocolNegotiator.DetectProtocol(messageBytes)
+
+	c.mutex.Lock()
+	c.Protocol = negotiationResult.SelectedProtocol
+	c.ProtocolDetected = true
+	c.mutex.Unlock()
+
+	log.Printf("🔍 Protocol detected for client %s: %s (confidence: %.2f, method: %s)",
+		c.ID, negotiationResult.SelectedProtocol, negotiationResult.Confidence, negotiationResult.DetectionMethod)
+
+	// 如果使用了回退协议，记录警告
+	if negotiationResult.FallbackUsed {
+		log.Printf("⚠️ Client %s using fallback protocol: %s", c.ID, negotiationResult.SelectedProtocol)
+	}
+
+	// 触发协议检测事件
+	if c.Server.eventBus != nil {
+		c.Server.eventBus.Emit("client:protocol-detected", map[string]any{
+			"client_id": c.ID,
+			"protocol":  negotiationResult.SelectedProtocol,
+			"result":    negotiationResult,
+		})
+	}
+}
+
+// handleStandardMessage 处理标准化消息
+func (c *SignalingClient) handleStandardMessage(message *protocol.StandardMessage, originalProtocol protocol.ProtocolVersion) {
+	if message == nil {
+		log.Printf("❌ Received nil standard message from client %s", c.ID)
+		return
+	}
+
+	log.Printf("📨 Processing standard message from client %s: type=%s, protocol=%s",
+		c.ID, message.Type, originalProtocol)
+
+	// 更新客户端最后活动时间
+	c.LastSeen = time.Now()
+
+	// 根据消息类型处理
+	switch message.Type {
+	case protocol.MessageTypeHello:
+		c.handleHelloMessage(message)
+	case protocol.MessageTypePing:
+		c.handlePingMessage(message)
+	case protocol.MessageTypeRequestOffer:
+		c.handleRequestOfferMessage(message)
+	case protocol.MessageTypeAnswer:
+		c.handleAnswerMessage(message)
+	case protocol.MessageTypeICECandidate:
+		c.handleICECandidateMessage(message)
+	case protocol.MessageType("protocol-negotiation"):
+		c.handleProtocolNegotiationMessage(message)
+	case protocol.MessageType("get-stats"):
+		c.handleGetStatsMessage(message)
+	case protocol.MessageType("mouse-click"), protocol.MessageType("mouse-move"), protocol.MessageType("key-press"):
+		c.handleInputMessage(message)
+	default:
+		log.Printf("⚠️ Unhandled message type from client %s: %s", c.ID, message.Type)
+		c.sendStandardErrorMessage("UNSUPPORTED_MESSAGE_TYPE",
+			fmt.Sprintf("Message type '%s' is not supported", message.Type), "")
+	}
+}
+
+// handleHelloMessage 处理 HELLO 消息
+func (c *SignalingClient) handleHelloMessage(message *protocol.StandardMessage) {
+	log.Printf("👋 Received HELLO from client %s", c.ID)
+
+	// 解析 HELLO 数据
+	var helloData protocol.HelloData
+	if err := message.GetDataAs(&helloData); err != nil {
+		log.Printf("❌ Failed to parse HELLO data from client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("INVALID_HELLO_DATA", "Failed to parse HELLO message data", err.Error())
+		return
+	}
+
+	// 更新客户端信息
+	if helloData.PeerID != "" {
+		c.ID = helloData.PeerID
+	}
+
+	// 发送欢迎响应
+	welcomeData := &protocol.HelloData{
+		PeerID:       c.ID,
+		Capabilities: []string{"webrtc", "input", "stats", "protocol-negotiation"},
+		Metadata: map[string]any{
+			"server_version": "1.0.0",
+			"server_time":    time.Now().Unix(),
+		},
+	}
+
+	welcomeMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageTypeWelcome, c.ID, welcomeData)
+
+	if err := c.sendStandardMessage(welcomeMessage); err != nil {
+		log.Printf("❌ Failed to send welcome message to client %s: %v", c.ID, err)
+	}
+}
+
+// handlePingMessage 处理 PING 消息
+func (c *SignalingClient) handlePingMessage(message *protocol.StandardMessage) {
+	log.Printf("🏓 Received PING from client %s", c.ID)
+
+	// 创建 PONG 响应
+	pongData := map[string]any{
+		"timestamp":   time.Now().Unix(),
+		"client_id":   c.ID,
+		"server_time": time.Now().Unix(),
+	}
+
+	// 如果 PING 消息包含时间戳，添加到响应中
+	if message.Data != nil {
+		if pingData, ok := message.Data.(map[string]any); ok {
+			if timestamp, exists := pingData["timestamp"]; exists {
+				pongData["ping_timestamp"] = timestamp
+			}
+		}
+	}
+
+	pongMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageTypePong, c.ID, pongData)
+
+	if err := c.sendStandardMessage(pongMessage); err != nil {
+		log.Printf("❌ Failed to send pong message to client %s: %v", c.ID, err)
+	}
+}
+
+// handleRequestOfferMessage 处理请求 Offer 消息
+func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMessage) {
+	log.Printf("📞 Received request-offer from client %s", c.ID)
+
+	// 使用 PeerConnection 管理器创建 Offer
+	if c.Server.peerConnectionManager == nil {
+		log.Printf("❌ PeerConnection manager not available for client %s", c.ID)
+		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
+			"PeerConnection manager is not available", "")
+		return
+	}
+
+	// 创建 PeerConnection
+	pc, err := c.Server.peerConnectionManager.CreatePeerConnection(c.ID)
+	if err != nil {
+		log.Printf("❌ Failed to create PeerConnection for client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("PEER_CONNECTION_CREATION_FAILED",
+			"Failed to create PeerConnection", err.Error())
+		return
+	}
+
+	// 创建 SDP Offer
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		log.Printf("❌ Failed to create offer for client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("OFFER_CREATION_FAILED",
+			"Failed to create SDP offer", err.Error())
+		return
+	}
+
+	// 设置本地描述
+	if err := pc.SetLocalDescription(offer); err != nil {
+		log.Printf("❌ Failed to set local description for client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("LOCAL_DESCRIPTION_FAILED",
+			"Failed to set local description", err.Error())
+		return
+	}
+
+	// 发送 Offer
+	sdpData := &protocol.SDPData{
+		Type: offer.Type.String(),
+		SDP:  offer.SDP,
+	}
+
+	offerMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageTypeOffer, c.ID, sdpData)
+
+	if err := c.sendStandardMessage(offerMessage); err != nil {
+		log.Printf("❌ Failed to send offer to client %s: %v", c.ID, err)
+	} else {
+		log.Printf("✅ Offer sent to client %s", c.ID)
+	}
+}
+
+// handleAnswerMessage 处理 Answer 消息
+func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage) {
+	log.Printf("📞 Received answer from client %s", c.ID)
+
+	// 解析 SDP Answer
+	var sdpData protocol.SDPData
+	if err := message.GetDataAs(&sdpData); err != nil {
+		log.Printf("❌ Failed to parse answer data from client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("INVALID_ANSWER_DATA", "Failed to parse answer data", err.Error())
+		return
+	}
+
+	// 获取 PeerConnection
+	if c.Server.peerConnectionManager == nil {
+		log.Printf("❌ PeerConnection manager not available for client %s", c.ID)
+		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
+			"PeerConnection manager is not available", "")
+		return
+	}
+
+	pc, exists := c.Server.peerConnectionManager.GetPeerConnection(c.ID)
+	if !exists {
+		log.Printf("❌ PeerConnection not found for client %s", c.ID)
+		c.sendStandardErrorMessage("PEER_CONNECTION_NOT_FOUND",
+			"PeerConnection not found", "")
+		return
+	}
+
+	// 设置远程描述
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  sdpData.SDP,
+	}
+
+	if err := pc.SetRemoteDescription(answer); err != nil {
+		log.Printf("❌ Failed to set remote description for client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("REMOTE_DESCRIPTION_FAILED",
+			"Failed to set remote description", err.Error())
+		return
+	}
+
+	// 发送确认
+	ackMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageTypeAnswerAck, c.ID, map[string]any{
+			"status":    "success",
+			"timestamp": time.Now().Unix(),
+		})
+
+	if err := c.sendStandardMessage(ackMessage); err != nil {
+		log.Printf("❌ Failed to send answer ack to client %s: %v", c.ID, err)
+	} else {
+		log.Printf("✅ Answer processed for client %s", c.ID)
+	}
+}
+
+// handleICECandidateMessage 处理 ICE 候选消息
+func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMessage) {
+	log.Printf("🧊 Received ICE candidate from client %s", c.ID)
+
+	// 解析 ICE 候选数据
+	var iceData protocol.ICECandidateData
+	if err := message.GetDataAs(&iceData); err != nil {
+		log.Printf("❌ Failed to parse ICE candidate data from client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("INVALID_ICE_DATA", "Failed to parse ICE candidate data", err.Error())
+		return
+	}
+
+	// 获取 PeerConnection
+	if c.Server.peerConnectionManager == nil {
+		log.Printf("❌ PeerConnection manager not available for client %s", c.ID)
+		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
+			"PeerConnection manager is not available", "")
+		return
+	}
+
+	pc, exists := c.Server.peerConnectionManager.GetPeerConnection(c.ID)
+	if !exists {
+		log.Printf("❌ PeerConnection not found for client %s", c.ID)
+		c.sendStandardErrorMessage("PEER_CONNECTION_NOT_FOUND",
+			"PeerConnection not found", "")
+		return
+	}
+
+	// 创建 ICE 候选
+	candidate := webrtc.ICECandidateInit{
+		Candidate: iceData.Candidate,
+	}
+
+	if iceData.SDPMid != nil {
+		candidate.SDPMid = iceData.SDPMid
+	}
+
+	if iceData.SDPMLineIndex != nil {
+		candidate.SDPMLineIndex = iceData.SDPMLineIndex
+	}
+
+	// 添加 ICE 候选
+	if err := pc.AddICECandidate(candidate); err != nil {
+		log.Printf("❌ Failed to add ICE candidate for client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("ICE_CANDIDATE_FAILED",
+			"Failed to add ICE candidate", err.Error())
+		return
+	}
+
+	// 发送确认
+	ackMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageTypeICEAck, c.ID, map[string]any{
+			"status":    "success",
+			"timestamp": time.Now().Unix(),
+		})
+
+	if err := c.sendStandardMessage(ackMessage); err != nil {
+		log.Printf("❌ Failed to send ICE ack to client %s: %v", c.ID, err)
+	} else {
+		log.Printf("✅ ICE candidate processed for client %s", c.ID)
+	}
+}
+
+// handleProtocolNegotiationMessage 处理协议协商消息
+func (c *SignalingClient) handleProtocolNegotiationMessage(message *protocol.StandardMessage) {
+	log.Printf("🤝 Received protocol negotiation from client %s", c.ID)
+
+	if c.Server.messageRouter == nil {
+		log.Printf("❌ Message router not available for client %s", c.ID)
+		c.sendStandardErrorMessage("MESSAGE_ROUTER_UNAVAILABLE",
+			"Message router is not available", "")
+		return
+	}
+
+	// 使用消息路由器处理协议协商
+	response, err := c.Server.messageRouter.HandleProtocolNegotiation([]byte("{}"), c.ID)
+	if err != nil {
+		log.Printf("❌ Protocol negotiation failed for client %s: %v", c.ID, err)
+		c.sendStandardErrorMessage("PROTOCOL_NEGOTIATION_FAILED",
+			"Protocol negotiation failed", err.Error())
+		return
+	}
+
+	// 发送协商响应
+	if err := c.sendStandardMessage(response); err != nil {
+		log.Printf("❌ Failed to send protocol negotiation response to client %s: %v", c.ID, err)
+	} else {
+		log.Printf("✅ Protocol negotiation completed for client %s", c.ID)
+	}
+}
+
+// handleGetStatsMessage 处理获取统计信息消息
+func (c *SignalingClient) handleGetStatsMessage(message *protocol.StandardMessage) {
+	log.Printf("📊 Received get-stats from client %s", c.ID)
+
+	// 收集统计信息
+	stats := &protocol.StatsData{
+		SessionID:        c.ID,
+		ConnectionState:  string(c.getState()),
+		MessagesSent:     c.MessageCount,
+		MessagesReceived: c.MessageCount,
+		BytesSent:        0, // TODO: 实现字节计数
+		BytesReceived:    0, // TODO: 实现字节计数
+		ConnectionTime:   time.Since(c.ConnectedAt).Seconds(),
+		LastActivity:     c.LastSeen.Unix(),
+		Quality:          "good", // TODO: 实现连接质量评估
+		Details: map[string]any{
+			"protocol":    c.Protocol,
+			"error_count": c.ErrorCount,
+			"last_error":  c.LastError,
+			"remote_addr": c.RemoteAddr,
+			"user_agent":  c.UserAgent,
+		},
+	}
+
+	statsMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageTypeStats, c.ID, stats)
+
+	if err := c.sendStandardMessage(statsMessage); err != nil {
+		log.Printf("❌ Failed to send stats to client %s: %v", c.ID, err)
+	} else {
+		log.Printf("✅ Stats sent to client %s", c.ID)
+	}
+}
+
+// handleInputMessage 处理输入消息
+func (c *SignalingClient) handleInputMessage(message *protocol.StandardMessage) {
+	log.Printf("🖱️ Received input message from client %s: type=%s", c.ID, message.Type)
+
+	// TODO: 实现输入事件处理
+	// 这里应该将输入事件转发给桌面捕获系统
+
+	// 发送确认（可选）
+	ackMessage := c.Server.messageRouter.CreateStandardResponse(
+		protocol.MessageType("input-ack"), c.ID, map[string]any{
+			"status":    "received",
+			"type":      message.Type,
+			"timestamp": time.Now().Unix(),
+		})
+
+	if err := c.sendStandardMessage(ackMessage); err != nil {
+		log.Printf("❌ Failed to send input ack to client %s: %v", c.ID, err)
+	}
+}
+
+// handleProtocolError 处理协议错误
+func (c *SignalingClient) handleProtocolError(errorCode, errorMessage string) {
+	log.Printf("❌ Protocol error for client %s: %s - %s", c.ID, errorCode, errorMessage)
+
+	// 尝试协议降级
+	if c.Server.protocolNegotiator != nil && c.Protocol != "" {
+		log.Printf("🔄 Attempting protocol downgrade for client %s from %s", c.ID, c.Protocol)
+
+		// 尝试降级到下一个协议
+		fallbackProtocols := []protocol.ProtocolVersion{
+			protocol.ProtocolVersionSelkies,
+		}
+
+		for _, fallback := range fallbackProtocols {
+			if fallback != c.Protocol {
+				c.mutex.Lock()
+				oldProtocol := c.Protocol
+				c.Protocol = fallback
+				c.mutex.Unlock()
+
+				log.Printf("🔄 Protocol downgraded for client %s: %s -> %s", c.ID, oldProtocol, fallback)
+
+				// 发送协议降级通知
+				downgradedMessage := c.Server.messageRouter.CreateStandardResponse(
+					protocol.MessageType("protocol-downgraded"), c.ID, map[string]any{
+						"old_protocol": oldProtocol,
+						"new_protocol": fallback,
+						"reason":       errorCode,
+					})
+
+				if err := c.sendStandardMessage(downgradedMessage); err != nil {
+					log.Printf("❌ Failed to send protocol downgrade notification to client %s: %v", c.ID, err)
+				}
+				return
+			}
+		}
+	}
+
+	// 如果无法降级，发送错误消息
+	c.sendStandardErrorMessage(errorCode, errorMessage, "Protocol error occurred")
+}
+
+// sendStandardErrorMessage 发送标准错误消息
+func (c *SignalingClient) sendStandardErrorMessage(code, message, details string) {
+	errorMessage := c.Server.messageRouter.CreateErrorResponse(code, message, details)
+	errorMessage.PeerID = c.ID
+
+	if err := c.sendStandardMessage(errorMessage); err != nil {
+		log.Printf("❌ Failed to send error message to client %s: %v", c.ID, err)
+	}
+}
+
+// handleMessage 处理客户端消息（保持向后兼容）
 func (c *SignalingClient) handleMessage(message SignalingMessage) {
 	// 记录消息接收详情
 	log.Printf("📨 Message received from client %s: type='%s', messageID='%s', timestamp=%d, dataSize=%d bytes",
@@ -1090,6 +1719,9 @@ func (c *SignalingClient) handleMessage(message SignalingMessage) {
 		log.Printf("❌ Message validation failed for client %s: %s (type: %s)", c.ID, validationError.Message, message.Type)
 		c.recordError(validationError)
 		c.sendError(validationError)
+
+		// 尝试协议降级
+		c.handleProtocolError(validationError.Code, validationError.Message)
 		return
 	}
 
@@ -1163,6 +1795,11 @@ func (c *SignalingClient) handleMessage(message SignalingMessage) {
 	case "get-stats":
 		// 处理统计信息请求
 		c.handleStatsRequest(message)
+
+	case "protocol-negotiation":
+		// 处理协议协商请求
+		log.Printf("🔄 Protocol negotiation requested by client %s", c.ID)
+		c.handleProtocolNegotiation(message)
 
 	default:
 		log.Printf("Unknown message type: %s from client %s", message.Type, c.ID)
@@ -1687,6 +2324,123 @@ func (c *SignalingClient) handleIceAck(message SignalingMessage) {
 	// 这里可以添加ICE确认处理逻辑
 }
 
+// detectProtocolFromMessage 从消息中检测协议类型
+func (c *SignalingClient) detectProtocolFromMessage(messageBytes []byte) string {
+	messageText := string(messageBytes)
+
+	// 检测 Selkies 文本协议
+	if strings.HasPrefix(messageText, "HELLO ") ||
+		strings.HasPrefix(messageText, "ERROR ") ||
+		messageText == "HELLO" {
+		log.Printf("🔍 Protocol detected for client %s: selkies (text format)", c.ID)
+		return "selkies"
+	}
+
+	// 尝试解析 JSON
+	var jsonMessage map[string]any
+	if err := json.Unmarshal(messageBytes, &jsonMessage); err != nil {
+		log.Printf("🔍 Protocol detection failed for client %s: not valid JSON", c.ID)
+		return "unknown"
+	}
+
+	// 检测标准协议（有 version 和 metadata 字段）
+	if version, hasVersion := jsonMessage["version"]; hasVersion {
+		if metadata, hasMetadata := jsonMessage["metadata"]; hasMetadata {
+			if metadataMap, ok := metadata.(map[string]any); ok {
+				if protocol, hasProtocol := metadataMap["protocol"]; hasProtocol {
+					if protocolStr, ok := protocol.(string); ok {
+						log.Printf("🔍 Protocol detected for client %s: %s (version: %v)", c.ID, protocolStr, version)
+						return protocolStr
+					}
+				}
+			}
+		}
+		log.Printf("🔍 Protocol detected for client %s: gstreamer-webrtc (has version field)", c.ID)
+		return "gstreamer-webrtc"
+	}
+
+	// 检测 Selkies JSON 协议（有 sdp 或 ice 字段但没有 version）
+	if _, hasSDP := jsonMessage["sdp"]; hasSDP {
+		log.Printf("🔍 Protocol detected for client %s: selkies (JSON with SDP)", c.ID)
+		return "selkies"
+	}
+
+	if _, hasICE := jsonMessage["ice"]; hasICE {
+		log.Printf("🔍 Protocol detected for client %s: selkies (JSON with ICE)", c.ID)
+		return "selkies"
+	}
+
+	// 检测标准协议消息类型
+	if msgType, hasType := jsonMessage["type"]; hasType {
+		if typeStr, ok := msgType.(string); ok {
+			standardTypes := map[string]bool{
+				"protocol-negotiation": true,
+				"ping":                 true,
+				"pong":                 true,
+				"request-offer":        true,
+				"offer":                true,
+				"answer":               true,
+				"ice-candidate":        true,
+			}
+
+			if standardTypes[typeStr] {
+				log.Printf("🔍 Protocol detected for client %s: gstreamer-webrtc (standard message type: %s)", c.ID, typeStr)
+				return "gstreamer-webrtc"
+			}
+		}
+	}
+
+	log.Printf("🔍 Protocol detection for client %s: unknown/legacy", c.ID)
+	return "unknown"
+}
+
+// getDetectionConfidence 获取协议检测置信度
+func (c *SignalingClient) getDetectionConfidence(protocol string, messageBytes []byte) float64 {
+	messageText := string(messageBytes)
+
+	switch protocol {
+	case "selkies":
+		if strings.HasPrefix(messageText, "HELLO ") {
+			return 0.95 // 高置信度
+		}
+
+		var jsonMessage map[string]any
+		if json.Unmarshal(messageBytes, &jsonMessage) == nil {
+			if _, hasSDP := jsonMessage["sdp"]; hasSDP {
+				return 0.90
+			}
+			if _, hasICE := jsonMessage["ice"]; hasICE {
+				return 0.85
+			}
+		}
+		return 0.70
+
+	case "gstreamer-webrtc":
+		var jsonMessage map[string]any
+		if json.Unmarshal(messageBytes, &jsonMessage) == nil {
+			confidence := 0.60
+
+			if _, hasVersion := jsonMessage["version"]; hasVersion {
+				confidence += 0.20
+			}
+
+			if metadata, hasMetadata := jsonMessage["metadata"]; hasMetadata {
+				if metadataMap, ok := metadata.(map[string]any); ok {
+					if _, hasProtocol := metadataMap["protocol"]; hasProtocol {
+						confidence += 0.15
+					}
+				}
+			}
+
+			return confidence
+		}
+		return 0.50
+
+	default:
+		return 0.30
+	}
+}
+
 // handleSelkiesMessage 处理 selkies 协议消息
 func (c *SignalingClient) handleSelkiesMessage(messageText string) bool {
 	// 检查是否是 HELLO 消息
@@ -1819,4 +2573,306 @@ func (c *SignalingClient) isSelkiesClient() bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.IsSelkies
+}
+
+// handleProtocolNegotiation 处理协议协商请求
+func (c *SignalingClient) handleProtocolNegotiation(message SignalingMessage) {
+	log.Printf("🔄 Processing protocol negotiation for client %s", c.ID)
+
+	// 解析协商数据
+	negotiationData, ok := message.Data.(map[string]any)
+	if !ok {
+		log.Printf("❌ Invalid protocol negotiation data from client %s", c.ID)
+		c.sendProtocolNegotiationError("INVALID_NEGOTIATION_DATA", "Protocol negotiation data must be an object", message.MessageID)
+		return
+	}
+
+	// 获取客户端支持的协议
+	supportedProtocols, ok := negotiationData["supported_protocols"].([]any)
+	if !ok {
+		log.Printf("❌ Missing supported_protocols in negotiation from client %s", c.ID)
+		c.sendProtocolNegotiationError("MISSING_SUPPORTED_PROTOCOLS", "supported_protocols field is required", message.MessageID)
+		return
+	}
+
+	// 转换为字符串切片
+	clientProtocols := make([]string, 0, len(supportedProtocols))
+	for _, protocol := range supportedProtocols {
+		if protocolStr, ok := protocol.(string); ok {
+			clientProtocols = append(clientProtocols, protocolStr)
+		}
+	}
+
+	log.Printf("📋 Client %s supports protocols: %v", c.ID, clientProtocols)
+
+	// 服务器支持的协议（按优先级排序）
+	serverProtocols := []string{
+		"gstreamer-1.0",
+		"selkies",
+		"legacy",
+	}
+
+	// 协议协商逻辑：选择双方都支持的最高优先级协议
+	selectedProtocol := c.negotiateProtocol(clientProtocols, serverProtocols)
+
+	if selectedProtocol == "" {
+		log.Printf("❌ No compatible protocol found for client %s", c.ID)
+		c.sendProtocolNegotiationError("NO_COMPATIBLE_PROTOCOL", "No mutually supported protocol found", message.MessageID)
+		return
+	}
+
+	log.Printf("✅ Protocol negotiated for client %s: %s", c.ID, selectedProtocol)
+
+	// 更新客户端协议模式
+	c.setProtocolMode(selectedProtocol)
+
+	// 发送协商成功响应
+	response := SignalingMessage{
+		Type:      "protocol-negotiation-response",
+		PeerID:    c.ID,
+		MessageID: message.MessageID, // 使用相同的消息ID用于响应
+		Timestamp: time.Now().Unix(),
+		Data: map[string]any{
+			"success":           true,
+			"selected_protocol": selectedProtocol,
+			"server_protocols":  serverProtocols,
+			"protocol_info": map[string]any{
+				"version":      c.getProtocolVersion(selectedProtocol),
+				"capabilities": c.getProtocolCapabilities(selectedProtocol),
+				"features":     c.getProtocolFeatures(selectedProtocol),
+			},
+		},
+	}
+
+	if err := c.sendMessage(response); err != nil {
+		log.Printf("❌ Failed to send protocol negotiation response to client %s: %v", c.ID, err)
+		signalingError := &SignalingError{
+			Code:    ErrorCodeInternalError,
+			Message: "Failed to send protocol negotiation response",
+			Details: err.Error(),
+			Type:    "server_error",
+		}
+		c.recordError(signalingError)
+	} else {
+		log.Printf("✅ Protocol negotiation response sent to client %s", c.ID)
+	}
+}
+
+// negotiateProtocol 协商协议版本
+func (c *SignalingClient) negotiateProtocol(clientProtocols, serverProtocols []string) string {
+	// 按服务器优先级顺序查找匹配的协议
+	for _, serverProtocol := range serverProtocols {
+		for _, clientProtocol := range clientProtocols {
+			if c.isProtocolCompatible(serverProtocol, clientProtocol) {
+				return serverProtocol
+			}
+		}
+	}
+	return ""
+}
+
+// isProtocolCompatible 检查协议兼容性
+func (c *SignalingClient) isProtocolCompatible(serverProtocol, clientProtocol string) bool {
+	// 精确匹配
+	if serverProtocol == clientProtocol {
+		return true
+	}
+
+	// 版本兼容性检查
+	compatibilityMap := map[string][]string{
+		"gstreamer-1.0": {"gstreamer-1.0", "gstreamer"},
+		"selkies":       {"selkies", "selkies-1.0"},
+		"legacy":        {"legacy", "unknown"},
+	}
+
+	if compatibleVersions, exists := compatibilityMap[serverProtocol]; exists {
+		for _, compatible := range compatibleVersions {
+			if compatible == clientProtocol {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// setProtocolMode 设置客户端协议模式
+func (c *SignalingClient) setProtocolMode(protocol string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	switch protocol {
+	case "selkies", "selkies-1.0":
+		c.IsSelkies = true
+	default:
+		c.IsSelkies = false
+	}
+
+	log.Printf("Client %s protocol mode set to: %s (selkies: %v)", c.ID, protocol, c.IsSelkies)
+}
+
+// getProtocolVersion 获取协议版本信息
+func (c *SignalingClient) getProtocolVersion(protocol string) string {
+	versionMap := map[string]string{
+		"gstreamer-1.0": "1.0",
+		"selkies":       "1.0",
+		"legacy":        "0.9",
+	}
+
+	if version, exists := versionMap[protocol]; exists {
+		return version
+	}
+	return "1.0"
+}
+
+// getProtocolCapabilities 获取协议能力
+func (c *SignalingClient) getProtocolCapabilities(protocol string) []string {
+	capabilityMap := map[string][]string{
+		"gstreamer-1.0": {
+			"webrtc",
+			"datachannel",
+			"video-h264",
+			"video-vp8",
+			"video-vp9",
+			"audio-opus",
+			"input-events",
+			"statistics",
+			"error-recovery",
+		},
+		"selkies": {
+			"webrtc",
+			"video-h264",
+			"audio-opus",
+			"input-events",
+			"basic-statistics",
+		},
+		"legacy": {
+			"webrtc",
+			"video-h264",
+			"basic-input",
+		},
+	}
+
+	if capabilities, exists := capabilityMap[protocol]; exists {
+		return capabilities
+	}
+	return []string{"webrtc"}
+}
+
+// getProtocolFeatures 获取协议特性
+func (c *SignalingClient) getProtocolFeatures(protocol string) map[string]any {
+	featureMap := map[string]map[string]any{
+		"gstreamer-1.0": {
+			"message_validation":     true,
+			"error_recovery":         true,
+			"protocol_versioning":    true,
+			"capability_negotiation": true,
+			"statistics_reporting":   true,
+		},
+		"selkies": {
+			"message_validation":     false,
+			"error_recovery":         false,
+			"protocol_versioning":    false,
+			"backward_compatibility": true,
+		},
+		"legacy": {
+			"message_validation": false,
+			"error_recovery":     false,
+			"minimal_features":   true,
+		},
+	}
+
+	if features, exists := featureMap[protocol]; exists {
+		return features
+	}
+	return map[string]any{"basic": true}
+}
+
+// sendProtocolNegotiationError 发送协议协商错误
+func (c *SignalingClient) sendProtocolNegotiationError(code, message, messageID string) {
+	errorResponse := SignalingMessage{
+		Type:      "protocol-negotiation-response",
+		PeerID:    c.ID,
+		MessageID: messageID,
+		Timestamp: time.Now().Unix(),
+		Data: map[string]any{
+			"success": false,
+			"error":   message,
+			"code":    code,
+		},
+	}
+
+	if err := c.sendMessage(errorResponse); err != nil {
+		log.Printf("❌ Failed to send protocol negotiation error to client %s: %v", c.ID, err)
+	}
+
+	// 记录错误
+	signalingError := &SignalingError{
+		Code:    code,
+		Message: message,
+		Type:    "protocol_negotiation_error",
+	}
+	c.recordError(signalingError)
+}
+
+// downgradeProtocol 协议降级处理
+func (c *SignalingClient) downgradeProtocol(currentProtocol, reason string) string {
+	log.Printf("🔽 Protocol downgrade requested for client %s: %s -> reason: %s", c.ID, currentProtocol, reason)
+
+	// 协议降级层次结构
+	protocolHierarchy := []string{
+		"gstreamer-1.0",
+		"selkies",
+		"legacy",
+	}
+
+	// 找到当前协议在层次结构中的位置
+	currentIndex := -1
+	for i, protocol := range protocolHierarchy {
+		if protocol == currentProtocol {
+			currentIndex = i
+			break
+		}
+	}
+
+	// 如果找不到当前协议或已经是最低级协议
+	if currentIndex == -1 || currentIndex >= len(protocolHierarchy)-1 {
+		log.Printf("❌ Cannot downgrade protocol for client %s: no lower version available", c.ID)
+		return currentProtocol
+	}
+
+	// 降级到下一个协议
+	targetProtocol := protocolHierarchy[currentIndex+1]
+
+	log.Printf("🔽 Downgrading client %s protocol: %s -> %s", c.ID, currentProtocol, targetProtocol)
+
+	// 更新客户端协议模式
+	c.setProtocolMode(targetProtocol)
+
+	// 发送协议降级通知
+	notification := SignalingMessage{
+		Type:      "protocol-downgraded",
+		PeerID:    c.ID,
+		MessageID: generateMessageID(),
+		Timestamp: time.Now().Unix(),
+		Data: map[string]any{
+			"from_protocol":  currentProtocol,
+			"to_protocol":    targetProtocol,
+			"reason":         reason,
+			"downgrade_time": time.Now().Unix(),
+			"protocol_info": map[string]any{
+				"version":      c.getProtocolVersion(targetProtocol),
+				"capabilities": c.getProtocolCapabilities(targetProtocol),
+				"features":     c.getProtocolFeatures(targetProtocol),
+			},
+		},
+	}
+
+	if err := c.sendMessage(notification); err != nil {
+		log.Printf("⚠️ Failed to send protocol downgrade notification to client %s: %v", c.ID, err)
+	} else {
+		log.Printf("✅ Protocol downgrade notification sent to client %s", c.ID)
+	}
+
+	return targetProtocol
 }

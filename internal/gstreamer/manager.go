@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,11 @@ type Manager struct {
 	running   bool
 	startTime time.Time
 	mutex     sync.RWMutex
+
+	// Pipeline状态管理
+	stateManager  *PipelineStateManager
+	healthChecker *PipelineHealthChecker
+	errorHandler  *PipelineErrorHandler
 
 	// 上下文控制
 	ctx    context.Context
@@ -112,11 +118,142 @@ func (m *Manager) initializeComponents() error {
 		m.encoder.SetSampleCallback(m.processEncodedSample)
 	}
 
-	// 3. 创建HTTP处理器
+	// 3. 初始化Pipeline状态管理组件
+	if err := m.initializePipelineStateManagement(); err != nil {
+		m.logger.Printf("Failed to initialize pipeline state management: %v", err)
+		return err
+	}
+
+	// 4. 创建HTTP处理器
 	m.handlers = newGStreamerHandlers(m)
 	m.logger.Printf("GStreamer handlers created successfully")
 
 	return nil
+}
+
+// initializePipelineStateManagement 初始化Pipeline状态管理组件
+func (m *Manager) initializePipelineStateManagement() error {
+	// 只有在有桌面捕获的情况下才初始化状态管理
+	if m.capture == nil {
+		m.logger.Printf("Skipping pipeline state management initialization - no desktop capture available")
+		return nil
+	}
+
+	// 检查桌面捕获类型（需要先转换类型）
+	if _, ok := m.capture.(*desktopCapture); !ok {
+		m.logger.Printf("Warning: desktop capture is not the expected type, skipping state management")
+		return nil
+	}
+
+	// 等待pipeline创建（在Start方法中创建）
+	// 这里我们只初始化错误处理器，状态管理器将在Start方法中初始化
+
+	// 1. 创建错误处理器
+	errorConfig := &ErrorHandlerConfig{
+		MaxRetryAttempts:    3,
+		RetryDelay:          2 * time.Second,
+		AutoRecovery:        true,
+		MaxErrorHistorySize: 100,
+	}
+	m.errorHandler = NewPipelineErrorHandler(m.logger, errorConfig)
+	m.logger.Printf("Pipeline error handler created successfully")
+
+	return nil
+}
+
+// initializePipelineStateManagerForCapture 为桌面捕获初始化状态管理器
+func (m *Manager) initializePipelineStateManagerForCapture() error {
+	if m.capture == nil {
+		return nil
+	}
+
+	// 获取桌面捕获的pipeline
+	dc, ok := m.capture.(*desktopCapture)
+	if !ok || dc.pipeline == nil {
+		return fmt.Errorf("desktop capture pipeline not available")
+	}
+
+	// 创建状态管理器配置
+	stateConfig := DefaultStateManagerConfig()
+
+	// 创建状态管理器
+	m.stateManager = NewPipelineStateManager(m.ctx, dc.pipeline, m.logger, stateConfig)
+
+	// 设置错误处理器的状态管理器引用
+	if m.errorHandler != nil {
+		m.errorHandler.config.StateManager = m.stateManager
+	}
+
+	// 设置状态变化回调
+	m.stateManager.SetStateChangeCallback(m.onPipelineStateChange)
+	m.stateManager.SetErrorCallback(m.onPipelineError)
+
+	// 启动状态管理器
+	if err := m.stateManager.Start(); err != nil {
+		return fmt.Errorf("failed to start pipeline state manager: %w", err)
+	}
+
+	m.logger.Printf("Pipeline state manager initialized and started successfully")
+	return nil
+}
+
+// onPipelineStateChange 处理Pipeline状态变化回调
+func (m *Manager) onPipelineStateChange(oldState, newState PipelineState, transition StateTransition) {
+	m.logger.Printf("Pipeline state changed: %v -> %v (took %v, success: %v)",
+		oldState, newState, transition.Duration, transition.Success)
+
+	if !transition.Success && transition.Error != nil {
+		m.logger.Printf("State transition failed: %v", transition.Error)
+
+		// 通过错误处理器处理状态转换错误
+		if m.errorHandler != nil {
+			m.errorHandler.HandleError(ErrorStateChange,
+				fmt.Sprintf("State transition failed: %v -> %v", oldState, newState),
+				transition.Error.Error(),
+				"PipelineStateManager")
+		}
+	}
+}
+
+// onPipelineError 处理Pipeline错误回调
+func (m *Manager) onPipelineError(err error, context string) {
+	m.logger.Printf("Pipeline error in %s: %v", context, err)
+
+	// 通过错误处理器处理错误
+	if m.errorHandler != nil {
+		// 根据错误内容确定错误类型
+		errorType := m.classifyError(err)
+		m.errorHandler.HandleError(errorType, err.Error(), context, "Pipeline")
+	}
+}
+
+// classifyError 根据错误内容分类错误类型
+func (m *Manager) classifyError(err error) ErrorType {
+	errStr := err.Error()
+
+	// 简单的错误分类逻辑
+	switch {
+	case strings.Contains(errStr, "state"):
+		return ErrorStateChange
+	case strings.Contains(errStr, "element"):
+		return ErrorElementFailure
+	case strings.Contains(errStr, "resource"):
+		return ErrorResourceUnavailable
+	case strings.Contains(errStr, "format"):
+		return ErrorFormatNegotiation
+	case strings.Contains(errStr, "timeout"):
+		return ErrorTimeout
+	case strings.Contains(errStr, "permission"):
+		return ErrorPermission
+	case strings.Contains(errStr, "memory"):
+		return ErrorMemoryExhaustion
+	case strings.Contains(errStr, "network"):
+		return ErrorNetwork
+	case strings.Contains(errStr, "hardware"):
+		return ErrorHardware
+	default:
+		return ErrorUnknown
+	}
 }
 
 // Start 启动GStreamer管理器
@@ -138,6 +275,12 @@ func (m *Manager) Start(ctx context.Context) error {
 			// 不返回错误，允许在捕获失败的情况下继续运行
 		} else {
 			m.logger.Printf("Desktop capture started successfully")
+
+			// 初始化Pipeline状态管理器（在桌面捕获启动后）
+			if err := m.initializePipelineStateManagerForCapture(); err != nil {
+				m.logger.Printf("Warning: failed to initialize pipeline state manager: %v", err)
+				// 不返回错误，允许在状态管理失败的情况下继续运行
+			}
 		}
 	}
 
@@ -223,6 +366,15 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	m.logger.Printf("Stopping GStreamer manager...")
 
+	// 停止Pipeline状态管理组件
+	if m.stateManager != nil {
+		if err := m.stateManager.Stop(); err != nil {
+			m.logger.Printf("Warning: failed to stop pipeline state manager: %v", err)
+		} else {
+			m.logger.Printf("Pipeline state manager stopped successfully")
+		}
+	}
+
 	// 停止桌面捕获
 	if m.capture != nil {
 		if err := m.capture.Stop(); err != nil {
@@ -282,14 +434,42 @@ func (m *Manager) GetStats() map[string]interface{} {
 			"available":   m.capture != nil,
 		}
 
-		// TODO: 添加更多统计信息，如帧率、编码统计等
+		// 添加桌面捕获详细统计
 		if m.capture != nil {
+			captureStats := m.capture.GetStats()
 			stats["capture_stats"] = map[string]interface{}{
-				"frames_captured": 0, // 需要从实际捕获实例获取
-				"frames_dropped":  0,
-				"current_fps":     0.0,
-				"average_fps":     0.0,
+				"frames_captured": captureStats.FramesCapture,
+				"frames_dropped":  captureStats.FramesDropped,
+				"current_fps":     captureStats.CurrentFPS,
+				"average_fps":     captureStats.AverageFPS,
+				"capture_latency": captureStats.CaptureLatency,
+				"min_latency":     captureStats.MinLatency,
+				"max_latency":     captureStats.MaxLatency,
+				"avg_latency":     captureStats.AvgLatency,
+				"last_frame_time": captureStats.LastFrameTime,
 			}
+		}
+
+		// 添加Pipeline状态管理统计
+		if m.stateManager != nil {
+			stats["pipeline_state"] = m.stateManager.GetStats()
+		}
+
+		// 添加健康检查统计
+		if m.healthChecker != nil {
+			healthStatus := m.healthChecker.GetHealthStatus()
+			stats["health_status"] = map[string]interface{}{
+				"overall":      healthStatus.Overall.String(),
+				"last_check":   healthStatus.LastCheck,
+				"uptime":       healthStatus.Uptime.Seconds(),
+				"issues_count": len(healthStatus.Issues),
+				"checks_count": len(healthStatus.Checks),
+			}
+		}
+
+		// 添加错误处理统计
+		if m.errorHandler != nil {
+			stats["error_handling"] = m.errorHandler.GetStats()
 		}
 	}
 
@@ -330,6 +510,54 @@ func (m *Manager) GetComponentStatus() map[string]bool {
 		"capture":  m.capture != nil,
 		"handlers": m.handlers != nil,
 	}
+}
+
+// GetPipelineState 获取当前Pipeline状态
+func (m *Manager) GetPipelineState() (PipelineState, error) {
+	if m.stateManager == nil {
+		return StateNull, fmt.Errorf("pipeline state manager not initialized")
+	}
+	return m.stateManager.GetCurrentState(), nil
+}
+
+// SetPipelineState 设置Pipeline状态
+func (m *Manager) SetPipelineState(state PipelineState) error {
+	if m.stateManager == nil {
+		return fmt.Errorf("pipeline state manager not initialized")
+	}
+	return m.stateManager.SetState(state)
+}
+
+// GetPipelineHealthStatus 获取Pipeline健康状态
+func (m *Manager) GetPipelineHealthStatus() (HealthStatus, error) {
+	if m.healthChecker == nil {
+		return HealthStatus{}, fmt.Errorf("pipeline health checker not initialized")
+	}
+	return m.healthChecker.GetHealthStatus(), nil
+}
+
+// GetPipelineErrorHistory 获取Pipeline错误历史
+func (m *Manager) GetPipelineErrorHistory() []ErrorEvent {
+	if m.errorHandler == nil {
+		return nil
+	}
+	return m.errorHandler.GetErrorHistory()
+}
+
+// RestartPipeline 重启Pipeline
+func (m *Manager) RestartPipeline() error {
+	if m.stateManager == nil {
+		return fmt.Errorf("pipeline state manager not initialized")
+	}
+	return m.stateManager.RestartPipeline()
+}
+
+// GetPipelineStateHistory 获取Pipeline状态变化历史
+func (m *Manager) GetPipelineStateHistory() []StateTransition {
+	if m.stateManager == nil {
+		return nil
+	}
+	return m.stateManager.GetStateHistory()
 }
 
 // SetupRoutes 设置GStreamer组件的HTTP路由

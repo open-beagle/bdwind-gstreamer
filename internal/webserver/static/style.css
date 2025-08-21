@@ -1418,4 +1418,58 @@ body {
     .virtual-keyboard {
         max-height: 50vh;
     }
+}}
+
+
+/* 测试工具面板样式 */
+.test-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.test-tools .btn {
+    width: 100%;
+    text-align: center;
+    font-size: 14px;
+    padding: 8px 12px;
+}
+
+.test-info {
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid #007bff;
+}
+
+.test-info small {
+    color: #666;
+    font-size: 12px;
+}
+
+/* 测试结果样式 */
+.test-result {
+    margin: 10px 0;
+    padding: 10px;
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+.test-result.success {
+    background: #d4edda;
+    color: #155724;
+    border-left: 4px solid #28a745;
+}
+
+.test-result.error {
+    background: #f8d7da;
+    color: #721c24;
+    border-left: 4px solid #dc3545;
+}
+
+.test-result.running {
+    background: #fff3cd;
+    color: #856404;
+    border-left: 4px solid #ffc107;
 }

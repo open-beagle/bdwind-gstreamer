@@ -55,10 +55,10 @@ func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
 	log.Printf("[WebRTC] 健康检查和测试API路由已注册")
 
 	// WebSocket信令路由
-	router.HandleFunc("/ws", h.handleWebSocket).Methods("GET")
-	log.Printf("[WebRTC] 主要WebSocket路由已注册: /ws")
+	router.HandleFunc("/api/signaling", h.handleWebSocket).Methods("GET")
+	log.Printf("[WebRTC] 主要WebSocket路由已注册: /api/signaling")
 	log.Printf("[WebRTC] WebSocket处理器配置信息:")
-	log.Printf("[WebRTC]   - 路径: /ws")
+	log.Printf("[WebRTC]   - 路径: /api/signaling")
 	log.Printf("[WebRTC]   - 方法: GET")
 	log.Printf("[WebRTC]   - 处理器: handleWebSocket")
 	log.Printf("[WebRTC]   - 跨域检查: 允许所有来源")
@@ -66,10 +66,10 @@ func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
 	log.Printf("[WebRTC]   - 写缓冲区大小: 1024 bytes")
 	log.Printf("[WebRTC]   - 握手超时: 10 seconds")
 
-	router.HandleFunc("/signaling/{app}", h.handleSignaling).Methods("GET")
-	log.Printf("[WebRTC] 应用特定信令路由已注册: /signaling/{app}")
+	router.HandleFunc("/api/signaling/{app}", h.handleSignaling).Methods("GET")
+	log.Printf("[WebRTC] 应用特定信令路由已注册: /api/signaling/{app}")
 	log.Printf("[WebRTC] 应用信令处理器配置信息:")
-	log.Printf("[WebRTC]   - 路径: /signaling/{app}")
+	log.Printf("[WebRTC]   - 路径: /api/signaling/{app}")
 	log.Printf("[WebRTC]   - 方法: GET")
 	log.Printf("[WebRTC]   - 处理器: handleSignaling")
 	log.Printf("[WebRTC]   - 支持应用特定连接")
@@ -80,8 +80,8 @@ func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
 	log.Printf("[WebRTC]   - 调试API: /api/debug/*")
 	log.Printf("[WebRTC]   - 健康检查: /api/health, /api/ping")
 	log.Printf("[WebRTC]   - 带宽测试: /api/bandwidth-test/*")
-	log.Printf("[WebRTC]   - 主要WebSocket: /ws")
-	log.Printf("[WebRTC]   - 应用信令: /signaling/{app}")
+	log.Printf("[WebRTC]   - 主要WebSocket: /api/signaling")
+	log.Printf("[WebRTC]   - 应用信令: /api/signaling/{app}")
 
 	return nil
 }

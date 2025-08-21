@@ -1,6 +1,6 @@
 /**
- * 优化的应用主入口文件 - 简化的应用管理器
- * 移除不必要的复杂代码，优化连接建立速度和资源使用
+ * 应用主入口文件 - 核心业务功能
+ * 专注于桌面流媒体的核心功能
  */
 
 class ApplicationManager {
@@ -18,7 +18,7 @@ class ApplicationManager {
     this.config = null;
     this.logger = null;
 
-    // 功能模块 - 简化为核心模块
+    // 功能模块 - 核心模块
     this.modules = {
       signaling: null,
       webrtc: null,
@@ -33,40 +33,22 @@ class ApplicationManager {
     this.handleUnhandledRejection = this.handleUnhandledRejection.bind(this);
     this.handleError = this.handleError.bind(this);
     this.handleBeforeUnload = this.handleBeforeUnload.bind(this);
-
-    // 性能优化：预绑定常用方法
     this.updateStats = this.updateStats.bind(this);
   }
 
   /**
-   * 启动应用 - 优化版本
+   * 启动应用
    */
   async start() {
     try {
-      // 设置全局错误处理
       this.setupGlobalErrorHandling();
-
-      // 初始化核心组件
       await this.initializeCore();
-
-      // 初始化模块
       await this.initializeModules();
-
-      // 设置事件处理
       this.setupEventHandlers();
-
-      // 连接信令服务器
       await this.connectSignaling();
-
-      // 设置兼容性层
-      this.setupCompatibilityLayer();
-
-      // 应用就绪
+      this.setupGlobalAccess();
       this.state.phase = "ready";
-
-      // 开始运行
       this.run();
-      
     } catch (error) {
       this.state.phase = "error";
       this.state.errors.push(error);
@@ -75,81 +57,66 @@ class ApplicationManager {
   }
 
   /**
-   * 初始化核心组件 - 优化版本
+   * 初始化核心组件
    */
   async initializeCore() {
-    // 验证 WebRTC Adapter
-    if (typeof verifyWebRTCAdapter === 'function' && !verifyWebRTCAdapter()) {
-      throw new Error('WebRTC Adapter 未正确加载，无法继续初始化');
+    if (typeof verifyWebRTCAdapter === "function" && !verifyWebRTCAdapter()) {
+      throw new Error("WebRTC Adapter 未正确加载，无法继续初始化");
     }
 
-    // 创建事件总线
     this.eventBus = new EventBus();
-
-    // 创建配置管理器
     this.config = new ConfigManager(this.eventBus);
     await this.config.loadConfig();
 
-    // 初始化Logger - 优化配置
     Logger.init();
     Logger.setEventBus(this.eventBus);
-    Logger.setLevel(this.config.get("ui.logLevel", "warn")); // 默认warn级别
-    Logger.setMaxEntries(this.config.get("ui.maxLogEntries", 500)); // 减少日志条目
-    
-    const debugMode = this.config.get("debug.enabled", false) || 
-                     new URLSearchParams(window.location.search).get('debug') === 'true';
+    Logger.setLevel(this.config.get("ui.logLevel", "warn"));
+    Logger.setMaxEntries(this.config.get("ui.maxLogEntries", 500));
+
+    const debugMode =
+      this.config.get("debug.enabled", false) ||
+      new URLSearchParams(window.location.search).get("debug") === "true";
     Logger.setDebugMode(debugMode);
-    
+
     this.logger = Logger;
 
-    // 获取媒体元素
     this.videoElement = document.getElementById("video");
     this.audioElement = document.getElementById("audio");
-    
+
     if (!this.videoElement) {
-      throw new Error('视频元素未找到');
+      throw new Error("视频元素未找到");
     }
   }
 
   /**
-   * 初始化模块 - 优化版本
+   * 初始化模块
    */
   async initializeModules() {
-    try {
-      // 创建信令管理器
-      this.modules.signaling = new SignalingManager(this.eventBus, this.config);
+    this.modules.signaling = this.createSignalingClient();
 
-      // 创建WebRTC管理器
-      this.modules.webrtc = new WebRTCManager(
-        this.modules.signaling, 
-        this.videoElement, 
-        1,
-        {
-          eventBus: this.eventBus,
-          config: this.config
-        }
-      );
-
-      // 创建UI管理器（如果可用）
-      if (typeof UIManager !== 'undefined') {
-        this.modules.ui = new UIManager(this.eventBus, this.config);
+    this.modules.webrtc = new WebRTCManager(
+      this.modules.signaling,
+      this.videoElement,
+      1,
+      {
+        eventBus: this.eventBus,
+        config: this.config,
       }
+    );
 
-      // 验证模块创建成功
-      if (!this.modules.webrtc || !this.modules.signaling) {
-        throw new Error('核心模块创建失败');
-      }
+    if (typeof UIManager !== "undefined") {
+      this.modules.ui = new UIManager(this.eventBus, this.config);
+    }
 
-    } catch (error) {
-      throw error;
+    if (!this.modules.webrtc || !this.modules.signaling) {
+      throw new Error("核心模块创建失败");
     }
   }
 
   /**
-   * 设置事件处理 - 优化版本，减少事件监听器
+   * 设置事件处理
    */
   setupEventHandlers() {
-    // 设置 WebRTC 事件回调
     if (this.modules.webrtc) {
       this.modules.webrtc.onconnectionstatechange = (state) => {
         if (this.modules.ui) {
@@ -172,16 +139,11 @@ class ApplicationManager {
         }
       };
 
-      this.modules.webrtc.onstatus = (message) => {
-        // 只记录重要状态
-      };
-
-      this.modules.webrtc.onerror = (message) => {
-        this.handleWebRTCError(new Error(message));
+      this.modules.webrtc.onerror = (error) => {
+        this.handleWebRTCError(new Error(error));
       };
     }
 
-    // 设置信令事件回调
     if (this.modules.signaling) {
       this.modules.signaling.ondisconnect = () => {
         if (this.modules.ui) {
@@ -189,7 +151,7 @@ class ApplicationManager {
             message: "信令连接已断开",
           });
         }
-        
+
         if (this.modules.webrtc) {
           this.modules.webrtc.reset();
         }
@@ -203,23 +165,23 @@ class ApplicationManager {
         }
       };
 
-      this.modules.signaling.onerror = (message) => {
-        this.handleSignalingError(new Error(message));
+      this.modules.signaling.onerror = (error) => {
+        this.handleSignalingError(new Error(error));
       };
     }
   }
 
   /**
-   * 优化的连接状态更新
+   * 连接状态更新
    */
   updateConnectionStatus(state) {
     if (!this.modules.ui) return;
 
     const statusMap = {
-      "connecting": { status: "connecting", message: "WebRTC连接建立中..." },
-      "connected": { status: "connected", message: "WebRTC连接已建立" },
-      "disconnected": { status: "error", message: "WebRTC连接断开" },
-      "failed": { status: "error", message: "WebRTC连接失败" }
+      connecting: { status: "connecting", message: "WebRTC连接建立中..." },
+      connected: { status: "connected", message: "WebRTC连接已建立" },
+      disconnected: { status: "error", message: "WebRTC连接断开" },
+      failed: { status: "error", message: "WebRTC连接失败" },
     };
 
     const statusInfo = statusMap[state];
@@ -231,40 +193,39 @@ class ApplicationManager {
   }
 
   /**
-   * 连接信令服务器 - 优化版本
+   * 连接信令服务器
    */
   async connectSignaling() {
-    try {
-      if (this.modules.signaling) {
-        await this.modules.signaling.connect();
-      }
+    if (this.modules.signaling) {
+      await this.modules.signaling.connect();
+    }
 
-      if (this.modules.webrtc) {
-        this.modules.webrtc.connect();
-      }
+    if (this.modules.webrtc) {
+      this.modules.webrtc.connect();
+    }
 
-      if (this.modules.ui) {
-        this.modules.ui.initialize();
-      }
-
-    } catch (error) {
-      throw error;
+    if (this.modules.ui) {
+      this.modules.ui.initialize();
     }
   }
 
   /**
-   * 处理信令错误 - 简化版本
+   * 处理信令错误
    */
   handleSignalingError(error) {
-    if (this.modules.ui && typeof this.modules.ui.updateConnectionStatus === 'function') {
+    const errorMessage = `信令错误: ${error.message || error}`;
+
+    if (
+      this.modules.ui &&
+      typeof this.modules.ui.updateConnectionStatus === "function"
+    ) {
       this.modules.ui.updateConnectionStatus("error", {
-        error: `信令错误: ${error.message || error}`,
+        error: errorMessage,
       });
     } else {
-      this.updateBasicStatus("error", `信令错误: ${error.message || error}`);
+      this.updateBasicStatus("error", errorMessage);
     }
 
-    // 简化的重连逻辑
     setTimeout(() => {
       if (this.modules.signaling) {
         this.modules.signaling.connect().catch(() => {});
@@ -273,18 +234,22 @@ class ApplicationManager {
   }
 
   /**
-   * 处理WebRTC错误 - 简化版本
+   * 处理WebRTC错误
    */
   handleWebRTCError(error) {
-    if (this.modules.ui && typeof this.modules.ui.updateConnectionStatus === 'function') {
+    const errorMessage = `WebRTC错误: ${error.message || error}`;
+
+    if (
+      this.modules.ui &&
+      typeof this.modules.ui.updateConnectionStatus === "function"
+    ) {
       this.modules.ui.updateConnectionStatus("error", {
-        error: `WebRTC错误: ${error.message || error}`,
+        error: errorMessage,
       });
     } else {
-      this.updateBasicStatus("error", `WebRTC错误: ${error.message || error}`);
+      this.updateBasicStatus("error", errorMessage);
     }
 
-    // 简化的重置逻辑
     setTimeout(() => {
       if (this.modules.webrtc) {
         this.modules.webrtc.reset();
@@ -293,7 +258,7 @@ class ApplicationManager {
   }
 
   /**
-   * 基本状态更新 - 向后兼容性
+   * 基本状态更新
    */
   updateBasicStatus(status, message) {
     const statusText = document.getElementById("status-text");
@@ -311,7 +276,10 @@ class ApplicationManager {
    * 发送数据通道消息
    */
   sendDataChannelMessage(message) {
-    if (this.modules.webrtc && typeof this.modules.webrtc.sendDataChannelMessage === 'function') {
+    if (
+      this.modules.webrtc &&
+      typeof this.modules.webrtc.sendDataChannelMessage === "function"
+    ) {
       return this.modules.webrtc.sendDataChannelMessage(message);
     }
     return false;
@@ -321,37 +289,35 @@ class ApplicationManager {
    * 获取连接统计
    */
   getConnectionStats() {
-    if (this.modules.webrtc && typeof this.modules.webrtc.getConnectionStats === 'function') {
+    if (
+      this.modules.webrtc &&
+      typeof this.modules.webrtc.getConnectionStats === "function"
+    ) {
       return this.modules.webrtc.getConnectionStats();
     }
     return null;
   }
 
   /**
-   * 运行应用 - 优化版本
+   * 运行应用
    */
   run() {
     this.state.phase = "running";
-
-    // 启动优化的定期任务
     this.startPeriodicTasks();
-
-    // 触发应用就绪事件
     this.eventBus.emit("app:ready", {
       startTime: this.state.startTime,
     });
   }
 
   /**
-   * 启动定期任务 - 优化版本，减少频率
+   * 启动定期任务
    */
   startPeriodicTasks() {
-    // 优化：减少统计更新频率到10秒
     setInterval(this.updateStats, 10000);
   }
 
   /**
-   * 更新统计信息 - 优化版本
+   * 更新统计信息
    */
   async updateStats() {
     try {
@@ -371,9 +337,9 @@ class ApplicationManager {
   }
 
   /**
-   * 设置兼容性层 - 优化版本
+   * 设置全局访问层
    */
-  setupCompatibilityLayer() {
+  setupGlobalAccess() {
     // 全局应用访问
     window.app = {
       manager: this,
@@ -385,17 +351,17 @@ class ApplicationManager {
       updateStats: () => this.updateStats(),
     };
 
-    // WebSocket兼容性
+    // WebSocket 全局访问
     Object.defineProperty(window, "ws", {
       get: () => this.modules.signaling || null,
     });
 
-    // PeerConnection兼容性
+    // PeerConnection 全局访问
     Object.defineProperty(window, "pc", {
       get: () => this.modules.webrtc || null,
     });
 
-    // 状态兼容性
+    // 状态全局访问
     Object.defineProperty(window, "isCapturing", {
       get: () => this.state.isCapturing || false,
       set: (value) => {
@@ -405,11 +371,14 @@ class ApplicationManager {
   }
 
   /**
-   * 设置全局错误处理 - 优化版本
+   * 设置全局错误处理
    */
   setupGlobalErrorHandling() {
     window.addEventListener("error", this.handleError);
-    window.addEventListener("unhandledrejection", this.handleUnhandledRejection);
+    window.addEventListener(
+      "unhandledrejection",
+      this.handleUnhandledRejection
+    );
     window.addEventListener("beforeunload", this.handleBeforeUnload);
   }
 
@@ -422,6 +391,9 @@ class ApplicationManager {
       error: event.error,
       timestamp: Date.now(),
     });
+
+    // 记录错误到控制台
+    console.error("Uncaught error:", event.error);
   }
 
   /**
@@ -438,17 +410,16 @@ class ApplicationManager {
   /**
    * 处理页面卸载
    */
-  handleBeforeUnload(event) {
+  handleBeforeUnload() {
     this.shutdown();
   }
 
   /**
-   * 应用关闭 - 优化版本
+   * 应用关闭
    */
   async shutdown() {
     this.state.phase = "shutdown";
 
-    // 停止模块
     if (this.modules.webrtc) {
       try {
         this.modules.webrtc.reset();
@@ -465,10 +436,128 @@ class ApplicationManager {
       }
     }
 
-    // 清理事件监听器
     window.removeEventListener("error", this.handleError);
-    window.removeEventListener("unhandledrejection", this.handleUnhandledRejection);
+    window.removeEventListener(
+      "unhandledrejection",
+      this.handleUnhandledRejection
+    );
     window.removeEventListener("beforeunload", this.handleBeforeUnload);
+  }
+
+  /**
+   * 创建信令客户端
+   */
+  createSignalingClient() {
+    let serverUrl = this.config?.get("signaling.url");
+    if (!serverUrl) {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      serverUrl = `${protocol}//${window.location.host}/api/signaling`;
+    }
+
+    const client = new SignalingClient(
+      serverUrl,
+      this.config?.get("signaling.peerId", 1),
+      {
+        eventBus: this.eventBus,
+        logger: this.logger || console,
+        config: this.config?.get("signaling", {}),
+        maxRetries: this.config?.get("signaling.maxRetries", 3),
+        retryDelay: this.config?.get("signaling.retryDelay", 3000),
+        connectionTimeout: this.config?.get(
+          "signaling.connectionTimeout",
+          10000
+        ),
+        heartbeatInterval: this.config?.get(
+          "signaling.heartbeatInterval",
+          30000
+        ),
+      }
+    );
+
+    this.setupClientCallbacks(client);
+    return client;
+  }
+
+  /**
+   * 设置客户端事件回调
+   */
+  setupClientCallbacks(client) {
+    // 设置事件回调接口
+    client.onstatus = (message) => {
+      this.eventBus?.emit("signaling:status", { message });
+      if (this.modules.ui) {
+        this.modules.ui.updateConnectionStatus("connecting", { message });
+      }
+    };
+
+    client.onerror = (error) => {
+      const message = error.message || error.toString();
+      this.eventBus?.emit("signaling:error", { message });
+      this.handleSignalingError(error);
+    };
+
+    client.onopen = () => {
+      this.eventBus?.emit("signaling:connected", {
+        peerId: client.peerId,
+        server: client.serverUrl,
+        protocol: client.getState().protocolMode,
+      });
+
+      if (this.modules.ui) {
+        this.modules.ui.updateConnectionStatus("connected", {
+          message: "信令连接已建立",
+        });
+      }
+    };
+
+    client.onclose = () => {
+      this.eventBus?.emit("signaling:disconnected");
+      if (client.ondisconnect) {
+        client.ondisconnect();
+      }
+    };
+
+    client.onsdp = (sdp) => {
+      this.eventBus?.emit("signaling:sdp", sdp);
+    };
+
+    client.onice = (ice) => {
+      this.eventBus?.emit("signaling:ice-candidate", ice);
+    };
+
+    // 添加便捷方法
+    client.getConnectionState = () => client.getState();
+    client.getConnectionStats = () => client.getState();
+
+    // 添加发送方法别名
+    client.send = (type, data) => {
+      try {
+        return client.sendMessage(type, data);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+
+    // 添加重置方法别名
+    client.reset = () => {
+      client.disconnect();
+    };
+
+    // 添加状态属性别名
+    Object.defineProperty(client, "state", {
+      get: () => client.getState().connectionState,
+    });
+
+    Object.defineProperty(client, "retry_count", {
+      get: () => client.getState().retryCount,
+    });
+
+    Object.defineProperty(client, "peer_id", {
+      get: () => client.peerId,
+      set: (value) => {
+        client.peerId = value;
+      },
+    });
   }
 
   /**
@@ -482,53 +571,42 @@ class ApplicationManager {
   }
 
   /**
-   * 开始捕获 - 优化版本
+   * 开始捕获
    */
   async startCapture() {
-    try {
-      if (!this.modules.webrtc) {
-        throw new Error("WebRTC模块未初始化");
-      }
-
-      this.modules.webrtc.connect();
-      this.state.isCapturing = true;
-      
-      return { success: true };
-    } catch (error) {
-      if (this.modules.ui) {
-        this.modules.ui.updateConnectionStatus("error", {
-          error: `启动失败: ${error.message}`,
-        });
-      }
-      throw error;
+    if (!this.modules.webrtc) {
+      throw new Error("WebRTC模块未初始化");
     }
+
+    this.modules.webrtc.connect();
+    this.state.isCapturing = true;
+
+    return { success: true };
   }
 
   /**
-   * 停止捕获 - 优化版本
+   * 停止捕获
    */
   async stopCapture() {
-    try {
-      if (this.modules.webrtc) {
-        this.modules.webrtc.reset();
-      }
-      
-      if (this.modules.signaling) {
-        this.modules.signaling.disconnect();
-      }
-
-      this.state.isCapturing = false;
-      return { success: true };
-    } catch (error) {
-      this.state.isCapturing = false;
+    if (this.modules.webrtc) {
+      this.modules.webrtc.reset();
     }
+
+    if (this.modules.signaling) {
+      this.modules.signaling.disconnect();
+    }
+
+    this.state.isCapturing = false;
+    return { success: true };
   }
+
+
 }
 
 // 创建应用管理器实例
 let appManager;
 
-// 应用启动函数 - 优化版本
+// 应用启动函数
 async function startApplication() {
   try {
     appManager = new ApplicationManager();
@@ -539,15 +617,15 @@ async function startApplication() {
   }
 }
 
-// 页面加载完成后启动应用 - 优化版本
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', startApplication);
+// 页面加载完成后启动应用
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startApplication);
 } else {
   startApplication();
 }
 
 // ============================================================================
-// 向后兼容性支持 - 简化版本
+// 全局函数支持
 // ============================================================================
 
 // 视频控制函数
@@ -573,6 +651,143 @@ function toggleFullscreen() {
   }
 }
 
+function toggleAudioMute() {
+  const video = document.getElementById("video");
+  const audio = document.getElementById("audio");
+  const muteIcon = document.getElementById("mute-icon");
+
+  if (video) {
+    video.muted = !video.muted;
+    if (muteIcon) {
+      muteIcon.textContent = video.muted ? "🔇" : "🔊";
+    }
+  }
+
+  if (audio) {
+    audio.muted = video ? video.muted : !audio.muted;
+  }
+}
+
+function setVolume(value) {
+  const video = document.getElementById("video");
+  const audio = document.getElementById("audio");
+
+  if (video) {
+    video.volume = parseFloat(value);
+  }
+
+  if (audio) {
+    audio.volume = parseFloat(value);
+  }
+}
+
+function startCapture() {
+  if (window.appManager) {
+    return window.appManager.startCapture();
+  } else if (window.app && window.app.manager) {
+    return window.app.manager.startCapture();
+  } else {
+    console.error("应用管理器未找到");
+  }
+}
+
+function stopCapture() {
+  if (window.appManager) {
+    return window.appManager.stopCapture();
+  } else if (window.app && window.app.manager) {
+    return window.app.manager.stopCapture();
+  } else {
+    console.error("应用管理器未找到");
+  }
+}
+
+function stopReconnecting() {
+  if (window.appManager && window.appManager.modules.signaling) {
+    window.appManager.modules.signaling.disconnect();
+  }
+
+  const stopBtn = document.getElementById("stop-reconnect-btn");
+  if (stopBtn) {
+    stopBtn.style.display = "none";
+  }
+}
+
+function getDisplays() {
+  // 发送获取显示器信息的请求
+  if (window.appManager && window.appManager.sendDataChannelMessage) {
+    window.appManager.sendDataChannelMessage("get_displays");
+  } else {
+    console.log("获取显示器信息功能需要建立数据通道连接");
+  }
+}
+
+// 执行快速测试的全局函数
+function executeQuickTests() {
+  console.log("快速测试功能");
+}
+
+// 系统监控相关函数
+function switchMonitoringTab(tabName) {
+  // 隐藏所有面板
+  const panels = document.querySelectorAll(".monitoring-panel");
+  panels.forEach((panel) => panel.classList.remove("active"));
+
+  // 移除所有按钮的active类
+  const buttons = document.querySelectorAll(".tab-btn");
+  buttons.forEach((btn) => btn.classList.remove("active"));
+
+  // 显示选中的面板
+  const targetPanel = document.getElementById(`${tabName}-panel`);
+  if (targetPanel) {
+    targetPanel.classList.add("active");
+  }
+
+  // 激活选中的按钮
+  const targetButton = document.querySelector(
+    `[onclick="switchMonitoringTab('${tabName}')"]`
+  );
+  if (targetButton) {
+    targetButton.classList.add("active");
+  }
+}
+
+function filterLogs() {
+  // 日志过滤功能的占位符实现
+  console.log("日志过滤功能");
+}
+
+function clearLogs() {
+  const logContainer = document.getElementById("log-container");
+  if (logContainer) {
+    logContainer.innerHTML =
+      '<div class="log-stats"><span>日志已清空</span><span>最后更新: ' +
+      new Date().toLocaleTimeString() +
+      "</span></div>";
+  }
+}
+
+function exportLogs() {
+  console.log("导出日志功能");
+}
+
+function refreshLogs() {
+  console.log("刷新日志功能");
+}
+
+
+
 // 导出全局函数
 window.toggleVideoPlay = toggleVideoPlay;
 window.toggleFullscreen = toggleFullscreen;
+window.toggleAudioMute = toggleAudioMute;
+window.setVolume = setVolume;
+window.startCapture = startCapture;
+window.stopCapture = stopCapture;
+window.stopReconnecting = stopReconnecting;
+window.getDisplays = getDisplays;
+window.executeQuickTests = executeQuickTests;
+window.switchMonitoringTab = switchMonitoringTab;
+window.filterLogs = filterLogs;
+window.clearLogs = clearLogs;
+window.exportLogs = exportLogs;
+window.refreshLogs = refreshLogs;
