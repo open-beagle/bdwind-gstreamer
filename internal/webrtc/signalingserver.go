@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +59,7 @@ type SignalingClient struct {
 	MessageCount int64
 	ErrorCount   int64
 	LastError    *SignalingError
+	IsSelkies    bool // 标记是否为 selkies 客户端
 	mutex        sync.RWMutex
 }
 
@@ -536,6 +538,10 @@ func validateSignalingMessage(message *SignalingMessage) *SignalingError {
 		"error":         true,
 		"welcome":       true,
 		"stats":         true,
+		// selkies 协议支持
+		"hello": true,
+		"sdp":   true,
+		"ice":   true,
 	}
 
 	if !validTypes[message.Type] {
@@ -977,7 +983,16 @@ func (c *SignalingClient) readPump() {
 		if messageType == websocket.TextMessage {
 			log.Printf("📨 Raw message received from client %s (length: %d bytes)", c.ID, len(messageBytes))
 
-			// 解析JSON消息
+			// 增加消息计数
+			c.incrementMessageCount()
+
+			// 尝试处理 selkies 协议消息
+			messageText := string(messageBytes)
+			if c.handleSelkiesMessage(messageText) {
+				continue
+			}
+
+			// 解析JSON消息 (原有协议)
 			var message SignalingMessage
 			if err := json.Unmarshal(messageBytes, &message); err != nil {
 				log.Printf("❌ Failed to parse JSON message from client %s: %v", c.ID, err)
@@ -993,9 +1008,6 @@ func (c *SignalingClient) readPump() {
 			}
 
 			log.Printf("✅ JSON message parsed successfully from client %s", c.ID)
-
-			// 增加消息计数
-			c.incrementMessageCount()
 
 			// 处理消息
 			c.handleMessage(message)
@@ -1210,24 +1222,42 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 			log.Printf("🧊 Generated ICE candidate for client %s: type=%s, protocol=%s, address=%s",
 				c.ID, candidate.Typ.String(), candidate.Protocol.String(), candidate.Address)
 
-			// 发送ICE候选给客户端
-			candidateMessage := SignalingMessage{
-				Type:      "ice-candidate",
-				PeerID:    c.ID,
-				MessageID: generateMessageID(),
-				Timestamp: time.Now().Unix(),
-				Data: map[string]interface{}{
-					"candidate":     candidate.String(),
-					"sdpMid":        candidate.SDPMid,
-					"sdpMLineIndex": candidate.SDPMLineIndex,
-				},
-			}
-
-			if candidateData, err := json.Marshal(candidateMessage); err == nil {
-				c.Send <- candidateData
-				log.Printf("📤 ICE candidate sent to client %s", c.ID)
+			// 发送ICE候选给客户端 - 支持 selkies 协议
+			if c.isSelkiesClient() {
+				// selkies 协议格式
+				selkiesICE := map[string]any{
+					"ice": map[string]any{
+						"candidate":     candidate.String(),
+						"sdpMid":        candidate.SDPMid,
+						"sdpMLineIndex": candidate.SDPMLineIndex,
+					},
+				}
+				if iceBytes, err := json.Marshal(selkiesICE); err == nil {
+					c.Send <- iceBytes
+					log.Printf("📤 Selkies ICE candidate sent to client %s", c.ID)
+				} else {
+					log.Printf("❌ Failed to marshal selkies ICE candidate for client %s: %v", c.ID, err)
+				}
 			} else {
-				log.Printf("❌ Failed to marshal ICE candidate for client %s: %v", c.ID, err)
+				// 原有协议格式
+				candidateMessage := SignalingMessage{
+					Type:      "ice-candidate",
+					PeerID:    c.ID,
+					MessageID: generateMessageID(),
+					Timestamp: time.Now().Unix(),
+					Data: map[string]interface{}{
+						"candidate":     candidate.String(),
+						"sdpMid":        candidate.SDPMid,
+						"sdpMLineIndex": candidate.SDPMLineIndex,
+					},
+				}
+
+				if candidateData, err := json.Marshal(candidateMessage); err == nil {
+					c.Send <- candidateData
+					log.Printf("📤 ICE candidate sent to client %s", c.ID)
+				} else {
+					log.Printf("❌ Failed to marshal ICE candidate for client %s: %v", c.ID, err)
+				}
 			}
 		} else {
 			log.Printf("🏁 ICE gathering complete for client %s", c.ID)
@@ -1269,28 +1299,45 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 		return
 	}
 
-	// 发送offer给客户端
-	offerMessage := SignalingMessage{
-		Type:      "offer",
-		PeerID:    c.ID,
-		MessageID: generateMessageID(),
-		Timestamp: time.Now().Unix(),
-		Data: map[string]any{
-			"type": "offer",
-			"sdp":  offer.SDP,
-		},
-	}
-
-	log.Printf("Sending WebRTC offer to client %s", c.ID)
-	if err := c.sendMessage(offerMessage); err != nil {
-		log.Printf("Failed to send offer to client %s: %v", c.ID, err)
-		signalingError := &SignalingError{
-			Code:    ErrorCodeInternalError,
-			Message: "Failed to send offer message",
-			Details: err.Error(),
-			Type:    "server_error",
+	// 发送offer给客户端 - 支持 selkies 协议
+	if c.isSelkiesClient() {
+		// selkies 协议格式
+		selkiesOffer := map[string]any{
+			"sdp": map[string]any{
+				"type": "offer",
+				"sdp":  offer.SDP,
+			},
 		}
-		c.recordError(signalingError)
+		if offerBytes, err := json.Marshal(selkiesOffer); err == nil {
+			c.Send <- offerBytes
+			log.Printf("📤 Selkies offer sent to client %s", c.ID)
+		} else {
+			log.Printf("❌ Failed to marshal selkies offer for client %s: %v", c.ID, err)
+		}
+	} else {
+		// 原有协议格式
+		offerMessage := SignalingMessage{
+			Type:      "offer",
+			PeerID:    c.ID,
+			MessageID: generateMessageID(),
+			Timestamp: time.Now().Unix(),
+			Data: map[string]any{
+				"type": "offer",
+				"sdp":  offer.SDP,
+			},
+		}
+
+		log.Printf("Sending WebRTC offer to client %s", c.ID)
+		if err := c.sendMessage(offerMessage); err != nil {
+			log.Printf("Failed to send offer to client %s: %v", c.ID, err)
+			signalingError := &SignalingError{
+				Code:    ErrorCodeInternalError,
+				Message: "Failed to send offer message",
+				Details: err.Error(),
+				Type:    "server_error",
+			}
+			c.recordError(signalingError)
+		}
 	}
 }
 
@@ -1638,4 +1685,138 @@ func (c *SignalingClient) handleAnswerAck(message SignalingMessage) {
 func (c *SignalingClient) handleIceAck(message SignalingMessage) {
 	log.Printf("ICE candidate acknowledged by client %s", c.ID)
 	// 这里可以添加ICE确认处理逻辑
+}
+
+// handleSelkiesMessage 处理 selkies 协议消息
+func (c *SignalingClient) handleSelkiesMessage(messageText string) bool {
+	// 检查是否是 HELLO 消息
+	if strings.HasPrefix(messageText, "HELLO ") {
+		log.Printf("🔄 Selkies HELLO message received from client %s: %s", c.ID, messageText)
+		c.handleSelkiesHello(messageText)
+		return true
+	}
+
+	// 尝试解析为 JSON (SDP/ICE 消息)
+	var jsonMsg map[string]any
+	if err := json.Unmarshal([]byte(messageText), &jsonMsg); err == nil {
+		// 检查是否是 selkies 格式的 SDP 消息
+		if sdpData, exists := jsonMsg["sdp"]; exists {
+			log.Printf("📞 Selkies SDP message received from client %s", c.ID)
+			c.handleSelkiesSDP(sdpData)
+			return true
+		}
+
+		// 检查是否是 selkies 格式的 ICE 消息
+		if iceData, exists := jsonMsg["ice"]; exists {
+			log.Printf("🧊 Selkies ICE message received from client %s", c.ID)
+			c.handleSelkiesICE(iceData)
+			return true
+		}
+	}
+
+	// 不是 selkies 协议消息
+	return false
+}
+
+// handleSelkiesHello 处理 selkies HELLO 消息
+func (c *SignalingClient) handleSelkiesHello(messageText string) {
+	// 解析 HELLO 消息: "HELLO ${peer_id} ${btoa(JSON.stringify(meta))}"
+	parts := strings.SplitN(messageText, " ", 3)
+	if len(parts) < 2 {
+		log.Printf("❌ Invalid HELLO message format from client %s: %s", c.ID, messageText)
+		c.sendSelkiesError("Invalid HELLO message format")
+		return
+	}
+
+	peerID := parts[1]
+	var meta map[string]any
+
+	// 解析元数据 (如果存在)
+	if len(parts) >= 3 {
+		metaEncoded := parts[2]
+		if metaBytes, err := base64.StdEncoding.DecodeString(metaEncoded); err == nil {
+			if err := json.Unmarshal(metaBytes, &meta); err != nil {
+				log.Printf("⚠️ Failed to parse HELLO metadata from client %s: %v", c.ID, err)
+			}
+		}
+	}
+
+	log.Printf("✅ Selkies HELLO processed: client=%s, peerID=%s, meta=%+v", c.ID, peerID, meta)
+
+	// 标记为 selkies 客户端
+	c.mutex.Lock()
+	c.IsSelkies = true
+	c.mutex.Unlock()
+
+	// 发送简单的 HELLO 响应 (selkies 协议)
+	c.sendSelkiesMessage("HELLO")
+
+	// 触发 offer 请求处理
+	c.handleOfferRequest(SignalingMessage{
+		Type:   "request-offer",
+		PeerID: c.ID,
+	})
+}
+
+// handleSelkiesSDP 处理 selkies SDP 消息
+func (c *SignalingClient) handleSelkiesSDP(sdpData any) {
+	sdpMap, ok := sdpData.(map[string]any)
+	if !ok {
+		log.Printf("❌ Invalid SDP data format from client %s", c.ID)
+		c.sendSelkiesError("Invalid SDP data format")
+		return
+	}
+
+	// 转换为标准 SignalingMessage 格式
+	message := SignalingMessage{
+		Type:   "answer",
+		PeerID: c.ID,
+		Data:   sdpMap,
+	}
+
+	log.Printf("🔄 Converting selkies SDP to standard format for client %s", c.ID)
+	c.handleAnswer(message)
+}
+
+// handleSelkiesICE 处理 selkies ICE 消息
+func (c *SignalingClient) handleSelkiesICE(iceData any) {
+	iceMap, ok := iceData.(map[string]any)
+	if !ok {
+		log.Printf("❌ Invalid ICE data format from client %s", c.ID)
+		c.sendSelkiesError("Invalid ICE data format")
+		return
+	}
+
+	// 转换为标准 SignalingMessage 格式
+	message := SignalingMessage{
+		Type:   "ice-candidate",
+		PeerID: c.ID,
+		Data:   iceMap,
+	}
+
+	log.Printf("🔄 Converting selkies ICE to standard format for client %s", c.ID)
+	c.handleIceCandidate(message)
+}
+
+// sendSelkiesMessage 发送 selkies 协议消息
+func (c *SignalingClient) sendSelkiesMessage(message string) {
+	select {
+	case c.Send <- []byte(message):
+		log.Printf("📤 Selkies message sent to client %s: %s", c.ID, message)
+	default:
+		log.Printf("❌ Failed to send selkies message to client %s: channel full", c.ID)
+	}
+}
+
+// sendSelkiesError 发送 selkies 协议错误消息
+func (c *SignalingClient) sendSelkiesError(errorMsg string) {
+	errorMessage := fmt.Sprintf("ERROR %s", errorMsg)
+	c.sendSelkiesMessage(errorMessage)
+}
+
+// isSelkiesClient 检查客户端是否使用 selkies 协议
+func (c *SignalingClient) isSelkiesClient() bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.IsSelkies
 }

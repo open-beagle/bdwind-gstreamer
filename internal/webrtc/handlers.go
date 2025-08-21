@@ -37,6 +37,7 @@ func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
 	webrtcAPI.HandleFunc("/peers/{id}/disconnect", h.handlePeerDisconnect).Methods("POST")
 	webrtcAPI.HandleFunc("/stats", h.handleStats).Methods("GET")
 	webrtcAPI.HandleFunc("/config", h.handleConfig).Methods("GET", "POST")
+	webrtcAPI.HandleFunc("/ice-servers", h.handleICEServers).Methods("GET") // selkies 兼容性
 	log.Printf("[WebRTC] WebRTC API路由已注册: /api/webrtc/*")
 
 	// 调试和诊断API路由
@@ -838,6 +839,77 @@ func (h *webrtcHandlers) handleBandwidthTestUpload(w http.ResponseWriter, r *htt
 	}
 
 	h.writeJSON(w, response)
+}
+
+// handleICEServers 处理ICE服务器配置请求 (selkies 兼容性)
+func (h *webrtcHandlers) handleICEServers(w http.ResponseWriter, r *http.Request) {
+	// 检查WebRTC管理器状态
+	if !h.manager.IsRunning() {
+		http.Error(w, "WebRTC manager not running", http.StatusServiceUnavailable)
+		return
+	}
+
+	// 验证配置完整性
+	if h.manager.config == nil {
+		http.Error(w, "Configuration not loaded", http.StatusInternalServerError)
+		return
+	}
+
+	// 转换ICE服务器配置为 selkies 兼容格式
+	iceServers, err := h.convertICEServersToSelkiesFormat()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to process ICE server configuration: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 返回简单的 ICE 服务器配置 (selkies 格式)
+	response := map[string]any{
+		"iceServers":         iceServers,
+		"iceTransportPolicy": "all",
+	}
+
+	log.Printf("ICE servers config requested (selkies format), returning %d servers", len(iceServers))
+	h.writeJSON(w, response)
+}
+
+// convertICEServersToSelkiesFormat 转换ICE服务器配置为 selkies 格式
+func (h *webrtcHandlers) convertICEServersToSelkiesFormat() ([]map[string]any, error) {
+	if h.manager.config.WebRTC.ICEServers == nil {
+		return nil, fmt.Errorf("ICE servers configuration is nil")
+	}
+
+	iceServers := make([]map[string]any, 0, len(h.manager.config.WebRTC.ICEServers))
+
+	for i, server := range h.manager.config.WebRTC.ICEServers {
+		if len(server.URLs) == 0 {
+			log.Printf("Warning: ICE server %d has no URLs, skipping", i)
+			continue
+		}
+
+		iceServer := map[string]any{
+			"urls": server.URLs,
+		}
+
+		if server.Username != "" {
+			iceServer["username"] = server.Username
+		}
+		if server.Credential != "" {
+			iceServer["credential"] = server.Credential
+		}
+
+		iceServers = append(iceServers, iceServer)
+	}
+
+	if len(iceServers) == 0 {
+		// 提供默认的 STUN 服务器
+		iceServers = []map[string]any{
+			{
+				"urls": []string{"stun:stun.l.google.com:19302"},
+			},
+		}
+	}
+
+	return iceServers, nil
 }
 
 // contains 检查字符串是否包含子字符串（不区分大小写）
