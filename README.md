@@ -98,7 +98,7 @@ CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o .tmp/bdwind-gstreamer
 ./scripts/build-docker.sh all
 
 # 访问 Web 界面
-# http://localhost:8080
+http://localhost:8080
 ```
 
 #### 分步骤部署（学习用）

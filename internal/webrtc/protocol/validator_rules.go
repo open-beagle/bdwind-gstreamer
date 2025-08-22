@@ -6,79 +6,108 @@ import (
 	"time"
 )
 
-// initDefaultValidators 初始化默认格式验证器
+// initDefaultValidators 按照文档规范初始化默认格式验证器
+// 参考: docs/gstreamer-signaling/message-formats.md
 func (v *MessageValidator) initDefaultValidators() {
-	// HELLO 消息格式验证器
+	// HELLO 消息格式验证器 - 按照文档规范
 	v.formatValidators[MessageTypeHello] = FormatValidator{
 		RequiredFields: []string{"data"},
 		DataSchema: &DataSchema{
 			Type: "object",
 			Properties: map[string]*PropertySchema{
-				"peer_id": {
-					Type:        "string",
-					MinLength:   &[]int{1}[0],
-					MaxLength:   &[]int{256}[0],
-					Description: "Peer identifier",
+				"client_info": {
+					Type:        "object",
+					Description: "Client information",
 				},
 				"capabilities": {
 					Type:        "array",
 					Description: "List of supported capabilities",
 				},
-				"metadata": {
-					Type:        "object",
-					Description: "Additional metadata",
+				"supported_protocols": {
+					Type:        "array",
+					Description: "List of supported protocols",
+				},
+				"preferred_protocol": {
+					Type:        "string",
+					Description: "Preferred protocol",
 				},
 			},
-			Required: []string{"peer_id"},
+			Required: []string{"client_info"},
 		},
 		CustomCheck: func(msg *StandardMessage) error {
-			var helloData HelloData
-			if err := msg.GetDataAs(&helloData); err != nil {
-				return fmt.Errorf("invalid hello data format: %w", err)
+			// 验证 data 是否为 map
+			dataMap, ok := msg.Data.(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid hello data format: data must be an object")
 			}
 
-			if helloData.PeerID == "" {
-				return fmt.Errorf("peer_id is required")
+			// 验证 client_info 存在且为对象
+			if clientInfo, exists := dataMap["client_info"]; !exists {
+				return fmt.Errorf("client_info is required")
+			} else if _, ok := clientInfo.(map[string]any); !ok {
+				return fmt.Errorf("client_info must be an object")
 			}
 
 			return nil
 		},
 	}
 
-	// OFFER 消息格式验证器
+	// OFFER 消息格式验证器 - 按照文档规范
 	v.formatValidators[MessageTypeOffer] = FormatValidator{
 		RequiredFields: []string{"data"},
 		DataSchema: &DataSchema{
 			Type: "object",
 			Properties: map[string]*PropertySchema{
-				"type": {
-					Type:        "string",
-					Enum:        []any{"offer"},
-					Description: "SDP type",
-				},
 				"sdp": {
-					Type:        "string",
-					MinLength:   &[]int{10}[0],
-					Description: "SDP content",
-				},
-				"constraints": {
 					Type:        "object",
-					Description: "Media constraints",
+					Description: "SDP data object",
+				},
+				"ice_servers": {
+					Type:        "array",
+					Description: "ICE servers configuration",
 				},
 			},
-			Required: []string{"type", "sdp"},
+			Required: []string{"sdp"},
 		},
 		CustomCheck: func(msg *StandardMessage) error {
-			var sdpData SDPData
-			if err := msg.GetDataAs(&sdpData); err != nil {
-				return fmt.Errorf("invalid SDP data format: %w", err)
+			// 验证 data 是否为 map
+			dataMap, ok := msg.Data.(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid offer data format: data must be an object")
 			}
 
-			if sdpData.Type != "offer" {
-				return fmt.Errorf("invalid SDP type for offer: %s", sdpData.Type)
+			// 验证 sdp 对象
+			sdpObj, exists := dataMap["sdp"]
+			if !exists {
+				return fmt.Errorf("sdp object is required")
 			}
 
-			if !strings.Contains(sdpData.SDP, "v=0") {
+			sdpMap, ok := sdpObj.(map[string]any)
+			if !ok {
+				return fmt.Errorf("sdp must be an object")
+			}
+
+			// 验证 sdp.type
+			sdpType, exists := sdpMap["type"]
+			if !exists {
+				return fmt.Errorf("sdp.type is required")
+			}
+
+			if typeStr, ok := sdpType.(string); !ok || typeStr != "offer" {
+				return fmt.Errorf("invalid SDP type for offer: %v", sdpType)
+			}
+
+			// 验证 sdp.sdp
+			sdpContent, exists := sdpMap["sdp"]
+			if !exists {
+				return fmt.Errorf("sdp.sdp is required")
+			}
+
+			if sdpStr, ok := sdpContent.(string); !ok {
+				return fmt.Errorf("sdp.sdp must be a string")
+			} else if len(sdpStr) < 10 {
+				return fmt.Errorf("sdp content too short")
+			} else if !strings.Contains(sdpStr, "v=0") {
 				return fmt.Errorf("invalid SDP format: missing version line")
 			}
 
@@ -86,40 +115,58 @@ func (v *MessageValidator) initDefaultValidators() {
 		},
 	}
 
-	// ANSWER 消息格式验证器
+	// ANSWER 消息格式验证器 - 按照文档规范
 	v.formatValidators[MessageTypeAnswer] = FormatValidator{
 		RequiredFields: []string{"data"},
 		DataSchema: &DataSchema{
 			Type: "object",
 			Properties: map[string]*PropertySchema{
-				"type": {
-					Type:        "string",
-					Enum:        []any{"answer"},
-					Description: "SDP type",
-				},
 				"sdp": {
-					Type:        "string",
-					MinLength:   &[]int{10}[0],
-					Description: "SDP content",
-				},
-				"constraints": {
 					Type:        "object",
-					Description: "Media constraints",
+					Description: "SDP data object",
 				},
 			},
-			Required: []string{"type", "sdp"},
+			Required: []string{"sdp"},
 		},
 		CustomCheck: func(msg *StandardMessage) error {
-			var sdpData SDPData
-			if err := msg.GetDataAs(&sdpData); err != nil {
-				return fmt.Errorf("invalid SDP data format: %w", err)
+			// 验证 data 是否为 map
+			dataMap, ok := msg.Data.(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid answer data format: data must be an object")
 			}
 
-			if sdpData.Type != "answer" {
-				return fmt.Errorf("invalid SDP type for answer: %s", sdpData.Type)
+			// 验证 sdp 对象
+			sdpObj, exists := dataMap["sdp"]
+			if !exists {
+				return fmt.Errorf("sdp object is required")
 			}
 
-			if !strings.Contains(sdpData.SDP, "v=0") {
+			sdpMap, ok := sdpObj.(map[string]any)
+			if !ok {
+				return fmt.Errorf("sdp must be an object")
+			}
+
+			// 验证 sdp.type
+			sdpType, exists := sdpMap["type"]
+			if !exists {
+				return fmt.Errorf("sdp.type is required")
+			}
+
+			if typeStr, ok := sdpType.(string); !ok || typeStr != "answer" {
+				return fmt.Errorf("invalid SDP type for answer: %v", sdpType)
+			}
+
+			// 验证 sdp.sdp
+			sdpContent, exists := sdpMap["sdp"]
+			if !exists {
+				return fmt.Errorf("sdp.sdp is required")
+			}
+
+			if sdpStr, ok := sdpContent.(string); !ok {
+				return fmt.Errorf("sdp.sdp must be a string")
+			} else if len(sdpStr) < 10 {
+				return fmt.Errorf("sdp content too short")
+			} else if !strings.Contains(sdpStr, "v=0") {
 				return fmt.Errorf("invalid SDP format: missing version line")
 			}
 
@@ -127,55 +174,60 @@ func (v *MessageValidator) initDefaultValidators() {
 		},
 	}
 
-	// ICE_CANDIDATE 消息格式验证器
+	// ICE_CANDIDATE 消息格式验证器 - 按照文档规范
 	v.formatValidators[MessageTypeICECandidate] = FormatValidator{
 		RequiredFields: []string{"data"},
 		DataSchema: &DataSchema{
 			Type: "object",
 			Properties: map[string]*PropertySchema{
 				"candidate": {
-					Type:        "string",
-					Pattern:     "^candidate:",
-					MinLength:   &[]int{10}[0],
-					Description: "ICE candidate string",
-				},
-				"sdpMid": {
-					Type:        "string",
-					Description: "SDP media identifier",
-				},
-				"sdpMLineIndex": {
-					Type:        "integer",
-					Minimum:     &[]float64{0}[0],
-					Description: "SDP media line index",
-				},
-				"usernameFragment": {
-					Type:        "string",
-					Description: "ICE username fragment",
+					Type:        "object",
+					Description: "ICE candidate object",
 				},
 			},
 			Required: []string{"candidate"},
 		},
 		CustomCheck: func(msg *StandardMessage) error {
-			var iceData ICECandidateData
-			if err := msg.GetDataAs(&iceData); err != nil {
-				return fmt.Errorf("invalid ICE data format: %w", err)
+			// 验证 data 是否为 map
+			dataMap, ok := msg.Data.(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid ICE candidate data format: data must be an object")
 			}
 
-			if !strings.HasPrefix(iceData.Candidate, "candidate:") {
+			// 验证 candidate 对象
+			candidateObj, exists := dataMap["candidate"]
+			if !exists {
+				return fmt.Errorf("candidate object is required")
+			}
+
+			candidateMap, ok := candidateObj.(map[string]any)
+			if !ok {
+				return fmt.Errorf("candidate must be an object")
+			}
+
+			// 验证 candidate.candidate
+			candidateStr, exists := candidateMap["candidate"]
+			if !exists {
+				return fmt.Errorf("candidate.candidate is required")
+			}
+
+			if candStr, ok := candidateStr.(string); !ok {
+				return fmt.Errorf("candidate.candidate must be a string")
+			} else if !strings.HasPrefix(candStr, "candidate:") {
 				return fmt.Errorf("invalid candidate format: must start with 'candidate:'")
-			}
-
-			// 验证候选格式的基本结构
-			parts := strings.Fields(iceData.Candidate)
-			if len(parts) < 6 {
-				return fmt.Errorf("invalid candidate format: insufficient fields")
+			} else {
+				// 验证候选格式的基本结构
+				parts := strings.Fields(candStr)
+				if len(parts) < 6 {
+					return fmt.Errorf("invalid candidate format: insufficient fields")
+				}
 			}
 
 			return nil
 		},
 	}
 
-	// ERROR 消息格式验证器
+	// ERROR 消息格式验证器 - 保持不变，因为错误信息在顶层
 	v.formatValidators[MessageTypeError] = FormatValidator{
 		RequiredFields: []string{"error"},
 		CustomCheck: func(msg *StandardMessage) error {
@@ -195,12 +247,24 @@ func (v *MessageValidator) initDefaultValidators() {
 		},
 	}
 
-	// STATS 消息格式验证器
+	// STATS 消息格式验证器 - 按照文档规范
 	v.formatValidators[MessageTypeStats] = FormatValidator{
 		OptionalFields: []string{"data"},
 		DataSchema: &DataSchema{
 			Type: "object",
 			Properties: map[string]*PropertySchema{
+				"webrtc": {
+					Type:        "object",
+					Description: "WebRTC statistics",
+				},
+				"system": {
+					Type:        "object",
+					Description: "System statistics",
+				},
+				"network": {
+					Type:        "object",
+					Description: "Network statistics",
+				},
 				"session_id": {
 					Type:        "string",
 					Description: "Session identifier",
@@ -250,32 +314,27 @@ func (v *MessageValidator) initDefaultValidators() {
 	}
 }
 
-// initDefaultContentRules 初始化默认内容验证规则
+// initDefaultContentRules 按照文档规范初始化默认内容验证规则
 func (v *MessageValidator) initDefaultContentRules() {
-	// HELLO 消息内容规则
+	// HELLO 消息内容规则 - 验证 peer_id 在顶层
 	v.contentRules[MessageTypeHello] = []ContentRule{
 		{
 			Name:        "peer_id_format",
-			Description: "Validate peer ID format",
+			Description: "Validate peer ID format in message top level",
 			Severity:    SeverityError,
 			Enabled:     true,
 			Validator: func(msg *StandardMessage) error {
-				var helloData HelloData
-				if err := msg.GetDataAs(&helloData); err != nil {
-					return err
-				}
-
-				// 验证 peer ID 格式
-				if len(helloData.PeerID) < 3 {
+				// 验证顶层的 peer_id
+				if len(msg.PeerID) < 3 {
 					return fmt.Errorf("peer ID too short")
 				}
 
-				if len(helloData.PeerID) > 256 {
+				if len(msg.PeerID) > 256 {
 					return fmt.Errorf("peer ID too long")
 				}
 
 				// 检查是否包含非法字符
-				if strings.ContainsAny(helloData.PeerID, " \t\n\r") {
+				if strings.ContainsAny(msg.PeerID, " \t\n\r") {
 					return fmt.Errorf("peer ID contains invalid characters")
 				}
 
@@ -288,18 +347,30 @@ func (v *MessageValidator) initDefaultContentRules() {
 			Severity:    SeverityWarning,
 			Enabled:     true,
 			Validator: func(msg *StandardMessage) error {
-				var helloData HelloData
-				if err := msg.GetDataAs(&helloData); err != nil {
-					return err
+				dataMap, ok := msg.Data.(map[string]any)
+				if !ok {
+					return nil // 格式验证会处理这个问题
+				}
+
+				capabilitiesRaw, exists := dataMap["capabilities"]
+				if !exists {
+					return nil // 不是必需的
+				}
+
+				capabilities, ok := capabilitiesRaw.([]any)
+				if !ok {
+					return fmt.Errorf("capabilities must be an array")
 				}
 
 				// 检查是否有重复的能力
 				seen := make(map[string]bool)
-				for _, capability := range helloData.Capabilities {
-					if seen[capability] {
-						return fmt.Errorf("duplicate capability: %s", capability)
+				for _, capRaw := range capabilities {
+					if cap, ok := capRaw.(string); ok {
+						if seen[cap] {
+							return fmt.Errorf("duplicate capability: %s", cap)
+						}
+						seen[cap] = true
 					}
-					seen[capability] = true
 				}
 
 				return nil
@@ -307,23 +378,43 @@ func (v *MessageValidator) initDefaultContentRules() {
 		},
 	}
 
-	// SDP 消息内容规则 (OFFER/ANSWER)
+	// SDP 消息内容规则 (OFFER/ANSWER) - 按照文档规范
 	sdpRules := []ContentRule{
 		{
 			Name:        "sdp_structure",
-			Description: "Validate SDP structure",
+			Description: "Validate SDP structure in data.sdp.sdp",
 			Severity:    SeverityError,
 			Enabled:     true,
 			Validator: func(msg *StandardMessage) error {
-				var sdpData SDPData
-				if err := msg.GetDataAs(&sdpData); err != nil {
-					return err
+				dataMap, ok := msg.Data.(map[string]any)
+				if !ok {
+					return nil // 格式验证会处理这个问题
+				}
+
+				sdpObj, exists := dataMap["sdp"]
+				if !exists {
+					return nil // 格式验证会处理这个问题
+				}
+
+				sdpMap, ok := sdpObj.(map[string]any)
+				if !ok {
+					return nil // 格式验证会处理这个问题
+				}
+
+				sdpContent, exists := sdpMap["sdp"]
+				if !exists {
+					return nil // 格式验证会处理这个问题
+				}
+
+				sdpStr, ok := sdpContent.(string)
+				if !ok {
+					return nil // 格式验证会处理这个问题
 				}
 
 				// 检查必需的 SDP 行
 				requiredLines := []string{"v=", "o=", "s=", "t="}
 				for _, line := range requiredLines {
-					if !strings.Contains(sdpData.SDP, line) {
+					if !strings.Contains(sdpStr, line) {
 						return fmt.Errorf("missing required SDP line: %s", line)
 					}
 				}
@@ -337,13 +428,33 @@ func (v *MessageValidator) initDefaultContentRules() {
 			Severity:    SeverityWarning,
 			Enabled:     true,
 			Validator: func(msg *StandardMessage) error {
-				var sdpData SDPData
-				if err := msg.GetDataAs(&sdpData); err != nil {
-					return err
+				dataMap, ok := msg.Data.(map[string]any)
+				if !ok {
+					return nil
+				}
+
+				sdpObj, exists := dataMap["sdp"]
+				if !exists {
+					return nil
+				}
+
+				sdpMap, ok := sdpObj.(map[string]any)
+				if !ok {
+					return nil
+				}
+
+				sdpContent, exists := sdpMap["sdp"]
+				if !exists {
+					return nil
+				}
+
+				sdpStr, ok := sdpContent.(string)
+				if !ok {
+					return nil
 				}
 
 				// 检查是否包含媒体描述
-				if !strings.Contains(sdpData.SDP, "m=") {
+				if !strings.Contains(sdpStr, "m=") {
 					return fmt.Errorf("no media description found in SDP")
 				}
 
@@ -355,21 +466,41 @@ func (v *MessageValidator) initDefaultContentRules() {
 	v.contentRules[MessageTypeOffer] = sdpRules
 	v.contentRules[MessageTypeAnswer] = sdpRules
 
-	// ICE_CANDIDATE 消息内容规则
+	// ICE_CANDIDATE 消息内容规则 - 按照文档规范
 	v.contentRules[MessageTypeICECandidate] = []ContentRule{
 		{
 			Name:        "candidate_format",
-			Description: "Validate ICE candidate format",
+			Description: "Validate ICE candidate format in data.candidate.candidate",
 			Severity:    SeverityError,
 			Enabled:     true,
 			Validator: func(msg *StandardMessage) error {
-				var iceData ICECandidateData
-				if err := msg.GetDataAs(&iceData); err != nil {
-					return err
+				dataMap, ok := msg.Data.(map[string]any)
+				if !ok {
+					return nil
+				}
+
+				candidateObj, exists := dataMap["candidate"]
+				if !exists {
+					return nil
+				}
+
+				candidateMap, ok := candidateObj.(map[string]any)
+				if !ok {
+					return nil
+				}
+
+				candidateStr, exists := candidateMap["candidate"]
+				if !exists {
+					return nil
+				}
+
+				candStr, ok := candidateStr.(string)
+				if !ok {
+					return nil
 				}
 
 				// 解析候选字符串
-				parts := strings.Fields(iceData.Candidate)
+				parts := strings.Fields(candStr)
 				if len(parts) < 8 {
 					return fmt.Errorf("invalid candidate format: expected at least 8 fields, got %d", len(parts))
 				}
@@ -398,25 +529,14 @@ func (v *MessageValidator) initDefaultContentRules() {
 			Severity:    SeverityInfo,
 			Enabled:     true,
 			Validator: func(msg *StandardMessage) error {
-				var iceData ICECandidateData
-				if err := msg.GetDataAs(&iceData); err != nil {
-					return err
-				}
-
-				// 解析优先级
-				parts := strings.Fields(iceData.Candidate)
-				if len(parts) >= 4 {
-					// 这里可以添加优先级验证逻辑
-					// 目前只是一个示例
-					return nil
-				}
-
-				return fmt.Errorf("cannot validate candidate priority")
+				// 这里可以添加优先级验证逻辑
+				// 目前只是一个示例
+				return nil
 			},
 		},
 	}
 
-	// ERROR 消息内容规则
+	// ERROR 消息内容规则 - 保持不变
 	v.contentRules[MessageTypeError] = []ContentRule{
 		{
 			Name:        "error_code_format",
@@ -450,7 +570,7 @@ func (v *MessageValidator) initDefaultContentRules() {
 	}
 }
 
-// initDefaultSequenceRules 初始化默认序列验证规则
+// initDefaultSequenceRules 按照文档规范初始化默认序列验证规则
 func (v *MessageValidator) initDefaultSequenceRules() {
 	// WebRTC 握手序列规则
 	v.sequenceRules = append(v.sequenceRules, SequenceRule{
@@ -480,10 +600,10 @@ func (v *MessageValidator) initDefaultSequenceRules() {
 		},
 	})
 
-	// 消息时间戳序列规则
+	// 消息时间戳序列规则 - 注意文档使用毫秒时间戳
 	v.sequenceRules = append(v.sequenceRules, SequenceRule{
 		Name:        "timestamp_sequence",
-		Description: "Validate message timestamp sequence",
+		Description: "Validate message timestamp sequence (milliseconds)",
 		Severity:    SeverityWarning,
 		Enabled:     true,
 		Validator: func(history []MessageHistoryEntry) error {
@@ -491,14 +611,14 @@ func (v *MessageValidator) initDefaultSequenceRules() {
 				return nil
 			}
 
-			// 检查时间戳是否递增
+			// 检查时间戳是否递增（毫秒）
 			for i := 1; i < len(history); i++ {
 				prev := history[i-1]
 				curr := history[i]
 
 				if curr.Message.Timestamp < prev.Message.Timestamp {
-					timeDiff := prev.Message.Timestamp - curr.Message.Timestamp
-					if timeDiff > 60 { // 允许1分钟的时钟偏差
+					timeDiff := (prev.Message.Timestamp - curr.Message.Timestamp) / 1000 // 转换为秒
+					if timeDiff > 60 {                                                   // 允许1分钟的时钟偏差
 						return fmt.Errorf("message timestamp out of order by %d seconds", timeDiff)
 					}
 				}
@@ -574,7 +694,7 @@ func (v *MessageValidator) initDefaultSequenceRules() {
 		Severity:    SeverityError,
 		Enabled:     true,
 		Validator: func(history []MessageHistoryEntry) error {
-			if len(history) < 3 {
+			if len(history) < 1 {
 				return nil
 			}
 

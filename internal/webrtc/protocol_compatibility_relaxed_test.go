@@ -106,8 +106,8 @@ func TestProtocolCompatibility_RelaxedValidation(t *testing.T) {
 				var sdpData protocol.SDPData
 				err := result.Message.GetDataAs(&sdpData)
 				require.NoError(t, err)
-				assert.Equal(t, "offer", sdpData.Type)
-				assert.Contains(t, sdpData.SDP, "v=0")
+				assert.Equal(t, "offer", sdpData.SDP.Type)
+				assert.Contains(t, sdpData.SDP.SDP, "v=0")
 			},
 		},
 		{
@@ -146,7 +146,7 @@ func TestProtocolCompatibility_RelaxedValidation(t *testing.T) {
 				var helloData protocol.HelloData
 				err := result.Message.GetDataAs(&helloData)
 				require.NoError(t, err)
-				assert.Equal(t, "selkies-client", helloData.PeerID)
+				assert.NotNil(t, helloData.ClientInfo)
 			},
 		},
 		{

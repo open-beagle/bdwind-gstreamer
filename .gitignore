@@ -4,3 +4,4 @@
 /examples/debug_config.yaml
 /selkies-gstreamer
 /bdwind-gstreamer
+/cmd/bdwind-gstreamer/__debug_*

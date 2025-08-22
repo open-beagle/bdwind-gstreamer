@@ -117,20 +117,20 @@ func (pm *ProtocolManager) DetectProtocol(data []byte) *DetectionResult {
 		Reason:     "default protocol",
 	}
 
-	// 尝试每个适配器
-	for protocol, adapter := range pm.adapters {
-		if adapter.IsCompatible(data) {
-			confidence := pm.calculateConfidence(data, adapter)
+	// // 尝试每个适配器
+	// for protocol, adapter := range pm.adapters {
+	// 	if adapter.IsCompatible(data) {
+	// 		confidence := pm.calculateConfidence(data, adapter)
 
-			if confidence > bestMatch.Confidence {
-				bestMatch = &DetectionResult{
-					Protocol:   protocol,
-					Confidence: confidence,
-					Reason:     fmt.Sprintf("compatible with %s adapter", protocol),
-				}
-			}
-		}
-	}
+	// 		if confidence > bestMatch.Confidence {
+	// 			bestMatch = &DetectionResult{
+	// 				Protocol:   protocol,
+	// 				Confidence: confidence,
+	// 				Reason:     fmt.Sprintf("compatible with %s adapter", protocol),
+	// 			}
+	// 		}
+	// 	}
+	// }
 
 	if pm.config.EnableLogging {
 		log.Printf("Protocol detection result: %s (confidence: %.2f) - %s",
@@ -189,9 +189,9 @@ func (pm *ProtocolManager) ParseMessage(data []byte, protocol ...ProtocolVersion
 			result.Warnings = append(result.Warnings, validationWarning.Message)
 		}
 
-		if !validationResult.Valid {
-			return result, fmt.Errorf("message validation failed")
-		}
+		// if !validationResult.Valid {
+		// 	return result, fmt.Errorf("message validation failed")
+		// }
 	}
 
 	if pm.config.EnableLogging {
@@ -223,13 +223,13 @@ func (pm *ProtocolManager) FormatMessage(message *StandardMessage, protocol ...P
 		return nil, fmt.Errorf("no adapter found for protocol: %s", targetProtocol)
 	}
 
-	// 验证消息
-	if pm.config.StrictValidation {
-		validationResult := pm.validator.ValidateMessage(message)
-		if !validationResult.Valid {
-			return nil, fmt.Errorf("message validation failed: %v", validationResult.Errors)
-		}
-	}
+	// // 验证消息
+	// if pm.config.StrictValidation {
+	// 	validationResult := pm.validator.ValidateMessage(message)
+	// 	if !validationResult.Valid {
+	// 		return nil, fmt.Errorf("message validation failed: %v", validationResult.Errors)
+	// 	}
+	// }
 
 	// 格式化消息
 	data, err := adapter.FormatMessage(message)

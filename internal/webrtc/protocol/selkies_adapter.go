@@ -231,8 +231,9 @@ func (s *SelkiesAdapter) parseHelloMessage(messageText string) (*StandardMessage
 
 	// 创建标准消息
 	msg := NewStandardMessage(MessageTypeHello, peerID, HelloData{
-		PeerID:   peerID,
-		Metadata: metadata,
+		ClientInfo: &ClientInfo{
+			Platform: "selkies",
+		},
 	})
 
 	msg.Version = ProtocolVersionSelkies
@@ -277,8 +278,10 @@ func (s *SelkiesAdapter) parseSDPMessage(sdpData any, rawMessage map[string]any)
 
 	// 创建标准消息
 	msg := NewStandardMessage(msgType, peerID, SDPData{
-		Type: sdpType,
-		SDP:  sdpContent,
+		SDP: &SDPContent{
+			Type: sdpType,
+			SDP:  sdpContent,
+		},
 	})
 
 	msg.Version = ProtocolVersionSelkies
@@ -326,10 +329,18 @@ func (s *SelkiesAdapter) parseICEMessage(iceData any, rawMessage map[string]any)
 
 	// 创建标准消息
 	msg := NewStandardMessage(MessageTypeICECandidate, peerID, ICECandidateData{
-		Candidate:        candidate,
-		SDPMid:           &sdpMid,
-		SDPMLineIndex:    sdpMLineIndex,
-		UsernameFragment: &usernameFragment,
+		Candidate: &ICECandidate{
+			Candidate: candidate,
+			SDPMid:    &sdpMid,
+			SDPMLineIndex: func() *int {
+				if sdpMLineIndex != nil {
+					val := int(*sdpMLineIndex)
+					return &val
+				}
+				return nil
+			}(),
+			UsernameFragment: &usernameFragment,
+		},
 	})
 
 	msg.Version = ProtocolVersionSelkies
@@ -387,10 +398,10 @@ func (s *SelkiesAdapter) formatHelloMessage(msg *StandardMessage) ([]byte, error
 	}
 
 	// 构建 HELLO 消息: "HELLO ${peer_id} ${btoa(JSON.stringify(meta))}"
-	helloMsg := fmt.Sprintf("HELLO %s", helloData.PeerID)
+	helloMsg := fmt.Sprintf("HELLO %s", msg.PeerID)
 
-	if helloData.Metadata != nil && len(helloData.Metadata) > 0 {
-		metaBytes, err := json.Marshal(helloData.Metadata)
+	if helloData.ClientInfo != nil {
+		metaBytes, err := json.Marshal(helloData.ClientInfo)
 		if err == nil {
 			metaEncoded := base64.StdEncoding.EncodeToString(metaBytes)
 			helloMsg += " " + metaEncoded
@@ -410,8 +421,8 @@ func (s *SelkiesAdapter) formatSDPMessage(msg *StandardMessage) ([]byte, error) 
 	// 构建 Selkies SDP 消息格式
 	output := map[string]any{
 		"sdp": map[string]any{
-			"type": sdpData.Type,
-			"sdp":  sdpData.SDP,
+			"type": sdpData.SDP.Type,
+			"sdp":  sdpData.SDP.SDP,
 		},
 	}
 
@@ -431,19 +442,19 @@ func (s *SelkiesAdapter) formatICEMessage(msg *StandardMessage) ([]byte, error) 
 
 	// 构建 Selkies ICE 消息格式
 	iceOutput := map[string]any{
-		"candidate": iceData.Candidate,
+		"candidate": iceData.Candidate.Candidate,
 	}
 
-	if iceData.SDPMid != nil {
-		iceOutput["sdpMid"] = *iceData.SDPMid
+	if iceData.Candidate.SDPMid != nil {
+		iceOutput["sdpMid"] = *iceData.Candidate.SDPMid
 	}
 
-	if iceData.SDPMLineIndex != nil {
-		iceOutput["sdpMLineIndex"] = *iceData.SDPMLineIndex
+	if iceData.Candidate.SDPMLineIndex != nil {
+		iceOutput["sdpMLineIndex"] = *iceData.Candidate.SDPMLineIndex
 	}
 
-	if iceData.UsernameFragment != nil {
-		iceOutput["usernameFragment"] = *iceData.UsernameFragment
+	if iceData.Candidate.UsernameFragment != nil {
+		iceOutput["usernameFragment"] = *iceData.Candidate.UsernameFragment
 	}
 
 	output := map[string]any{
@@ -510,8 +521,8 @@ func (s *SelkiesAdapter) validateHelloMessage(msg *StandardMessage) error {
 		return fmt.Errorf("invalid hello data format: %w", err)
 	}
 
-	if helloData.PeerID == "" {
-		return fmt.Errorf("peer_id is required in hello data")
+	if helloData.ClientInfo == nil {
+		return fmt.Errorf("client_info is required in hello data")
 	}
 
 	return nil
@@ -528,17 +539,17 @@ func (s *SelkiesAdapter) validateSDPMessage(msg *StandardMessage) error {
 		return fmt.Errorf("invalid SDP data format: %w", err)
 	}
 
-	if sdpData.SDP == "" {
+	if sdpData.SDP == nil || sdpData.SDP.SDP == "" {
 		return fmt.Errorf("SDP content is required")
 	}
 
 	// 验证 SDP 类型
-	if msg.Type == MessageTypeOffer && sdpData.Type != "offer" {
-		return fmt.Errorf("invalid SDP type for offer message: %s", sdpData.Type)
+	if msg.Type == MessageTypeOffer && sdpData.SDP.Type != "offer" {
+		return fmt.Errorf("invalid SDP type for offer message: %s", sdpData.SDP.Type)
 	}
 
-	if msg.Type == MessageTypeAnswer && sdpData.Type != "answer" {
-		return fmt.Errorf("invalid SDP type for answer message: %s", sdpData.Type)
+	if msg.Type == MessageTypeAnswer && sdpData.SDP.Type != "answer" {
+		return fmt.Errorf("invalid SDP type for answer message: %s", sdpData.SDP.Type)
 	}
 
 	return nil
@@ -555,12 +566,12 @@ func (s *SelkiesAdapter) validateICEMessage(msg *StandardMessage) error {
 		return fmt.Errorf("invalid ICE data format: %w", err)
 	}
 
-	if iceData.Candidate == "" {
+	if iceData.Candidate == nil || iceData.Candidate.Candidate == "" {
 		return fmt.Errorf("ICE candidate is required")
 	}
 
 	// 验证候选格式
-	if !strings.HasPrefix(iceData.Candidate, "candidate:") {
+	if !strings.HasPrefix(iceData.Candidate.Candidate, "candidate:") {
 		return fmt.Errorf("invalid candidate format: must start with 'candidate:'")
 	}
 

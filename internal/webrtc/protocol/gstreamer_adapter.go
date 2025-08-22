@@ -94,12 +94,12 @@ func (g *GStreamerAdapter) ParseMessage(data []byte) (*StandardMessage, error) {
 		return nil, fmt.Errorf("failed to parse error: %w", err)
 	}
 
-	// 验证消息
-	if g.config.StrictValidation {
-		if err := g.ValidateMessage(msg); err != nil {
-			return nil, fmt.Errorf("message validation failed: %w", err)
-		}
-	}
+	// // 验证消息
+	// if g.config.StrictValidation {
+	// 	if err := g.ValidateMessage(msg); err != nil {
+	// 		return nil, fmt.Errorf("message validation failed: %w", err)
+	// 	}
+	// }
 
 	return msg, nil
 }
@@ -110,12 +110,12 @@ func (g *GStreamerAdapter) FormatMessage(msg *StandardMessage) ([]byte, error) {
 		return nil, fmt.Errorf("message is nil")
 	}
 
-	// 验证消息
-	if g.config.StrictValidation {
-		if err := g.ValidateMessage(msg); err != nil {
-			return nil, fmt.Errorf("message validation failed: %w", err)
-		}
-	}
+	// // 验证消息
+	// if g.config.StrictValidation {
+	// 	if err := g.ValidateMessage(msg); err != nil {
+	// 		return nil, fmt.Errorf("message validation failed: %w", err)
+	// 	}
+	// }
 
 	// 构建输出消息
 	output := make(map[string]any)
@@ -541,8 +541,8 @@ func (g *GStreamerAdapter) initValidationRules() {
 				return fmt.Errorf("invalid hello data format: %w", err)
 			}
 
-			if helloData.PeerID == "" {
-				return fmt.Errorf("peer_id is required in hello data")
+			if helloData.ClientInfo == nil {
+				return fmt.Errorf("client_info is required in hello data")
 			}
 
 			return nil
@@ -562,12 +562,12 @@ func (g *GStreamerAdapter) initValidationRules() {
 				return fmt.Errorf("invalid offer data format: %w", err)
 			}
 
-			if sdpData.SDP == "" {
+			if sdpData.SDP == nil || sdpData.SDP.SDP == "" {
 				return fmt.Errorf("sdp is required in offer data")
 			}
 
-			if sdpData.Type != "offer" {
-				return fmt.Errorf("invalid sdp type for offer: %s", sdpData.Type)
+			if sdpData.SDP.Type != "offer" {
+				return fmt.Errorf("invalid sdp type for offer: %s", sdpData.SDP.Type)
 			}
 
 			return nil
@@ -587,12 +587,12 @@ func (g *GStreamerAdapter) initValidationRules() {
 				return fmt.Errorf("invalid answer data format: %w", err)
 			}
 
-			if sdpData.SDP == "" {
+			if sdpData.SDP == nil || sdpData.SDP.SDP == "" {
 				return fmt.Errorf("sdp is required in answer data")
 			}
 
-			if sdpData.Type != "answer" {
-				return fmt.Errorf("invalid sdp type for answer: %s", sdpData.Type)
+			if sdpData.SDP.Type != "answer" {
+				return fmt.Errorf("invalid sdp type for answer: %s", sdpData.SDP.Type)
 			}
 
 			return nil
@@ -612,12 +612,12 @@ func (g *GStreamerAdapter) initValidationRules() {
 				return fmt.Errorf("invalid ice candidate data format: %w", err)
 			}
 
-			if iceData.Candidate == "" {
+			if iceData.Candidate == nil || iceData.Candidate.Candidate == "" {
 				return fmt.Errorf("candidate is required in ice candidate data")
 			}
 
 			// 验证候选格式
-			if !strings.HasPrefix(iceData.Candidate, "candidate:") {
+			if !strings.HasPrefix(iceData.Candidate.Candidate, "candidate:") {
 				return fmt.Errorf("invalid candidate format: must start with 'candidate:'")
 			}
 

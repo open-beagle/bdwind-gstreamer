@@ -126,10 +126,10 @@ func TestProtocolCompatibility_MessageRouting(t *testing.T) {
 				var sdpData protocol.SDPData
 				err := result.Message.GetDataAs(&sdpData)
 				require.NoError(t, err)
-				assert.Equal(t, "offer", sdpData.Type)
-				assert.Contains(t, sdpData.SDP, "v=0")
-				assert.Contains(t, sdpData.SDP, "m=video")
-				assert.Contains(t, sdpData.SDP, "m=audio")
+				assert.Equal(t, "offer", sdpData.SDP.Type)
+				assert.Contains(t, sdpData.SDP.SDP, "v=0")
+				assert.Contains(t, sdpData.SDP.SDP, "m=video")
+				assert.Contains(t, sdpData.SDP.SDP, "m=audio")
 			},
 		},
 		{
@@ -154,10 +154,10 @@ func TestProtocolCompatibility_MessageRouting(t *testing.T) {
 				var iceData protocol.ICECandidateData
 				err := result.Message.GetDataAs(&iceData)
 				require.NoError(t, err)
-				assert.Contains(t, iceData.Candidate, "candidate:")
-				assert.Equal(t, "0", *iceData.SDPMid)
-				assert.Equal(t, uint16(0), *iceData.SDPMLineIndex)
-				assert.Equal(t, "test", *iceData.UsernameFragment)
+				assert.Contains(t, iceData.Candidate.Candidate, "candidate:")
+				assert.Equal(t, "0", *iceData.Candidate.SDPMid)
+				assert.Equal(t, 0, *iceData.Candidate.SDPMLineIndex)
+				assert.Equal(t, "test", *iceData.Candidate.UsernameFragment)
 			},
 		},
 		{
@@ -174,8 +174,8 @@ func TestProtocolCompatibility_MessageRouting(t *testing.T) {
 				var helloData protocol.HelloData
 				err := result.Message.GetDataAs(&helloData)
 				require.NoError(t, err)
-				assert.Equal(t, "selkies-client", helloData.PeerID)
-				assert.NotNil(t, helloData.Metadata)
+				assert.NotNil(t, helloData.ClientInfo)
+				assert.Equal(t, "selkies", helloData.ClientInfo.Platform)
 			},
 		},
 		{

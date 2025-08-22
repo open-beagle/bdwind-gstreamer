@@ -111,9 +111,11 @@ func TestStandardMessage_IsValid(t *testing.T) {
 func TestStandardMessage_GetDataAs(t *testing.T) {
 	// Test with valid data
 	helloData := HelloData{
-		PeerID:       "test-peer",
+		ClientInfo: &ClientInfo{
+			UserAgent: "test-agent",
+			Platform:  "test-platform",
+		},
 		Capabilities: []string{"webrtc", "input"},
-		Metadata:     map[string]any{"version": "1.0"},
 	}
 
 	msg := NewStandardMessage(MessageTypeHello, "test-peer", helloData)
@@ -124,8 +126,8 @@ func TestStandardMessage_GetDataAs(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	if retrievedData.PeerID != helloData.PeerID {
-		t.Errorf("Expected peer ID '%s', got '%s'", helloData.PeerID, retrievedData.PeerID)
+	if retrievedData.ClientInfo.UserAgent != helloData.ClientInfo.UserAgent {
+		t.Errorf("Expected user agent '%s', got '%s'", helloData.ClientInfo.UserAgent, retrievedData.ClientInfo.UserAgent)
 	}
 
 	if len(retrievedData.Capabilities) != len(helloData.Capabilities) {
@@ -224,13 +226,12 @@ func TestDefaultAdapterConfig(t *testing.T) {
 func TestMessageSerialization(t *testing.T) {
 	// Create a message with various data types
 	originalMsg := NewStandardMessage(MessageTypeHello, "test-peer", HelloData{
-		PeerID:       "test-peer",
-		Capabilities: []string{"webrtc", "input"},
-		Metadata: map[string]any{
-			"version": "1.0",
-			"number":  42,
-			"boolean": true,
+		ClientInfo: &ClientInfo{
+			UserAgent: "test-agent",
+			Platform:  "test-platform",
+			Version:   "1.0",
 		},
+		Capabilities: []string{"webrtc", "input"},
 	})
 
 	// Serialize to JSON
@@ -270,7 +271,7 @@ func TestMessageSerialization(t *testing.T) {
 		t.Fatalf("Failed to extract hello data: %v", err)
 	}
 
-	if helloData.PeerID != "test-peer" {
-		t.Errorf("Expected peer ID 'test-peer', got '%s'", helloData.PeerID)
+	if helloData.ClientInfo == nil || helloData.ClientInfo.UserAgent != "test-agent" {
+		t.Errorf("Expected client info with user agent 'test-agent', got %v", helloData.ClientInfo)
 	}
 }

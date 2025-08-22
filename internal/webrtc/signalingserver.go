@@ -1612,19 +1612,9 @@ func (c *SignalingClient) handleHelloMessage(message *protocol.StandardMessage) 
 		return
 	}
 
-	// 更新客户端信息
-	if helloData.PeerID != "" {
-		c.ID = helloData.PeerID
-	}
-
 	// 发送欢迎响应
 	welcomeData := &protocol.HelloData{
-		PeerID:       c.ID,
 		Capabilities: []string{"webrtc", "input", "stats", "protocol-negotiation"},
-		Metadata: map[string]any{
-			"server_version": "1.0.0",
-			"server_time":    time.Now().Unix(),
-		},
 	}
 
 	welcomeMessage := c.Server.messageRouter.CreateStandardResponse(
@@ -1923,8 +1913,10 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 
 	// 发送 Offer
 	sdpData := &protocol.SDPData{
-		Type: offer.Type.String(),
-		SDP:  offer.SDP,
+		SDP: &protocol.SDPContent{
+			Type: offer.Type.String(),
+			SDP:  offer.SDP,
+		},
 	}
 
 	offerMessage := c.Server.messageRouter.CreateStandardResponse(
@@ -2017,7 +2009,7 @@ func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage)
 	// 设置远程描述
 	answer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
-		SDP:  sdpData.SDP,
+		SDP:  sdpData.SDP.SDP,
 	}
 
 	if err := pc.SetRemoteDescription(answer); err != nil {
@@ -2071,15 +2063,16 @@ func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMe
 
 	// 创建 ICE 候选
 	candidate := webrtc.ICECandidateInit{
-		Candidate: iceData.Candidate,
+		Candidate: iceData.Candidate.Candidate,
 	}
 
-	if iceData.SDPMid != nil {
-		candidate.SDPMid = iceData.SDPMid
+	if iceData.Candidate.SDPMid != nil {
+		candidate.SDPMid = iceData.Candidate.SDPMid
 	}
 
-	if iceData.SDPMLineIndex != nil {
-		candidate.SDPMLineIndex = iceData.SDPMLineIndex
+	if iceData.Candidate.SDPMLineIndex != nil {
+		lineIndex := uint16(*iceData.Candidate.SDPMLineIndex)
+		candidate.SDPMLineIndex = &lineIndex
 	}
 
 	// 添加 ICE 候选
@@ -2138,21 +2131,27 @@ func (c *SignalingClient) handleGetStatsMessage(message *protocol.StandardMessag
 
 	// 收集统计信息
 	stats := &protocol.StatsData{
-		SessionID:        c.ID,
-		ConnectionState:  string(c.getState()),
-		MessagesSent:     c.MessageCount,
-		MessagesReceived: c.MessageCount,
-		BytesSent:        0, // TODO: 实现字节计数
-		BytesReceived:    0, // TODO: 实现字节计数
-		ConnectionTime:   time.Since(c.ConnectedAt).Seconds(),
-		LastActivity:     c.LastSeen.Unix(),
-		Quality:          "good", // TODO: 实现连接质量评估
-		Details: map[string]any{
-			"protocol":    c.Protocol,
-			"error_count": c.ErrorCount,
-			"last_error":  c.LastError,
-			"remote_addr": c.RemoteAddr,
-			"user_agent":  c.UserAgent,
+		WebRTC: &protocol.WebRTCStats{
+			BytesSent:       0, // TODO: 实现字节计数
+			BytesReceived:   0, // TODO: 实现字节计数
+			PacketsSent:     c.MessageCount,
+			PacketsReceived: c.MessageCount,
+			PacketsLost:     0,
+			Jitter:          0.0,
+			RTT:             0.0,
+			Bandwidth:       0,
+		},
+		System: &protocol.SystemStats{
+			CPUUsage:    0.0, // TODO: 实现系统统计
+			MemoryUsage: 0,
+			GPUUsage:    0.0,
+			FPS:         0,
+		},
+		Network: &protocol.NetworkStats{
+			ConnectionType: "websocket",
+			EffectiveType:  "4g",
+			Downlink:       0.0,
+			RTT:            0,
 		},
 	}
 

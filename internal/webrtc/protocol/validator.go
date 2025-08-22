@@ -169,9 +169,11 @@ func (v *MessageValidator) ValidateFormat(msg *StandardMessage) *ValidationResul
 	// 基本格式验证
 	v.validateBasicFormat(msg, result)
 
-	// 特定消息类型格式验证
-	if validator, exists := v.formatValidators[msg.Type]; exists {
-		v.applyFormatValidator(msg, validator, result)
+	// 特定消息类型格式验证（只有在消息不为空时才进行）
+	if msg != nil {
+		if validator, exists := v.formatValidators[msg.Type]; exists {
+			v.applyFormatValidator(msg, validator, result)
+		}
 	}
 
 	v.updateValidationSummary(result)

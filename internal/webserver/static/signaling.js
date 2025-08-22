@@ -209,7 +209,7 @@ class SignalingClient {
     const messageId = this._generateMessageId();
     const message = {
       type: type,
-      peer_id: this.peerId,
+      peer_id: String(this.peerId),
       data: data,
       message_id: messageId,
       timestamp: Date.now(),
@@ -925,7 +925,7 @@ class SignalingClient {
       const messageId = this._generateMessageId();
       const message = {
         type: "hello",
-        peer_id: this.peerId,
+        peer_id: String(this.peerId),
         data: {
           client_info: this._getClientInfo(),
           capabilities: this._getClientCapabilities(),

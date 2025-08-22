@@ -266,7 +266,7 @@ func ExampleSignalingServerWithMonitoring() {
 // RunAllExamples runs all performance monitoring examples
 func RunAllExamples() {
 	log.Printf("🎯 Running All Performance Monitoring Examples")
-	log.Printf("=" + fmt.Sprintf("%50s", "="))
+	log.Printf("%s", "="+fmt.Sprintf("%50s", "="))
 
 	log.Printf("\n1️⃣ Performance Monitoring Example")
 	ExamplePerformanceMonitoring()
