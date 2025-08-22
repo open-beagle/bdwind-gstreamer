@@ -37,16 +37,16 @@
 
 ### 字段说明
 
-| 字段 | 类型 | 必需 | 描述 |
-|------|------|------|------|
-| `version` | string | 是 | 协议版本号 |
-| `type` | string | 是 | 消息类型标识符 |
-| `id` | string | 是 | 唯一消息标识符 |
-| `timestamp` | number | 是 | Unix 时间戳（毫秒） |
-| `peer_id` | string | 否 | 对等端标识符 |
-| `data` | object | 否 | 消息载荷数据 |
-| `metadata` | object | 否 | 消息元数据 |
-| `error` | object | 否 | 错误信息（仅错误消息） |
+| 字段        | 类型   | 必需 | 描述                   |
+| ----------- | ------ | ---- | ---------------------- |
+| `version`   | string | 是   | 协议版本号             |
+| `type`      | string | 是   | 消息类型标识符         |
+| `id`        | string | 是   | 唯一消息标识符         |
+| `timestamp` | number | 是   | Unix 时间戳（毫秒）    |
+| `peer_id`   | string | 否   | 对等端标识符           |
+| `data`      | object | 否   | 消息载荷数据           |
+| `metadata`  | object | 否   | 消息元数据             |
+| `error`     | object | 否   | 错误信息（仅错误消息） |
 
 ## 连接管理消息
 
@@ -79,10 +79,7 @@
       "input-events",
       "statistics"
     ],
-    "supported_protocols": [
-      "gstreamer-1.0",
-      "selkies"
-    ],
+    "supported_protocols": ["gstreamer-1.0", "selkies"],
     "preferred_protocol": "gstreamer-1.0"
   }
 }
@@ -105,12 +102,7 @@
     "client_id": "client_001",
     "app_name": "default",
     "server_time": 1640995200001,
-    "server_capabilities": [
-      "webrtc",
-      "input",
-      "stats",
-      "recording"
-    ],
+    "server_capabilities": ["webrtc", "input", "stats", "recording"],
     "protocol": "gstreamer-1.0",
     "session_config": {
       "heartbeat_interval": 30000,
@@ -183,11 +175,7 @@
       "audio": true,
       "data_channel": true
     },
-    "codec_preferences": [
-      "H264",
-      "VP8",
-      "VP9"
-    ]
+    "codec_preferences": ["H264", "VP8", "VP9"]
   }
 }
 ```
@@ -206,10 +194,7 @@
   "timestamp": 1640995240001,
   "peer_id": "client_001",
   "data": {
-    "sdp": {
-      "type": "offer",
       "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 102 121 127 120 125 107 108 109 124 119 123 118 114 115 116\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\na=ice-ufrag:4ZcD\r\na=ice-pwd:2/1muCWoOi3uLifh0NuRHlM6\r\na=ice-options:trickle\r\na=fingerprint:sha-256 75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:FF:A6:22:D2:04\r\na=setup:actpass\r\na=mid:0\r\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\na=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=extmap:5 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\r\na=extmap:6 urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id\r\na=sendrecv\r\na=msid:- \r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtcp-fb:96 goog-remb\r\na=rtcp-fb:96 transport-cc\r\na=rtcp-fb:96 ccm fir\r\na=rtcp-fb:96 nack\r\na=rtcp-fb:96 nack pli\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\na=rtpmap:98 VP9/90000\r\na=rtcp-fb:98 goog-remb\r\na=rtcp-fb:98 transport-cc\r\na=rtcp-fb:98 ccm fir\r\na=rtcp-fb:98 nack\r\na=rtcp-fb:98 nack pli\r\na=fmtp:98 profile-id=0\r\na=rtpmap:99 rtx/90000\r\na=fmtp:99 apt=98\r\na=rtpmap:100 VP9/90000\r\na=rtcp-fb:100 goog-remb\r\na=rtcp-fb:100 transport-cc\r\na=rtcp-fb:100 ccm fir\r\na=rtcp-fb:100 nack\r\na=rtcp-fb:100 nack pli\r\na=fmtp:100 profile-id=2\r\na=rtpmap:101 rtx/90000\r\na=fmtp:101 apt=100\r\na=rtpmap:102 H264/90000\r\na=rtcp-fb:102 goog-remb\r\na=rtcp-fb:102 transport-cc\r\na=rtcp-fb:102 ccm fir\r\na=rtcp-fb:102 nack\r\na=rtcp-fb:102 nack pli\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\na=rtpmap:121 rtx/90000\r\na=fmtp:121 apt=102\r\na=rtpmap:127 H264/90000\r\na=rtcp-fb:127 goog-remb\r\na=rtcp-fb:127 transport-cc\r\na=rtcp-fb:127 ccm fir\r\na=rtcp-fb:127 nack\r\na=rtcp-fb:127 nack pli\r\na=fmtp:127 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\na=rtpmap:120 rtx/90000\r\na=fmtp:120 apt=127\r\na=rtpmap:125 H264/90000\r\na=rtcp-fb:125 goog-remb\r\na=rtcp-fb:125 transport-cc\r\na=rtcp-fb:125 ccm fir\r\na=rtcp-fb:125 nack\r\na=rtcp-fb:125 nack pli\r\na=fmtp:125 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\na=rtpmap:107 rtx/90000\r\na=fmtp:107 apt=125\r\na=rtpmap:108 H264/90000\r\na=rtcp-fb:108 goog-remb\r\na=rtcp-fb:108 transport-cc\r\na=rtcp-fb:108 ccm fir\r\na=rtcp-fb:108 nack\r\na=rtcp-fb:108 nack pli\r\na=fmtp:108 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f\r\na=rtpmap:109 rtx/90000\r\na=fmtp:109 apt=108\r\na=rtpmap:124 H264/90000\r\na=rtcp-fb:124 goog-remb\r\na=rtcp-fb:124 transport-cc\r\na=rtcp-fb:124 ccm fir\r\na=rtcp-fb:124 nack\r\na=rtcp-fb:124 nack pli\r\na=fmtp:124 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f\r\na=rtpmap:119 rtx/90000\r\na=fmtp:119 apt=124\r\na=rtpmap:123 H264/90000\r\na=rtcp-fb:123 goog-remb\r\na=rtcp-fb:123 transport-cc\r\na=rtcp-fb:123 ccm fir\r\na=rtcp-fb:123 nack\r\na=rtcp-fb:123 nack pli\r\na=fmtp:123 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f\r\na=rtpmap:118 rtx/90000\r\na=fmtp:118 apt=123\r\na=rtpmap:114 red/90000\r\na=rtpmap:115 rtx/90000\r\na=fmtp:115 apt=114\r\na=rtpmap:116 ulpfec/90000\r\na=ssrc-group:FID 2231627014 632943048\r\na=ssrc:2231627014 cname:bIU0fpgYFCaQMdau\r\na=ssrc:2231627014 msid:- \r\na=ssrc:2231627014 mslabel:-\r\na=ssrc:2231627014 label:\r\na=ssrc:632943048 cname:bIU0fpgYFCaQMdau\r\na=ssrc:632943048 msid:- \r\na=ssrc:632943048 mslabel:-\r\na=ssrc:632943048 label:\r\n"
-    },
     "ice_servers": [
       {
         "urls": ["stun:stun.l.google.com:19302"]
@@ -233,10 +218,7 @@
   "timestamp": 1640995250000,
   "peer_id": "client_001",
   "data": {
-    "sdp": {
-      "type": "answer",
-      "sdp": "v=0\r\no=- 1640995250000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\na=ice-ufrag:abcd\r\na=ice-pwd:efgh1234567890abcdef\r\na=ice-options:trickle\r\na=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\na=setup:active\r\na=mid:0\r\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\na=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:102 H264/90000\r\na=rtcp-fb:102 goog-remb\r\na=rtcp-fb:102 transport-cc\r\na=rtcp-fb:102 ccm fir\r\na=rtcp-fb:102 nack\r\na=rtcp-fb:102 nack pli\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n"
-    }
+    "sdp": "v=0\r\no=- 1640995250000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\na=ice-ufrag:abcd\r\na=ice-pwd:efgh1234567890abcdef\r\na=ice-options:trickle\r\na=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\na=setup:active\r\na=mid:0\r\na=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\na=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:102 H264/90000\r\na=rtcp-fb:102 goog-remb\r\na=rtcp-fb:102 transport-cc\r\na=rtcp-fb:102 ccm fir\r\na=rtcp-fb:102 nack\r\na=rtcp-fb:102 nack pli\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n"
   }
 }
 ```
@@ -421,21 +403,21 @@ ICE 候选交换消息。
 
 ### 错误代码定义
 
-| 错误代码 | 类型 | 描述 |
-|---------|------|------|
-| `CONNECTION_FAILED` | connection_error | 连接建立失败 |
-| `CONNECTION_TIMEOUT` | connection_error | 连接超时 |
-| `CONNECTION_LOST` | connection_error | 连接丢失 |
-| `INVALID_MESSAGE` | validation_error | 消息格式无效 |
-| `INVALID_MESSAGE_TYPE` | validation_error | 消息类型无效 |
-| `INVALID_MESSAGE_DATA` | validation_error | 消息数据无效 |
-| `MESSAGE_TOO_LARGE` | validation_error | 消息过大 |
-| `SDP_PROCESSING_FAILED` | webrtc_error | SDP 处理失败 |
-| `ICE_CANDIDATE_FAILED` | webrtc_error | ICE 候选处理失败 |
-| `PEER_CONNECTION_FAILED` | webrtc_error | 对等连接失败 |
-| `SERVER_UNAVAILABLE` | server_error | 服务器不可用 |
-| `INTERNAL_ERROR` | server_error | 内部错误 |
-| `RATE_LIMITED` | server_error | 请求频率限制 |
+| 错误代码                 | 类型             | 描述             |
+| ------------------------ | ---------------- | ---------------- |
+| `CONNECTION_FAILED`      | connection_error | 连接建立失败     |
+| `CONNECTION_TIMEOUT`     | connection_error | 连接超时         |
+| `CONNECTION_LOST`        | connection_error | 连接丢失         |
+| `INVALID_MESSAGE`        | validation_error | 消息格式无效     |
+| `INVALID_MESSAGE_TYPE`   | validation_error | 消息类型无效     |
+| `INVALID_MESSAGE_DATA`   | validation_error | 消息数据无效     |
+| `MESSAGE_TOO_LARGE`      | validation_error | 消息过大         |
+| `SDP_PROCESSING_FAILED`  | webrtc_error     | SDP 处理失败     |
+| `ICE_CANDIDATE_FAILED`   | webrtc_error     | ICE 候选处理失败 |
+| `PEER_CONNECTION_FAILED` | webrtc_error     | 对等连接失败     |
+| `SERVER_UNAVAILABLE`     | server_error     | 服务器不可用     |
+| `INTERNAL_ERROR`         | server_error     | 内部错误         |
+| `RATE_LIMITED`           | server_error     | 请求频率限制     |
 
 ## Selkies 兼容格式
 
@@ -448,6 +430,7 @@ HELLO 1 eyJyZXMiOiIxOTIweDEwODAiLCJzY2FsZSI6MX0=
 ```
 
 其中 Base64 编码的部分解码后为：
+
 ```json
 {
   "res": "1920x1080",
@@ -507,17 +490,9 @@ ERROR Invalid peer ID
   "timestamp": 1640995320000,
   "peer_id": "client_001",
   "data": {
-    "supported_protocols": [
-      "gstreamer-1.0",
-      "selkies"
-    ],
+    "supported_protocols": ["gstreamer-1.0", "selkies"],
     "preferred_protocol": "gstreamer-1.0",
-    "client_capabilities": [
-      "webrtc",
-      "datachannel",
-      "video",
-      "audio"
-    ]
+    "client_capabilities": ["webrtc", "datachannel", "video", "audio"]
   }
 }
 ```
@@ -536,15 +511,8 @@ ERROR Invalid peer ID
   "data": {
     "selected_protocol": "gstreamer-1.0",
     "protocol_version": "1.0",
-    "server_capabilities": [
-      "webrtc",
-      "input",
-      "stats",
-      "recording"
-    ],
-    "fallback_protocols": [
-      "selkies"
-    ]
+    "server_capabilities": ["webrtc", "input", "stats", "recording"],
+    "fallback_protocols": ["selkies"]
   }
 }
 ```
@@ -553,13 +521,13 @@ ERROR Invalid peer ID
 
 ### 大小限制
 
-| 消息类型 | 最大大小 | 说明 |
-|---------|---------|------|
-| 标准消息 | 64KB | 包含完整消息头和数据 |
-| SDP 消息 | 32KB | SDP 内容部分 |
-| ICE 候选 | 1KB | 单个 ICE 候选 |
-| 输入事件 | 512B | 鼠标/键盘事件 |
-| 统计数据 | 16KB | 统计信息响应 |
+| 消息类型 | 最大大小 | 说明                 |
+| -------- | -------- | -------------------- |
+| 标准消息 | 64KB     | 包含完整消息头和数据 |
+| SDP 消息 | 32KB     | SDP 内容部分         |
+| ICE 候选 | 1KB      | 单个 ICE 候选        |
+| 输入事件 | 512B     | 鼠标/键盘事件        |
+| 统计数据 | 16KB     | 统计信息响应         |
 
 ### 大消息处理
 

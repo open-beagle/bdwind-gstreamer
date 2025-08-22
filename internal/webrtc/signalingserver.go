@@ -428,32 +428,6 @@ func (s *SignalingServer) HandleWebSocketConnection(conn *websocket.Conn) {
 	// 先注册客户端
 	s.register <- client
 
-	// 发送欢迎消息
-	welcome := SignalingMessage{
-		Type:      "welcome",
-		PeerID:    client.ID,
-		MessageID: generateMessageID(),
-		Timestamp: now.Unix(),
-		Data: map[string]any{
-			"client_id":    client.ID,
-			"app_name":     client.AppName,
-			"server_time":  now.Unix(),
-			"capabilities": []string{"webrtc", "input", "stats"},
-		},
-	}
-
-	if err := client.sendMessage(welcome); err != nil {
-		log.Printf("Failed to send welcome message to client %s: %v", client.ID, err)
-		client.recordError(&SignalingError{
-			Code:    ErrorCodeConnectionFailed,
-			Message: "Failed to send welcome message",
-			Details: err.Error(),
-			Type:    "connection_error",
-		})
-		conn.Close()
-		return
-	}
-
 	// 设置连接状态为已连接
 	client.setState(ClientStateConnected)
 	log.Printf("Client %s successfully connected and welcomed", client.ID)

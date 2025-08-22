@@ -124,7 +124,7 @@ class SignalingClient {
           );
           this._protocolMode = "standard"; // 默认使用标准协议
         }
-      }  
+      }
 
       // 记录连接建立时间
       const connectionTime = performance.now() - this._connectionStartTime;
@@ -251,7 +251,7 @@ class SignalingClient {
     } else {
       // 标准格式 - 提取 SDP 字符串
       const sdpString = typeof sdp === "string" ? sdp : sdp.sdp;
-      this.sendMessage("answer", { sdp: sdpString });
+      this.sendMessage("answer", { sdp: { sdp: sdpString, type: "answer" } });
     }
   }
 
@@ -266,7 +266,14 @@ class SignalingClient {
       // 标准格式 - 提取候选字符串
       const candidateString =
         typeof candidate === "string" ? candidate : candidate.candidate;
-      this.sendMessage("ice-candidate", { candidate: candidateString });
+      this.sendMessage("ice-candidate", {
+        candidate: {
+          candidate: candidateString,
+          sdpMLineIndex: 0,
+          sdpMid: "video0",
+          usernameFragment: "bQPP",
+        },
+      });
     }
   }
 

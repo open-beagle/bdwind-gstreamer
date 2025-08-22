@@ -226,17 +226,6 @@ class WebRTCManager {
    * 处理 SDP - 优化版本
    */
   _onSDP(sdp) {
-    if (sdp.type !== "offer") {
-      this._setError("received SDP was not type offer.");
-      return;
-    }
-
-    // 验证 SDP 对象
-    if (!this._validateSDP(sdp)) {
-      this._setError("Invalid SDP received");
-      return;
-    }
-
     this.peerConnection
       .setRemoteDescription(sdp)
       .then(() => this.peerConnection.createAnswer())
@@ -252,18 +241,6 @@ class WebRTCManager {
       .catch((error) => {
         this._setError("Error processing SDP: " + error.message);
       });
-  }
-
-  /**
-   * 验证 SDP 对象
-   */
-  _validateSDP(sdp) {
-    return (
-      sdp &&
-      typeof sdp === "object" &&
-      typeof sdp.type === "string" &&
-      typeof sdp.sdp === "string"
-    );
   }
 
   /**
