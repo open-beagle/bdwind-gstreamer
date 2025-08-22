@@ -2,18 +2,18 @@
  * 优化的 WebRTC 管理器
  */
 class WebRTCManager {
-  constructor(signalingClient, videoElement, peerId, options = {}) {
+  constructor(signalingClient, mediaElement, peerId, options = {}) {
     // 验证必需参数
     if (!signalingClient) {
       throw new Error("SignalingClient is required");
     }
-    if (!videoElement) {
+    if (!mediaElement) {
       throw new Error("Video element is required");
     }
 
     // 核心参数
     this.signaling = signalingClient;
-    this.element = videoElement;
+    this.element = mediaElement;
     this.peer_id = peerId || 1;
 
     // 可选参数
@@ -119,28 +119,7 @@ class WebRTCManager {
 
       // 设置对等ID
       this.signaling.peerId = this.peer_id;
-
-      // 验证事件回调设置
-      this._verifyEventCallbacks();
     }
-  }
-
-  /**
-   * 验证事件回调设置
-   */
-  _verifyEventCallbacks() {
-    // 验证 SignalingClient 的回调
-    const callbacks = ["onopen", "onclose", "onerror", "onstatus"];
-    callbacks.forEach((callback) => {
-      if (
-        this.signaling[callback] &&
-        typeof this.signaling[callback] !== "function"
-      ) {
-        this.logger.warn(
-          `SignalingClient callback ${callback} not properly set`
-        );
-      }
-    });
   }
 
   /**
@@ -162,10 +141,6 @@ class WebRTCManager {
    * 初始化 WebRTC 管理器 - 优化版本
    */
   async initialize() {
-    if (!verifyWebRTCAdapter()) {
-      throw new Error("WebRTC Adapter 未正确加载");
-    }
-
     await this._fetchServerConfig();
     this.eventBus?.emit("webrtc:initialized", {
       iceServers: this.rtcPeerConfig.iceServers,
@@ -194,32 +169,12 @@ class WebRTCManager {
       // 设置对等ID
       this.signaling.peerId = this.peer_id;
 
-      // 验证信令连接方法
-      this._verifySignalingConnection();
-
       // 连接信令服务器
       this.signaling.connect();
     }
 
     this.connectionState = "connecting";
     this._connected = false;
-  }
-
-  /**
-   * 验证信令连接方法
-   */
-  _verifySignalingConnection() {
-    if (typeof this.signaling.connect !== "function") {
-      throw new Error("Signaling manager connect method not available");
-    }
-
-    // 检查连接状态方法
-    if (typeof this.signaling.getState !== "function") {
-      this.logger.warn("SignalingClient getState method not available");
-    }
-    if (typeof this.signaling.isConnected !== "function") {
-      this.logger.warn("SignalingClient isConnected method not available");
-    }
   }
 
   /**
@@ -443,11 +398,6 @@ class WebRTCManager {
       return;
     }
 
-    if (typeof this.signaling.sendICE !== "function") {
-      this._setError("Signaling manager sendICE method not available");
-      return;
-    }
-
     try {
       this.signaling.sendICE(candidate);
       this._setDebug("ICE candidate sent to signaling server");
@@ -469,15 +419,9 @@ class WebRTCManager {
         if (this._send_channel?.readyState === "open") {
           this._send_channel.close();
         }
-        if (this.element) {
-          this.element.load();
-        }
         break;
       case "failed":
         this._setError("Peer connection failed");
-        if (this.element) {
-          this.element.load();
-        }
         break;
     }
   }
@@ -494,7 +438,6 @@ class WebRTCManager {
       this.element
     ) {
       this.element.srcObject = event.streams[0];
-      this.playStream();
     }
 
     this.eventBus?.emit("webrtc:track-received", {
@@ -685,9 +628,6 @@ class WebRTCManager {
    * 设置信令客户端
    */
   setSignalingClient(signalingClient) {
-    // 验证新的信令客户端
-    this._validateSignalingClient(signalingClient);
-
     this.signaling = signalingClient;
     if (this.signaling) {
       this.signaling.onsdp = this._onSDP.bind(this);
@@ -695,76 +635,6 @@ class WebRTCManager {
 
       // 设置对等ID
       this.signaling.peerId = this.peer_id;
-    }
-  }
-
-  /**
-   * 测试 WebRTC 连接建立流程
-   */
-  async testConnectionFlow() {
-    const testResults = {
-      timestamp: Date.now(),
-      signalingValidation: false,
-      connectionMethods: false,
-      eventCallbacks: false,
-      webrtcIntegration: false,
-      errors: [],
-    };
-
-    try {
-      // 1. 验证信令管理器
-      if (!this.signaling) {
-        throw new Error("No signaling manager available");
-      }
-
-      this._validateSignalingClient(this.signaling);
-      testResults.signalingValidation = true;
-
-      // 2. 测试连接方法
-      const requiredMethods = ["connect", "disconnect", "sendSDP", "sendICE"];
-      const availableMethods = requiredMethods.filter(
-        (method) => typeof this.signaling[method] === "function"
-      );
-
-      if (availableMethods.length === requiredMethods.length) {
-        testResults.connectionMethods = true;
-      } else {
-        const missing = requiredMethods.filter(
-          (m) => !availableMethods.includes(m)
-        );
-        throw new Error(`Missing signaling methods: ${missing.join(", ")}`);
-      }
-
-      // 3. 验证事件回调
-      const callbacks = ["onsdp", "onice"];
-      const validCallbacks = callbacks.filter(
-        (callback) => typeof this.signaling[callback] === "function"
-      );
-
-      if (validCallbacks.length === callbacks.length) {
-        testResults.eventCallbacks = true;
-      } else {
-        this.logger.warn("Some event callbacks not properly set");
-        testResults.eventCallbacks = false;
-      }
-
-      // 4. 测试 WebRTC 集成
-      if (this.peerConnection) {
-        const state = this.getConnectionState();
-        testResults.webrtcIntegration = state.signaling.available;
-      } else {
-        testResults.webrtcIntegration = true; // 没有活动连接时认为集成正常
-      }
-
-      this.logger.info(
-        "WebRTC connection flow test completed successfully",
-        testResults
-      );
-      return testResults;
-    } catch (error) {
-      testResults.errors.push(error.message);
-      this.logger.error("WebRTC connection flow test failed:", error);
-      return testResults;
     }
   }
 
@@ -826,11 +696,4 @@ class WebRTCManager {
   _setConnectionState(state) {
     if (this.onconnectionstatechange) this.onconnectionstatechange(state);
   }
-}
-
-// 导出类
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = { WebRTCManager };
-} else if (typeof window !== "undefined") {
-  window.WebRTCManager = WebRTCManager;
 }

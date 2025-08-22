@@ -60,10 +60,6 @@ class ApplicationManager {
    * 初始化核心组件
    */
   async initializeCore() {
-    if (typeof verifyWebRTCAdapter === "function" && !verifyWebRTCAdapter()) {
-      throw new Error("WebRTC Adapter 未正确加载，无法继续初始化");
-    }
-
     this.eventBus = new EventBus();
     this.config = new ConfigManager(this.eventBus);
     await this.config.loadConfig();
@@ -196,10 +192,6 @@ class ApplicationManager {
    * 连接信令服务器
    */
   async connectSignaling() {
-    if (this.modules.signaling) {
-      await this.modules.signaling.connect();
-    }
-
     if (this.modules.webrtc) {
       this.modules.webrtc.connect();
     }
@@ -226,11 +218,11 @@ class ApplicationManager {
       this.updateBasicStatus("error", errorMessage);
     }
 
-    setTimeout(() => {
-      if (this.modules.signaling) {
-        this.modules.signaling.connect().catch(() => {});
-      }
-    }, 3000);
+    // setTimeout(() => {
+    //   if (this.modules.signaling) {
+    //     this.modules.signaling.connect().catch(() => {});
+    //   }
+    // }, 3000);
   }
 
   /**
@@ -250,11 +242,11 @@ class ApplicationManager {
       this.updateBasicStatus("error", errorMessage);
     }
 
-    setTimeout(() => {
-      if (this.modules.webrtc) {
-        this.modules.webrtc.reset();
-      }
-    }, 3000);
+    // setTimeout(() => {
+    //   if (this.modules.webrtc) {
+    //     this.modules.webrtc.reset();
+    //   }
+    // }, 3000);
   }
 
   /**
@@ -346,8 +338,7 @@ class ApplicationManager {
       modules: this.modules,
       eventBus: this.eventBus,
       config: this.config,
-      startCapture: () => this.startCapture(),
-      stopCapture: () => this.stopCapture(),
+      playStream: () => this.playStream(),
       updateStats: () => this.updateStats(),
     };
 
@@ -573,34 +564,16 @@ class ApplicationManager {
   /**
    * 开始捕获
    */
-  async startCapture() {
+  async playStream() {
     if (!this.modules.webrtc) {
       throw new Error("WebRTC模块未初始化");
     }
 
-    this.modules.webrtc.connect();
+    this.modules.webrtc.playStream();
     this.state.isCapturing = true;
 
     return { success: true };
   }
-
-  /**
-   * 停止捕获
-   */
-  async stopCapture() {
-    if (this.modules.webrtc) {
-      this.modules.webrtc.reset();
-    }
-
-    if (this.modules.signaling) {
-      this.modules.signaling.disconnect();
-    }
-
-    this.state.isCapturing = false;
-    return { success: true };
-  }
-
-
 }
 
 // 创建应用管理器实例
@@ -681,34 +654,13 @@ function setVolume(value) {
   }
 }
 
-function startCapture() {
+function playStream() {
   if (window.appManager) {
-    return window.appManager.startCapture();
+    return window.appManager.playStream();
   } else if (window.app && window.app.manager) {
-    return window.app.manager.startCapture();
+    return window.app.manager.playStream();
   } else {
     console.error("应用管理器未找到");
-  }
-}
-
-function stopCapture() {
-  if (window.appManager) {
-    return window.appManager.stopCapture();
-  } else if (window.app && window.app.manager) {
-    return window.app.manager.stopCapture();
-  } else {
-    console.error("应用管理器未找到");
-  }
-}
-
-function stopReconnecting() {
-  if (window.appManager && window.appManager.modules.signaling) {
-    window.appManager.modules.signaling.disconnect();
-  }
-
-  const stopBtn = document.getElementById("stop-reconnect-btn");
-  if (stopBtn) {
-    stopBtn.style.display = "none";
   }
 }
 
@@ -781,9 +733,7 @@ window.toggleVideoPlay = toggleVideoPlay;
 window.toggleFullscreen = toggleFullscreen;
 window.toggleAudioMute = toggleAudioMute;
 window.setVolume = setVolume;
-window.startCapture = startCapture;
-window.stopCapture = stopCapture;
-window.stopReconnecting = stopReconnecting;
+window.playStream = playStream;
 window.getDisplays = getDisplays;
 window.executeQuickTests = executeQuickTests;
 window.switchMonitoringTab = switchMonitoringTab;

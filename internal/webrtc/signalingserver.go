@@ -14,8 +14,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 	"github.com/pion/webrtc/v4"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 )
 
 // SignalingMessage 信令消息
@@ -98,9 +99,13 @@ type SignalingServer struct {
 	messageRouter         *MessageRouter
 	protocolManager       *protocol.ProtocolManager
 	protocolNegotiator    *ProtocolNegotiator
-	eventBus              EventBus // 事件总线
-	ctx                   context.Context
-	cancel                context.CancelFunc
+
+	// 性能监控
+	performanceMonitor *PerformanceMonitor
+	concurrentRouter   *ConcurrentMessageRouter
+	eventBus           EventBus // 事件总线
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 // EventBus 简单的事件总线接口
@@ -200,6 +205,13 @@ func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConf
 	negotiatorConfig.EnableProtocolSwitch = true
 	protocolNegotiator := NewProtocolNegotiator(messageRouter, negotiatorConfig)
 
+	// 创建性能监控器
+	performanceMonitor := NewPerformanceMonitor(DefaultPerformanceMonitorConfig())
+
+	// 创建并发消息路由器
+	concurrentRouterConfig := DefaultConcurrentRouterConfig()
+	concurrentRouter := NewConcurrentMessageRouter(messageRouter, concurrentRouterConfig, performanceMonitor)
+
 	server := &SignalingServer{
 		clients:               make(map[string]*SignalingClient),
 		apps:                  make(map[string]map[string]*SignalingClient),
@@ -209,6 +221,8 @@ func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConf
 		protocolManager:       protocolManager,
 		messageRouter:         messageRouter,
 		protocolNegotiator:    protocolNegotiator,
+		performanceMonitor:    performanceMonitor,
+		concurrentRouter:      concurrentRouter,
 		eventBus:              eventBus,
 		broadcast:             make(chan []byte),
 		register:              make(chan *SignalingClient),
@@ -281,6 +295,27 @@ func (s *SignalingServer) Start() {
 	log.Printf("🚀 Starting signaling server...")
 	s.running = true
 
+	// 启动性能监控器
+	if s.performanceMonitor != nil {
+		s.performanceMonitor.Start()
+		log.Printf("✅ Performance monitor started")
+
+		// 添加性能警报回调
+		s.performanceMonitor.AddAlertCallback(func(alert *PerformanceAlert) {
+			log.Printf("🚨 Performance Alert: %s - %s", alert.Type, alert.Message)
+			// 可以在这里添加更多的警报处理逻辑，如发送通知等
+		})
+	}
+
+	// 启动并发消息路由器
+	if s.concurrentRouter != nil {
+		if err := s.concurrentRouter.Start(); err != nil {
+			log.Printf("❌ Failed to start concurrent router: %v", err)
+		} else {
+			log.Printf("✅ Concurrent message router started")
+		}
+	}
+
 	// 启动清理协程
 	go s.cleanupRoutine()
 	log.Printf("✅ Signaling server cleanup routine started")
@@ -314,6 +349,21 @@ func (s *SignalingServer) Stop() {
 	log.Printf("🛑 Stopping signaling server...")
 	s.running = false
 	s.cancel()
+
+	// 停止并发消息路由器
+	if s.concurrentRouter != nil {
+		if err := s.concurrentRouter.Stop(); err != nil {
+			log.Printf("❌ Error stopping concurrent router: %v", err)
+		} else {
+			log.Printf("✅ Concurrent message router stopped")
+		}
+	}
+
+	// 停止性能监控器
+	if s.performanceMonitor != nil {
+		s.performanceMonitor.Stop()
+		log.Printf("✅ Performance monitor stopped")
+	}
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -476,6 +526,11 @@ func (s *SignalingServer) registerClient(client *SignalingClient) {
 	totalClients := len(s.clients)
 	appClients := len(s.apps[client.AppName])
 
+	// 记录连接事件到性能监控器
+	if s.performanceMonitor != nil {
+		s.performanceMonitor.RecordConnectionEvent("connect", client.ID, client.AppName)
+	}
+
 	log.Printf("✅ Client %s registered for app %s (total clients: %d, app clients: %d)",
 		client.ID, client.AppName, totalClients, appClients)
 }
@@ -500,6 +555,11 @@ func (s *SignalingServer) unregisterClient(client *SignalingClient) {
 
 		totalClients := len(s.clients)
 		connectionDuration := time.Since(client.ConnectedAt)
+
+		// 记录断开连接事件到性能监控器
+		if s.performanceMonitor != nil {
+			s.performanceMonitor.RecordConnectionEvent("disconnect", client.ID, client.AppName)
+		}
 
 		log.Printf("❌ Client %s unregistered from app %s (connected for: %v, messages: %d, errors: %d, remaining clients: %d)",
 			client.ID, client.AppName, connectionDuration, client.MessageCount, client.ErrorCount, totalClients)
@@ -585,6 +645,104 @@ func (s *SignalingServer) GetAppClientCount(appName string) int {
 	}
 
 	return 0
+}
+
+// GetPerformanceStats 获取性能统计信息
+func (s *SignalingServer) GetPerformanceStats() map[string]interface{} {
+	if s.performanceMonitor == nil {
+		return map[string]interface{}{
+			"error": "Performance monitor not available",
+		}
+	}
+
+	return s.performanceMonitor.GetStats()
+}
+
+// GetMessageStats 获取消息处理统计
+func (s *SignalingServer) GetMessageStats() *MessageProcessingStats {
+	if s.performanceMonitor == nil {
+		return nil
+	}
+
+	return s.performanceMonitor.GetMessageStats()
+}
+
+// GetConnectionStats 获取连接统计
+func (s *SignalingServer) GetConnectionStats() *ConnectionStats {
+	if s.performanceMonitor == nil {
+		return nil
+	}
+
+	return s.performanceMonitor.GetConnectionStats()
+}
+
+// GetSystemStats 获取系统统计
+func (s *SignalingServer) GetSystemStats() *SystemStats {
+	if s.performanceMonitor == nil {
+		return nil
+	}
+
+	return s.performanceMonitor.GetSystemStats()
+}
+
+// GetConcurrentRouterStats 获取并发路由器统计
+func (s *SignalingServer) GetConcurrentRouterStats() *ConcurrentRoutingStats {
+	if s.concurrentRouter == nil {
+		return nil
+	}
+
+	return s.concurrentRouter.GetStats()
+}
+
+// GetDetailedPerformanceReport 获取详细性能报告
+func (s *SignalingServer) GetDetailedPerformanceReport() map[string]interface{} {
+	report := make(map[string]interface{})
+
+	// 基础服务器统计
+	s.mutex.RLock()
+	report["server_stats"] = map[string]interface{}{
+		"total_clients": len(s.clients),
+		"total_apps":    len(s.apps),
+		"running":       s.running,
+	}
+
+	// 按应用的客户端统计
+	appStats := make(map[string]interface{})
+	for appName, clients := range s.apps {
+		appStats[appName] = len(clients)
+	}
+	report["app_client_counts"] = appStats
+	s.mutex.RUnlock()
+
+	// 性能监控统计
+	if s.performanceMonitor != nil {
+		report["performance_monitor"] = s.performanceMonitor.GetStats()
+	}
+
+	// 并发路由器统计
+	if s.concurrentRouter != nil {
+		report["concurrent_router"] = s.concurrentRouter.GetDetailedStats()
+	}
+
+	// PeerConnection管理器统计
+	if s.peerConnectionManager != nil {
+		report["peer_connection_manager"] = s.peerConnectionManager.GetMetrics()
+	}
+
+	// 消息路由器统计
+	if s.messageRouter != nil {
+		report["message_router"] = s.messageRouter.GetStats()
+	}
+
+	return report
+}
+
+// ResetPerformanceStats 重置性能统计
+func (s *SignalingServer) ResetPerformanceStats() {
+	if s.performanceMonitor != nil {
+		s.performanceMonitor.ResetStats()
+		log.Printf("✅ Performance statistics reset")
+	}
 }
 
 // cleanupRoutine 清理过期连接
@@ -1093,6 +1251,54 @@ func min(a, b int) int {
 	return b
 }
 
+// getLastErrorInfo 获取最后一个错误的信息
+func (c *SignalingClient) getLastErrorInfo() map[string]any {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if c.LastError == nil {
+		return nil
+	}
+
+	return map[string]any{
+		"code":    c.LastError.Code,
+		"message": c.LastError.Message,
+		"details": c.LastError.Details,
+		"type":    c.LastError.Type,
+	}
+}
+
+// recordMessageProcessingMetrics 记录消息处理性能指标
+func (c *SignalingClient) recordMessageProcessingMetrics(messageType string, processingTime time.Duration, success bool) {
+	// 记录处理时间统计
+	log.Printf("📊 Message processing metrics for client %s - Type: %s, Duration: %dms, Success: %t",
+		c.ID, messageType, processingTime.Milliseconds(), success)
+
+	// 如果处理时间过长，记录警告
+	if processingTime > 1*time.Second {
+		log.Printf("⚠️ Slow message processing detected for client %s - Type: %s, Duration: %dms",
+			c.ID, messageType, processingTime.Milliseconds())
+	}
+
+	// 更新客户端统计信息
+	c.mutex.Lock()
+	if !success {
+		c.ErrorCount++
+	}
+	c.mutex.Unlock()
+
+	// 发送性能指标事件
+	if c.Server.eventBus != nil {
+		c.Server.eventBus.Emit("message:processing-metrics", map[string]any{
+			"client_id":       c.ID,
+			"message_type":    messageType,
+			"processing_time": processingTime.Milliseconds(),
+			"success":         success,
+			"timestamp":       time.Now().Unix(),
+		})
+	}
+}
+
 // readPump 读取客户端消息
 func (c *SignalingClient) readPump() {
 	defer func() {
@@ -1244,19 +1450,57 @@ func (c *SignalingClient) writePump() {
 
 // handleMessageWithRouter 使用消息路由器处理客户端消息
 func (c *SignalingClient) handleMessageWithRouter(messageBytes []byte) {
+	startTime := time.Now()
+
 	// 如果是第一条消息且未检测协议，进行协议自动检测
 	if c.MessageCount == 1 && !c.ProtocolDetected {
 		c.autoDetectProtocol(messageBytes)
 	}
 
-	// 使用消息路由器解析消息
-	routeResult, err := c.Server.messageRouter.RouteMessage(messageBytes, c.ID)
-	if err != nil {
-		log.Printf("❌ Failed to route message from client %s: %v", c.ID, err)
+	// 优先使用并发路由器（如果可用且启用）
+	var routeResult *RouteResult
+	var err error
+	var routingMethod string
 
-		// 尝试协议降级处理
-		c.handleProtocolError("MESSAGE_ROUTING_FAILED", err.Error())
-		return
+	if c.Server.concurrentRouter != nil && c.Server.performanceMonitor != nil &&
+		c.Server.performanceMonitor.config.EnableConcurrentRouting {
+		routingMethod = "concurrent"
+		routeResult, err = c.Server.concurrentRouter.RouteMessage(messageBytes, c.ID)
+	} else {
+		routingMethod = "standard"
+		routeResult, err = c.Server.messageRouter.RouteMessage(messageBytes, c.ID)
+	}
+
+	routingTime := time.Since(startTime)
+
+	// 记录路由性能指标
+	if c.Server.performanceMonitor != nil {
+		c.Server.performanceMonitor.RecordRoutingStats(routingMethod, routingTime, err == nil)
+	}
+
+	if err != nil {
+		log.Printf("❌ Failed to route message from client %s using %s router: %v", c.ID, routingMethod, err)
+
+		// 如果并发路由失败，尝试标准路由作为回退
+		if routingMethod == "concurrent" {
+			log.Printf("🔄 Falling back to standard router for client %s", c.ID)
+			fallbackStart := time.Now()
+			routeResult, err = c.Server.messageRouter.RouteMessage(messageBytes, c.ID)
+			fallbackTime := time.Since(fallbackStart)
+
+			if c.Server.performanceMonitor != nil {
+				c.Server.performanceMonitor.RecordRoutingStats("fallback", fallbackTime, err == nil)
+			}
+
+			if err != nil {
+				log.Printf("❌ Fallback routing also failed for client %s: %v", c.ID, err)
+				c.handleProtocolError("MESSAGE_ROUTING_FAILED", err.Error())
+				return
+			}
+		} else {
+			c.handleProtocolError("MESSAGE_ROUTING_FAILED", err.Error())
+			return
+		}
 	}
 
 	// 记录路由结果中的警告
@@ -1308,11 +1552,16 @@ func (c *SignalingClient) handleStandardMessage(message *protocol.StandardMessag
 		return
 	}
 
+	startTime := time.Now()
+	messageType := string(message.Type)
+
 	log.Printf("📨 Processing standard message from client %s: type=%s, protocol=%s",
 		c.ID, message.Type, originalProtocol)
 
 	// 更新客户端最后活动时间
 	c.LastSeen = time.Now()
+
+	var success bool = true
 
 	// 根据消息类型处理
 	switch message.Type {
@@ -1336,6 +1585,18 @@ func (c *SignalingClient) handleStandardMessage(message *protocol.StandardMessag
 		log.Printf("⚠️ Unhandled message type from client %s: %s", c.ID, message.Type)
 		c.sendStandardErrorMessage("UNSUPPORTED_MESSAGE_TYPE",
 			fmt.Sprintf("Message type '%s' is not supported", message.Type), "")
+		success = false
+	}
+
+	// 记录消息处理性能指标
+	processingTime := time.Since(startTime)
+
+	// 使用现有的方法记录指标
+	c.recordMessageProcessingMetrics(messageType, processingTime, success)
+
+	// 同时记录到性能监控器
+	if c.Server.performanceMonitor != nil {
+		c.Server.performanceMonitor.RecordMessageProcessing(c.ID, messageType, processingTime, success)
 	}
 }
 
@@ -1376,69 +1637,289 @@ func (c *SignalingClient) handleHelloMessage(message *protocol.StandardMessage) 
 
 // handlePingMessage 处理 PING 消息
 func (c *SignalingClient) handlePingMessage(message *protocol.StandardMessage) {
-	log.Printf("🏓 Received PING from client %s", c.ID)
+	startTime := time.Now()
+	log.Printf("🏓 Received PING from client %s (messageID: %s)", c.ID, message.ID)
+
+	// 记录客户端状态跟踪信息
+	c.mutex.RLock()
+	clientState := c.State
+	lastSeen := c.LastSeen
+	messageCount := c.MessageCount
+	errorCount := c.ErrorCount
+	c.mutex.RUnlock()
+
+	log.Printf("📊 Client %s state tracking - State: %s, LastSeen: %v ago, Messages: %d, Errors: %d",
+		c.ID, clientState, time.Since(lastSeen), messageCount, errorCount)
+
+	// 解析ping数据并记录详细信息
+	var pingTimestamp int64
+	var clientStateInfo string
+	var additionalData map[string]any
+
+	if message.Data != nil {
+		if pingData, ok := message.Data.(map[string]any); ok {
+			additionalData = pingData
+			if timestamp, exists := pingData["timestamp"]; exists {
+				// 处理不同类型的时间戳
+				switch ts := timestamp.(type) {
+				case float64:
+					pingTimestamp = int64(ts)
+				case int64:
+					pingTimestamp = ts
+				case int:
+					pingTimestamp = int64(ts)
+				}
+				if pingTimestamp > 0 {
+					log.Printf("🏓 Ping from client %s with timestamp: %d (latency: %dms)",
+						c.ID, pingTimestamp, time.Now().Unix()-pingTimestamp)
+				}
+			}
+			if state, exists := pingData["client_state"]; exists {
+				if stateStr, ok := state.(string); ok {
+					clientStateInfo = stateStr
+					log.Printf("📊 Client %s reported state: %s", c.ID, clientStateInfo)
+				}
+			}
+			// 记录其他ping数据
+			if len(pingData) > 2 { // 除了timestamp和client_state之外的数据
+				log.Printf("📋 Additional ping data from client %s: %+v", c.ID, additionalData)
+			}
+		}
+	}
 
 	// 创建 PONG 响应
+	serverTime := time.Now().Unix()
 	pongData := map[string]any{
-		"timestamp":   time.Now().Unix(),
+		"timestamp":   serverTime,
 		"client_id":   c.ID,
-		"server_time": time.Now().Unix(),
+		"server_time": serverTime,
 	}
 
 	// 如果 PING 消息包含时间戳，添加到响应中
-	if message.Data != nil {
-		if pingData, ok := message.Data.(map[string]any); ok {
-			if timestamp, exists := pingData["timestamp"]; exists {
-				pongData["ping_timestamp"] = timestamp
-			}
-		}
+	if pingTimestamp > 0 {
+		pongData["ping_timestamp"] = pingTimestamp
+		pongData["round_trip_time"] = serverTime - pingTimestamp
+	}
+
+	// 如果 PING 消息包含客户端状态，添加到响应中
+	if clientStateInfo != "" {
+		pongData["client_state"] = clientStateInfo
+	}
+
+	// 添加服务器状态信息
+	pongData["server_state"] = map[string]any{
+		"client_count":   c.Server.GetClientCount(),
+		"uptime_seconds": time.Since(c.ConnectedAt).Seconds(),
+		"message_count":  messageCount,
+		"error_count":    errorCount,
+		"last_error":     c.getLastErrorInfo(),
 	}
 
 	pongMessage := c.Server.messageRouter.CreateStandardResponse(
 		protocol.MessageTypePong, c.ID, pongData)
 
-	if err := c.sendStandardMessage(pongMessage); err != nil {
-		log.Printf("❌ Failed to send pong message to client %s: %v", c.ID, err)
+	// 记录处理性能指标
+	processingTime := time.Since(startTime)
+
+	sendErr := c.sendStandardMessage(pongMessage)
+	if sendErr != nil {
+		// 增强错误处理和上下文信息
+		errorContext := map[string]any{
+			"client_id":       c.ID,
+			"message_id":      message.ID,
+			"processing_time": processingTime.Milliseconds(),
+			"client_state":    clientState,
+			"ping_timestamp":  pingTimestamp,
+			"server_time":     serverTime,
+			"error_details":   sendErr.Error(),
+		}
+
+		log.Printf("❌ Failed to send pong message to client %s: %v (context: %+v)",
+			c.ID, sendErr, errorContext)
+
+		// 记录错误到客户端错误历史
+		c.recordError(&SignalingError{
+			Code:    ErrorCodeInternalError,
+			Message: "Failed to send pong response",
+			Details: fmt.Sprintf("Error: %v, Context: %+v", sendErr, errorContext),
+			Type:    "ping_response_error",
+		})
+	} else {
+		log.Printf("✅ Pong sent to client %s successfully (processing time: %dms, data size: %d bytes)",
+			c.ID, processingTime.Milliseconds(), len(fmt.Sprintf("%+v", pongData)))
 	}
+
+	// 记录性能指标
+	c.recordMessageProcessingMetrics("ping", processingTime, sendErr == nil)
 }
 
 // handleRequestOfferMessage 处理请求 Offer 消息
 func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMessage) {
-	log.Printf("📞 Received request-offer from client %s", c.ID)
+	startTime := time.Now()
+	log.Printf("📞 Received request-offer from client %s (messageID: %s)", c.ID, message.ID)
+
+	// 记录详细的请求上下文信息
+	c.mutex.RLock()
+	clientState := c.State
+	messageCount := c.MessageCount
+	errorCount := c.ErrorCount
+	connectionDuration := time.Since(c.ConnectedAt)
+	c.mutex.RUnlock()
+
+	requestContext := map[string]any{
+		"client_id":           c.ID,
+		"message_id":          message.ID,
+		"client_state":        clientState,
+		"connection_duration": connectionDuration.String(),
+		"message_count":       messageCount,
+		"error_count":         errorCount,
+		"remote_addr":         c.RemoteAddr,
+		"user_agent":          c.UserAgent,
+	}
+
+	log.Printf("📋 Request-offer context for client %s: %+v", c.ID, requestContext)
+
+	// 解析请求数据并记录详细信息
+	var requestData map[string]any
+	var constraints map[string]any
+	var codecPreferences []string
+
+	if message.Data != nil {
+		if data, ok := message.Data.(map[string]any); ok {
+			requestData = data
+			log.Printf("📋 Request data from client %s: %+v", c.ID, requestData)
+
+			if constraintsData, exists := data["constraints"]; exists {
+				if constraintsMap, ok := constraintsData.(map[string]any); ok {
+					constraints = constraintsMap
+					log.Printf("🎥 Media constraints from client %s: %+v", c.ID, constraints)
+				}
+			}
+
+			if codecPrefs, exists := data["codec_preferences"]; exists {
+				if prefs, ok := codecPrefs.([]any); ok {
+					for _, pref := range prefs {
+						if prefStr, ok := pref.(string); ok {
+							codecPreferences = append(codecPreferences, prefStr)
+						}
+					}
+					log.Printf("🎵 Codec preferences from client %s: %v", c.ID, codecPreferences)
+				}
+			}
+		}
+	}
 
 	// 使用 PeerConnection 管理器创建 Offer
 	if c.Server.peerConnectionManager == nil {
-		log.Printf("❌ PeerConnection manager not available for client %s", c.ID)
+		errorContext := map[string]any{
+			"client_id":       c.ID,
+			"message_id":      message.ID,
+			"processing_time": time.Since(startTime).Milliseconds(),
+			"error_stage":     "peer_connection_manager_check",
+			"request_context": requestContext,
+		}
+
+		log.Printf("❌ PeerConnection manager not available for client %s (context: %+v)", c.ID, errorContext)
 		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
-			"PeerConnection manager is not available", "")
+			"PeerConnection manager is not available",
+			fmt.Sprintf("Context: %+v", errorContext))
+		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
 		return
 	}
 
 	// 创建 PeerConnection
+	pcCreationStart := time.Now()
 	pc, err := c.Server.peerConnectionManager.CreatePeerConnection(c.ID)
+	pcCreationTime := time.Since(pcCreationStart)
+
 	if err != nil {
-		log.Printf("❌ Failed to create PeerConnection for client %s: %v", c.ID, err)
+		errorContext := map[string]any{
+			"client_id":         c.ID,
+			"message_id":        message.ID,
+			"processing_time":   time.Since(startTime).Milliseconds(),
+			"pc_creation_time":  pcCreationTime.Milliseconds(),
+			"error_stage":       "peer_connection_creation",
+			"error_details":     err.Error(),
+			"request_context":   requestContext,
+			"constraints":       constraints,
+			"codec_preferences": codecPreferences,
+		}
+
+		log.Printf("❌ Failed to create PeerConnection for client %s: %v (context: %+v)",
+			c.ID, err, errorContext)
 		c.sendStandardErrorMessage("PEER_CONNECTION_CREATION_FAILED",
-			"Failed to create PeerConnection", err.Error())
+			"Failed to create PeerConnection",
+			fmt.Sprintf("Error: %v, Context: %+v", err, errorContext))
+		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
 		return
 	}
+
+	log.Printf("✅ PeerConnection created for client %s (creation time: %dms)",
+		c.ID, pcCreationTime.Milliseconds())
 
 	// 创建 SDP Offer
+	offerCreationStart := time.Now()
 	offer, err := pc.CreateOffer(nil)
+	offerCreationTime := time.Since(offerCreationStart)
+
 	if err != nil {
-		log.Printf("❌ Failed to create offer for client %s: %v", c.ID, err)
+		errorContext := map[string]any{
+			"client_id":           c.ID,
+			"message_id":          message.ID,
+			"processing_time":     time.Since(startTime).Milliseconds(),
+			"pc_creation_time":    pcCreationTime.Milliseconds(),
+			"offer_creation_time": offerCreationTime.Milliseconds(),
+			"error_stage":         "offer_creation",
+			"error_details":       err.Error(),
+			"request_context":     requestContext,
+			"constraints":         constraints,
+			"codec_preferences":   codecPreferences,
+		}
+
+		log.Printf("❌ Failed to create offer for client %s: %v (context: %+v)",
+			c.ID, err, errorContext)
 		c.sendStandardErrorMessage("OFFER_CREATION_FAILED",
-			"Failed to create SDP offer", err.Error())
+			"Failed to create SDP offer",
+			fmt.Sprintf("Error: %v, Context: %+v", err, errorContext))
+		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
 		return
 	}
 
+	log.Printf("✅ SDP offer created for client %s (type: %s, length: %d bytes, creation time: %dms)",
+		c.ID, offer.Type, len(offer.SDP), offerCreationTime.Milliseconds())
+
 	// 设置本地描述
+	localDescStart := time.Now()
 	if err := pc.SetLocalDescription(offer); err != nil {
-		log.Printf("❌ Failed to set local description for client %s: %v", c.ID, err)
+		localDescTime := time.Since(localDescStart)
+		errorContext := map[string]any{
+			"client_id":           c.ID,
+			"message_id":          message.ID,
+			"processing_time":     time.Since(startTime).Milliseconds(),
+			"pc_creation_time":    pcCreationTime.Milliseconds(),
+			"offer_creation_time": offerCreationTime.Milliseconds(),
+			"local_desc_time":     localDescTime.Milliseconds(),
+			"error_stage":         "local_description_setting",
+			"error_details":       err.Error(),
+			"offer_type":          offer.Type.String(),
+			"offer_sdp_length":    len(offer.SDP),
+			"request_context":     requestContext,
+			"constraints":         constraints,
+			"codec_preferences":   codecPreferences,
+		}
+
+		log.Printf("❌ Failed to set local description for client %s: %v (context: %+v)",
+			c.ID, err, errorContext)
 		c.sendStandardErrorMessage("LOCAL_DESCRIPTION_FAILED",
-			"Failed to set local description", err.Error())
+			"Failed to set local description",
+			fmt.Sprintf("Error: %v, Context: %+v", err, errorContext))
+		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
 		return
 	}
+	localDescTime := time.Since(localDescStart)
+
+	log.Printf("✅ Local description set for client %s (time: %dms)",
+		c.ID, localDescTime.Milliseconds())
 
 	// 发送 Offer
 	sdpData := &protocol.SDPData{
@@ -1449,10 +1930,59 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 	offerMessage := c.Server.messageRouter.CreateStandardResponse(
 		protocol.MessageTypeOffer, c.ID, sdpData)
 
+	sendStart := time.Now()
 	if err := c.sendStandardMessage(offerMessage); err != nil {
-		log.Printf("❌ Failed to send offer to client %s: %v", c.ID, err)
+		sendTime := time.Since(sendStart)
+		totalProcessingTime := time.Since(startTime)
+
+		errorContext := map[string]any{
+			"client_id":             c.ID,
+			"message_id":            message.ID,
+			"total_processing_time": totalProcessingTime.Milliseconds(),
+			"pc_creation_time":      pcCreationTime.Milliseconds(),
+			"offer_creation_time":   offerCreationTime.Milliseconds(),
+			"local_desc_time":       localDescTime.Milliseconds(),
+			"send_time":             sendTime.Milliseconds(),
+			"error_stage":           "offer_sending",
+			"error_details":         err.Error(),
+			"offer_type":            offer.Type.String(),
+			"offer_sdp_length":      len(offer.SDP),
+			"request_context":       requestContext,
+			"constraints":           constraints,
+			"codec_preferences":     codecPreferences,
+		}
+
+		log.Printf("❌ Failed to send offer to client %s: %v (context: %+v)",
+			c.ID, err, errorContext)
+
+		// 记录错误到客户端错误历史
+		c.recordError(&SignalingError{
+			Code:    ErrorCodeInternalError,
+			Message: "Failed to send offer response",
+			Details: fmt.Sprintf("Error: %v, Context: %+v", err, errorContext),
+			Type:    "offer_response_error",
+		})
+		c.recordMessageProcessingMetrics("request-offer", totalProcessingTime, false)
 	} else {
-		log.Printf("✅ Offer sent to client %s", c.ID)
+		sendTime := time.Since(sendStart)
+		totalProcessingTime := time.Since(startTime)
+
+		successContext := map[string]any{
+			"client_id":             c.ID,
+			"message_id":            message.ID,
+			"total_processing_time": totalProcessingTime.Milliseconds(),
+			"pc_creation_time":      pcCreationTime.Milliseconds(),
+			"offer_creation_time":   offerCreationTime.Milliseconds(),
+			"local_desc_time":       localDescTime.Milliseconds(),
+			"send_time":             sendTime.Milliseconds(),
+			"offer_type":            offer.Type.String(),
+			"offer_sdp_length":      len(offer.SDP),
+			"constraints":           constraints,
+			"codec_preferences":     codecPreferences,
+		}
+
+		log.Printf("✅ Offer sent to client %s successfully (context: %+v)", c.ID, successContext)
+		c.recordMessageProcessingMetrics("request-offer", totalProcessingTime, true)
 	}
 }
 
@@ -1700,12 +2230,109 @@ func (c *SignalingClient) handleProtocolError(errorCode, errorMessage string) {
 
 // sendStandardErrorMessage 发送标准错误消息
 func (c *SignalingClient) sendStandardErrorMessage(code, message, details string) {
-	errorMessage := c.Server.messageRouter.CreateErrorResponse(code, message, details)
+	startTime := time.Now()
+
+	// 收集诊断信息
+	c.mutex.RLock()
+	clientState := c.State
+	messageCount := c.MessageCount
+	errorCount := c.ErrorCount
+	lastError := c.LastError
+	connectionDuration := time.Since(c.ConnectedAt)
+	c.mutex.RUnlock()
+
+	// 构建增强的错误上下文
+	diagnosticInfo := map[string]any{
+		"client_id":           c.ID,
+		"client_state":        clientState,
+		"connection_duration": connectionDuration.String(),
+		"message_count":       messageCount,
+		"error_count":         errorCount,
+		"remote_addr":         c.RemoteAddr,
+		"user_agent":          c.UserAgent,
+		"timestamp":           time.Now().Unix(),
+		"server_uptime":       time.Since(c.ConnectedAt).String(),
+	}
+
+	// 添加最后一个错误信息（如果存在）
+	if lastError != nil {
+		diagnosticInfo["last_error"] = map[string]any{
+			"code":    lastError.Code,
+			"message": lastError.Message,
+			"type":    lastError.Type,
+		}
+	}
+
+	// 添加服务器状态信息
+	diagnosticInfo["server_info"] = map[string]any{
+		"total_clients":       c.Server.GetClientCount(),
+		"peer_connection_mgr": c.Server.peerConnectionManager != nil,
+		"message_router":      c.Server.messageRouter != nil,
+		"protocol_negotiator": c.Server.protocolNegotiator != nil,
+	}
+
+	// 将诊断信息添加到详细信息中
+	enhancedDetails := details
+	if details != "" {
+		enhancedDetails = fmt.Sprintf("%s | Diagnostics: %+v", details, diagnosticInfo)
+	} else {
+		enhancedDetails = fmt.Sprintf("Diagnostics: %+v", diagnosticInfo)
+	}
+
+	log.Printf("🚨 Sending error to client %s - Code: %s, Message: %s, Diagnostics: %+v",
+		c.ID, code, message, diagnosticInfo)
+
+	errorMessage := c.Server.messageRouter.CreateErrorResponse(code, message, enhancedDetails)
 	errorMessage.PeerID = c.ID
 
-	if err := c.sendStandardMessage(errorMessage); err != nil {
-		log.Printf("❌ Failed to send error message to client %s: %v", c.ID, err)
+	// 添加额外的错误元数据
+	if errorMessage.Data == nil {
+		errorMessage.Data = make(map[string]any)
 	}
+
+	if errorData, ok := errorMessage.Data.(map[string]any); ok {
+		errorData["diagnostic_info"] = diagnosticInfo
+		errorData["error_timestamp"] = time.Now().Unix()
+		errorData["error_sequence"] = errorCount + 1
+	}
+
+	sendTime := time.Now()
+	sendErr := c.sendStandardMessage(errorMessage)
+	if sendErr != nil {
+		sendDuration := time.Since(sendTime)
+		totalDuration := time.Since(startTime)
+
+		// 记录发送错误的详细信息
+		sendErrorContext := map[string]any{
+			"original_error_code":    code,
+			"original_error_message": message,
+			"send_error":             sendErr.Error(),
+			"send_duration":          sendDuration.Milliseconds(),
+			"total_duration":         totalDuration.Milliseconds(),
+			"diagnostic_info":        diagnosticInfo,
+		}
+
+		log.Printf("❌ Failed to send error message to client %s: %v (context: %+v)",
+			c.ID, sendErr, sendErrorContext)
+
+		// 记录发送失败的错误
+		c.recordError(&SignalingError{
+			Code:    ErrorCodeInternalError,
+			Message: "Failed to send error message",
+			Details: fmt.Sprintf("Original error: %s - %s, Send error: %v, Context: %+v",
+				code, message, sendErr, sendErrorContext),
+			Type: "error_send_failure",
+		})
+	} else {
+		sendDuration := time.Since(sendTime)
+		totalDuration := time.Since(startTime)
+
+		log.Printf("✅ Error message sent to client %s successfully (send time: %dms, total time: %dms)",
+			c.ID, sendDuration.Milliseconds(), totalDuration.Milliseconds())
+	}
+
+	// 记录错误消息发送的性能指标
+	c.recordMessageProcessingMetrics("error", time.Since(startTime), sendErr == nil)
 }
 
 // handleMessage 处理客户端消息（保持向后兼容）

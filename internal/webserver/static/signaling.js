@@ -23,7 +23,7 @@ class SignalingClient {
     this.config = options.config || {};
 
     // 连接配置
-    this.maxRetries = options.maxRetries || 3;
+    this.maxRetries = options.maxRetries || 1;
     this.retryDelay = options.retryDelay || 3000;
     this.connectionTimeout = options.connectionTimeout || 10000;
     this.heartbeatInterval = options.heartbeatInterval || 30000;
@@ -59,12 +59,15 @@ class SignalingClient {
     // 如果提供的URL是相对路径或需要补全，则构建完整的URL
     if (this.serverUrl) {
       // 如果URL不包含协议，则构建完整的WebSocket URL
-      if (!this.serverUrl.startsWith('ws://') && !this.serverUrl.startsWith('wss://')) {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      if (
+        !this.serverUrl.startsWith("ws://") &&
+        !this.serverUrl.startsWith("wss://")
+      ) {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = window.location.host;
-        
+
         // 如果是相对路径，直接拼接
-        if (this.serverUrl.startsWith('/')) {
+        if (this.serverUrl.startsWith("/")) {
           this.serverUrl = `${protocol}//${host}${this.serverUrl}`;
         } else {
           // 如果只是主机名或其他格式，使用默认路径
@@ -73,7 +76,7 @@ class SignalingClient {
       }
     } else {
       // 如果没有提供URL，构建默认URL（使用新的API路径）
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
       this.serverUrl = `${protocol}//${host}/api/signaling`;
     }
@@ -93,9 +96,9 @@ class SignalingClient {
 
     // 触发连接开始事件
     if (this.eventBus) {
-      this.eventBus.emit('signaling:connecting', {
+      this.eventBus.emit("signaling:connecting", {
         timestamp: this._connectionStartTime,
-        attempt: this._retryCount + 1
+        attempt: this._retryCount + 1,
       });
     }
 
@@ -121,10 +124,7 @@ class SignalingClient {
           );
           this._protocolMode = "standard"; // 默认使用标准协议
         }
-      }
-
-      this._state = "connected";
-      this._retryCount = 0;
+      }  
 
       // 记录连接建立时间
       const connectionTime = performance.now() - this._connectionStartTime;
@@ -133,22 +133,22 @@ class SignalingClient {
       this._startHeartbeat();
 
       this._setStatus("Connected to server");
-      
+
       // 触发连接成功事件
       if (this.eventBus) {
-        this.eventBus.emit('signaling:connected', {
+        this.eventBus.emit("signaling:connected", {
           connectionTime: connectionTime,
           peerId: this.peerId,
           server: this.serverUrl,
           protocol: this._protocolMode,
-          retryCount: this._retryCount
+          retryCount: this._retryCount,
         });
       }
-      
+
       if (this.onopen) this.onopen();
     } catch (error) {
       this._state = "disconnected";
-      
+
       this._setError("Connection failed: " + error.message);
       throw error;
     }
@@ -230,11 +230,11 @@ class SignalingClient {
 
     // 触发消息发送事件
     if (this.eventBus) {
-      this.eventBus.emit('signaling:message-sent', {
+      this.eventBus.emit("signaling:message-sent", {
         type: type,
         size: messageStr.length,
         id: messageId,
-        timestamp: message.timestamp
+        timestamp: message.timestamp,
       });
     }
 
@@ -250,7 +250,7 @@ class SignalingClient {
       this._ws.send(JSON.stringify({ sdp: sdp }));
     } else {
       // 标准格式 - 提取 SDP 字符串
-      const sdpString = typeof sdp === 'string' ? sdp : sdp.sdp;
+      const sdpString = typeof sdp === "string" ? sdp : sdp.sdp;
       this.sendMessage("answer", { sdp: sdpString });
     }
   }
@@ -264,9 +264,31 @@ class SignalingClient {
       this._ws.send(JSON.stringify({ ice: candidate }));
     } else {
       // 标准格式 - 提取候选字符串
-      const candidateString = typeof candidate === 'string' ? candidate : candidate.candidate;
+      const candidateString =
+        typeof candidate === "string" ? candidate : candidate.candidate;
       this.sendMessage("ice-candidate", { candidate: candidateString });
     }
+  }
+
+  /**
+   * 手动请求 WebRTC Offer
+   * 允许客户端主动请求新的 offer
+   */
+  requestOffer(constraints = null, codecPreferences = null) {
+    if (this._state !== "connected") {
+      throw new Error("Not connected to signaling server");
+    }
+
+    const data = {
+      constraints: constraints || {
+        video: true,
+        audio: true,
+        data_channel: true,
+      },
+      codec_preferences: codecPreferences || ["H264", "VP8", "VP9"],
+    };
+
+    return this.sendMessage("request-offer", data);
   }
 
   /**
@@ -605,13 +627,13 @@ class SignalingClient {
       // 处理 Selkies 协议文本消息
       if (typeof data === "string" && !data.startsWith("{")) {
         this._handleSelkiesTextMessage(data);
-        
+
         // 触发消息接收事件
         if (this.eventBus) {
-          this.eventBus.emit('signaling:message-received', {
-            type: 'selkies-text',
+          this.eventBus.emit("signaling:message-received", {
+            type: "selkies-text",
             size: data.length,
-            timestamp: Date.now()
+            timestamp: Date.now(),
           });
         }
         return;
@@ -622,11 +644,11 @@ class SignalingClient {
 
       // 触发消息接收事件
       if (this.eventBus) {
-        this.eventBus.emit('signaling:message-received', {
-          type: message.type || 'unknown',
+        this.eventBus.emit("signaling:message-received", {
+          type: message.type || "unknown",
           size: data.length,
           id: message.message_id || message.id,
-          timestamp: Date.now()
+          timestamp: Date.now(),
         });
       }
 
@@ -681,6 +703,10 @@ class SignalingClient {
       // 服务器确认注册
       this._setSelkiesMode(true);
       this._setStatus("Registered with server (Selkies mode)");
+
+      // Selkies 模式下尝试请求 offer
+      // 传统 Selkies 协议可能不支持 request-offer，失败是正常的
+      this._sendRequestOffer();
     } else if (data.startsWith("ERROR")) {
       // 服务器错误
       const error = new Error("Server error: " + data);
@@ -716,6 +742,13 @@ class SignalingClient {
     if (message.data && message.data.protocol) {
       this._protocolMode = message.data.protocol;
     }
+
+    // 变更状态为已连接
+    this._state = "connected";
+    this._retryCount = 0;
+
+    // 根据 GStreamer 信令协议规范，收到 welcome 消息后立即发送 request-offer
+    this._sendRequestOffer();
   }
 
   /**
@@ -760,10 +793,10 @@ class SignalingClient {
 
       // 触发延迟测量事件
       if (this.eventBus) {
-        this.eventBus.emit("signaling:latency", { 
+        this.eventBus.emit("signaling:latency", {
           latency: latency,
           id: message.message_id || message.id,
-          timestamp: now
+          timestamp: now,
         });
       }
     }
@@ -906,11 +939,11 @@ class SignalingClient {
 
       // 触发消息发送事件
       if (this.eventBus) {
-        this.eventBus.emit('signaling:message-sent', {
+        this.eventBus.emit("signaling:message-sent", {
           type: "hello",
           size: messageStr.length,
           id: messageId,
-          timestamp: message.timestamp
+          timestamp: message.timestamp,
         });
       }
     }
@@ -942,6 +975,57 @@ class SignalingClient {
   }
 
   /**
+   * 发送 request-offer 消息
+   * 根据 GStreamer 信令协议规范，在收到 welcome 消息后立即发送
+   */
+  _sendRequestOffer() {
+    try {
+      // 检查协议模式，只在标准模式或支持的情况下发送
+      if (this._protocolMode === "selkies" && this._state !== "connected") {
+        // Selkies 模式下如果连接状态不是 connected，可能不支持标准消息格式
+        this.logger.info(
+          "Selkies mode: skipping request-offer, waiting for automatic offer"
+        );
+        return null;
+      }
+
+      const requestOfferId = this.sendMessage("request-offer", {
+        constraints: {
+          video: true,
+          audio: true,
+          data_channel: true,
+        },
+        codec_preferences: ["H264", "VP8", "VP9"],
+      });
+
+      this._setStatus("Requested WebRTC offer from server");
+
+      // 触发 request-offer 发送事件
+      if (this.eventBus) {
+        this.eventBus.emit("signaling:request-offer-sent", {
+          id: requestOfferId,
+          timestamp: Date.now(),
+        });
+      }
+
+      return requestOfferId;
+    } catch (error) {
+      this.logger.error("Failed to send request-offer:", error);
+
+      // 在 Selkies 模式下，request-offer 失败是可以接受的
+      if (this._protocolMode === "selkies") {
+        this.logger.info(
+          "Selkies mode: request-offer failed as expected, waiting for automatic offer"
+        );
+        return null;
+      }
+
+      this._setError("Failed to request WebRTC offer: " + error.message);
+      throw error;
+    }
+  }
+
+  /**
    * 发送 Ping
    */
   _sendPing() {
@@ -949,7 +1033,7 @@ class SignalingClient {
       const pingId = this.sendMessage("ping", {
         timestamp: Date.now(),
         client_state: this._state,
-      });     
+      });
       return pingId;
     } catch (error) {
       this.logger.error("Failed to send ping:", error);
