@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 // Config BDWind服务器配置聚合器
@@ -158,18 +158,6 @@ func (c *Config) validateCrossModuleCompatibility() error {
 			return fmt.Errorf("port conflict: webserver port %d already used by %s", c.WebServer.Port, existing)
 		}
 		usedPorts[c.WebServer.Port] = "webserver"
-	}
-
-	if c.WebRTC != nil {
-		if existing, exists := usedPorts[c.WebRTC.SignalingPort]; exists {
-			return fmt.Errorf("port conflict: webrtc signaling port %d already used by %s", c.WebRTC.SignalingPort, existing)
-		}
-		usedPorts[c.WebRTC.SignalingPort] = "webrtc-signaling"
-
-		if existing, exists := usedPorts[c.WebRTC.MediaPort]; exists {
-			return fmt.Errorf("port conflict: webrtc media port %d already used by %s", c.WebRTC.MediaPort, existing)
-		}
-		usedPorts[c.WebRTC.MediaPort] = "webrtc-media"
 	}
 
 	if c.Metrics != nil && c.Metrics.External.Enabled {

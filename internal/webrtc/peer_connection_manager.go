@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -593,6 +594,190 @@ func (pcm *PeerConnectionManager) SetMaxConnections(max int) {
 	defer pcm.mutex.Unlock()
 	pcm.maxConnections = max
 	pcm.logger.Printf("Maximum connections set to %d", max)
+}
+
+// HandleICECandidate 处理ICE候选
+func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateData map[string]interface{}) error {
+	startTime := time.Now()
+
+	pcm.mutex.RLock()
+	info, exists := pcm.connections[clientID]
+	pcm.mutex.RUnlock()
+
+	if !exists {
+		pcm.logger.Printf("❌ ICE candidate processing failed: peer connection not found for client %s", clientID)
+		return fmt.Errorf("peer connection not found for client %s", clientID)
+	}
+
+	// 详细验证候选数据
+	candidate, ok := candidateData["candidate"].(string)
+	if !ok {
+		pcm.logger.Printf("❌ ICE candidate processing failed for client %s: candidate field is missing or not a string", clientID)
+		return fmt.Errorf("invalid candidate data: candidate field is required and must be a string")
+	}
+
+	if candidate == "" {
+		pcm.logger.Printf("❌ ICE candidate processing failed for client %s: candidate field is empty", clientID)
+		return fmt.Errorf("invalid candidate data: candidate field cannot be empty")
+	}
+
+	// 获取可选的SDP信息并记录详细信息
+	sdpMid, hasSdpMid := candidateData["sdpMid"].(string)
+	sdpMLineIndex := uint16(0)
+	hasSdpMLineIndex := false
+	if idx, ok := candidateData["sdpMLineIndex"].(float64); ok {
+		sdpMLineIndex = uint16(idx)
+		hasSdpMLineIndex = true
+	}
+
+	// 记录详细的ICE候选信息
+	pcm.logger.Printf("🧊 Processing ICE candidate for client %s: candidate='%s', sdpMid='%s' (present: %t), sdpMLineIndex=%d (present: %t)",
+		clientID, candidate, sdpMid, hasSdpMid, sdpMLineIndex, hasSdpMLineIndex)
+
+	// 创建ICE候选
+	iceCandidate := webrtc.ICECandidateInit{
+		Candidate:     candidate,
+		SDPMid:        &sdpMid,
+		SDPMLineIndex: &sdpMLineIndex,
+	}
+
+	// 检查连接状态
+	info.mutex.RLock()
+	currentState := info.State
+	currentICEState := info.ICEState
+	info.mutex.RUnlock()
+
+	pcm.logger.Printf("🔍 Connection state before ICE candidate processing for client %s: PC=%s, ICE=%s",
+		clientID, currentState, currentICEState)
+
+	// 更新连接活跃时间（无论处理是否成功）
+	info.mutex.Lock()
+	info.LastActive = time.Now()
+	info.mutex.Unlock()
+
+	// 添加ICE候选到PeerConnection
+	err := info.PC.AddICECandidate(iceCandidate)
+	processingTime := time.Since(startTime)
+
+	if err != nil {
+		// 详细的错误报告
+		pcm.logger.Printf("❌ ICE candidate processing failed for client %s after %v: %v", clientID, processingTime, err)
+		pcm.logger.Printf("❌ Failed candidate details: candidate='%s', sdpMid='%s', sdpMLineIndex=%d", candidate, sdpMid, sdpMLineIndex)
+		pcm.logger.Printf("❌ Connection state during failure: PC=%s, ICE=%s", currentState, currentICEState)
+
+		// 检查是否是网络问题
+		if isNetworkError(err) {
+			pcm.logger.Printf("🌐 Network connectivity issue detected for client %s: %v", clientID, err)
+		}
+
+		// 更新错误统计
+		info.mutex.Lock()
+		info.LastError = err
+		info.mutex.Unlock()
+
+		return fmt.Errorf("failed to add ICE candidate: %w", err)
+	}
+
+	// 成功处理的详细日志
+	pcm.logger.Printf("✅ ICE candidate processed successfully for client %s in %v", clientID, processingTime)
+	pcm.logger.Printf("🎯 Processed candidate details: candidate='%s', sdpMid='%s', sdpMLineIndex=%d", candidate, sdpMid, sdpMLineIndex)
+
+	// 检查处理后的连接状态
+	info.mutex.RLock()
+	newState := info.State
+	newICEState := info.ICEState
+	info.mutex.RUnlock()
+
+	if newState != currentState || newICEState != currentICEState {
+		pcm.logger.Printf("🔄 Connection state changed for client %s after ICE candidate: PC=%s->%s, ICE=%s->%s",
+			clientID, currentState, newState, currentICEState, newICEState)
+	}
+
+	return nil
+}
+
+// isNetworkError 检查是否是网络相关错误
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errorStr := strings.ToLower(err.Error())
+	networkKeywords := []string{
+		"network", "connection", "timeout", "unreachable",
+		"refused", "reset", "broken pipe", "no route",
+	}
+
+	for _, keyword := range networkKeywords {
+		if strings.Contains(errorStr, keyword) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// HandleMultipleICECandidates 批量处理多个ICE候选
+func (pcm *PeerConnectionManager) HandleMultipleICECandidates(clientID string, candidates []map[string]interface{}) error {
+	startTime := time.Now()
+
+	pcm.mutex.RLock()
+	info, exists := pcm.connections[clientID]
+	pcm.mutex.RUnlock()
+
+	if !exists {
+		pcm.logger.Printf("❌ Batch ICE candidate processing failed: peer connection not found for client %s", clientID)
+		return fmt.Errorf("peer connection not found for client %s", clientID)
+	}
+
+	pcm.logger.Printf("🧊 Starting batch processing of %d ICE candidates for client %s", len(candidates), clientID)
+
+	successCount := 0
+	var lastError error
+	var failedCandidates []int
+
+	for i, candidateData := range candidates {
+		candidateStartTime := time.Now()
+		err := pcm.HandleICECandidate(clientID, candidateData)
+		candidateProcessingTime := time.Since(candidateStartTime)
+
+		if err != nil {
+			pcm.logger.Printf("❌ Failed to process ICE candidate %d/%d for client %s in %v: %v",
+				i+1, len(candidates), clientID, candidateProcessingTime, err)
+			lastError = err
+			failedCandidates = append(failedCandidates, i)
+		} else {
+			successCount++
+			pcm.logger.Printf("✅ Successfully processed ICE candidate %d/%d for client %s in %v",
+				i+1, len(candidates), clientID, candidateProcessingTime)
+		}
+	}
+
+	// 更新连接活跃时间
+	info.mutex.Lock()
+	info.LastActive = time.Now()
+	info.mutex.Unlock()
+
+	totalProcessingTime := time.Since(startTime)
+
+	// 详细的批处理结果报告
+	if successCount == len(candidates) {
+		pcm.logger.Printf("🎉 All %d ICE candidates processed successfully for client %s in %v (avg: %v per candidate)",
+			len(candidates), clientID, totalProcessingTime, totalProcessingTime/time.Duration(len(candidates)))
+	} else if successCount > 0 {
+		pcm.logger.Printf("⚠️ Partial success: %d/%d ICE candidates processed for client %s in %v (failed indices: %v)",
+			successCount, len(candidates), clientID, totalProcessingTime, failedCandidates)
+	} else {
+		pcm.logger.Printf("❌ Complete failure: 0/%d ICE candidates processed for client %s in %v",
+			len(candidates), clientID, totalProcessingTime)
+	}
+
+	// 如果有任何候选处理失败，返回最后一个错误
+	if lastError != nil && successCount == 0 {
+		return fmt.Errorf("failed to process any ICE candidates: %w", lastError)
+	}
+
+	return nil
 }
 
 // Close 关闭所有连接

@@ -8,7 +8,7 @@ require (
 	github.com/pion/webrtc/v4 v4.1.3
 	github.com/prometheus/client_golang v1.23.0
 	github.com/stretchr/testify v1.10.0
-	gopkg.in/yaml.v2 v2.4.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -42,5 +42,4 @@ require (
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/sys v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -354,21 +354,18 @@ func (c *SignalingClient) handleIceCandidate(message *SignalingMessage) error {
         return errors.New("invalid ICE candidate data format")
     }
 
-    // 处理 ICE candidate
+    // 直接处理 ICE candidate，不发送确认消息
     err := c.Server.peerConnectionManager.HandleICECandidate(c.ID, candidateData)
     if err != nil {
         return fmt.Errorf("failed to handle ICE candidate: %w", err)
     }
 
-    // 发送确认
-    ack := SignalingMessage{
-        Type:      "ice-ack",
-        PeerID:    c.ID,
-        MessageID: generateMessageID(),
-        Timestamp: time.Now().Unix(),
-    }
+    // 记录成功处理日志，替代确认消息的调试功能
+    c.Server.logger.Debug("ICE candidate processed successfully", 
+        "clientID", c.ID, 
+        "candidate", candidateData)
 
-    return c.sendMessage(ack)
+    return nil
 }
 ```
 

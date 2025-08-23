@@ -40,8 +40,6 @@ func NewGStreamerAdapter(config *AdapterConfig) *GStreamerAdapter {
 			MessageTypePong,
 			MessageTypeStats,
 			MessageTypeRequestOffer,
-			MessageTypeAnswerAck,
-			MessageTypeICEAck,
 			MessageTypeWelcome,
 		},
 		validationRules: make(map[MessageType]ValidationRule),

@@ -584,6 +584,82 @@ func TestSignalingClient_SendStandardMessage(t *testing.T) {
 	}
 }
 
+// TestValidateSignalingMessage_IceAckRejection 测试ice-ack消息被正确拒绝
+func TestValidateSignalingMessage_IceAckRejection(t *testing.T) {
+	// 测试用例
+	tests := []struct {
+		name            string
+		message         *SignalingMessage
+		expectError     bool
+		expectedCode    string
+		expectedDetails string
+	}{
+		{
+			name: "ice-ack message should be rejected",
+			message: &SignalingMessage{
+				Type:   "ice-ack",
+				PeerID: "test-client",
+				Data: map[string]any{
+					"acknowledged": true,
+				},
+			},
+			expectError:     true,
+			expectedCode:    ErrorCodeInvalidMessageType,
+			expectedDetails: "Supported types: ping, pong, request-offer, offer, answer, ice-candidate, mouse-click, mouse-move, key-press, get-stats",
+		},
+		{
+			name: "ice-candidate message should be accepted",
+			message: &SignalingMessage{
+				Type:   "ice-candidate",
+				PeerID: "test-client",
+				Data: map[string]any{
+					"candidate":     "candidate:1 1 UDP 2130706431 192.168.1.100 54400 typ host",
+					"sdpMid":        "0",
+					"sdpMLineIndex": 0,
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "ping message should be accepted",
+			message: &SignalingMessage{
+				Type:   "ping",
+				PeerID: "test-client",
+			},
+			expectError: false,
+		},
+		{
+			name: "unknown message type should be rejected",
+			message: &SignalingMessage{
+				Type:   "unknown-type",
+				PeerID: "test-client",
+			},
+			expectError:     true,
+			expectedCode:    ErrorCodeInvalidMessageType,
+			expectedDetails: "Supported types: ping, pong, request-offer, offer, answer, ice-candidate, mouse-click, mouse-move, key-press, get-stats",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSignalingMessage(tt.message)
+
+			if tt.expectError {
+				require.NotNil(t, err, "Expected validation error but got none")
+				assert.Equal(t, tt.expectedCode, err.Code)
+				assert.Contains(t, err.Message, tt.message.Type)
+				if tt.expectedDetails != "" {
+					assert.Equal(t, tt.expectedDetails, err.Details)
+					// Verify ice-ack is not in the supported types list
+					assert.NotContains(t, err.Details, "ice-ack")
+				}
+			} else {
+				assert.Nil(t, err, "Expected no validation error but got: %v", err)
+			}
+		})
+	}
+}
+
 // TestSignalingClient_HandleStandardMessage 测试标准消息处理分发
 func TestSignalingClient_HandleStandardMessage(t *testing.T) {
 	// 创建测试服务器

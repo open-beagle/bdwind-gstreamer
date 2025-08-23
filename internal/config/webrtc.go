@@ -10,8 +10,6 @@ import (
 // WebRTCConfig WebRTC配置模块
 type WebRTCConfig struct {
 	ICEServers    []ICEServerConfig `yaml:"ice_servers" json:"ice_servers"`
-	SignalingPort int               `yaml:"signaling_port" json:"signaling_port"`
-	MediaPort     int               `yaml:"media_port" json:"media_port"`
 	SignalingPath string            `yaml:"signaling_path" json:"signaling_path"`
 	EnableTURN    bool              `yaml:"enable_turn" json:"enable_turn"`
 	TURNConfig    TURNConfig        `yaml:"turn" json:"turn"`
@@ -52,9 +50,7 @@ func (c *WebRTCConfig) SetDefaults() {
 		},
 	}
 
-	// 默认端口配置
-	c.SignalingPort = 8081
-	c.MediaPort = 8082
+	// 默认信令路径配置
 	c.SignalingPath = "/ws"
 
 	// TURN服务器默认禁用
@@ -70,21 +66,6 @@ func (c *WebRTCConfig) SetDefaults() {
 
 // Validate 验证配置
 func (c *WebRTCConfig) Validate() error {
-	// 验证信令端口
-	if c.SignalingPort < 1 || c.SignalingPort > 65535 {
-		return fmt.Errorf("invalid signaling port: %d (must be between 1 and 65535)", c.SignalingPort)
-	}
-
-	// 验证媒体端口
-	if c.MediaPort < 1 || c.MediaPort > 65535 {
-		return fmt.Errorf("invalid media port: %d (must be between 1 and 65535)", c.MediaPort)
-	}
-
-	// 验证端口不冲突
-	if c.SignalingPort == c.MediaPort {
-		return fmt.Errorf("signaling port and media port cannot be the same: %d", c.SignalingPort)
-	}
-
 	// 验证信令路径
 	if c.SignalingPath == "" {
 		return fmt.Errorf("signaling path cannot be empty")
@@ -226,14 +207,6 @@ func (c *WebRTCConfig) Merge(other ConfigModule) error {
 	otherConfig, ok := other.(*WebRTCConfig)
 	if !ok {
 		return fmt.Errorf("cannot merge different config types")
-	}
-
-	// 合并端口配置
-	if otherConfig.SignalingPort != 0 && otherConfig.SignalingPort != 8081 {
-		c.SignalingPort = otherConfig.SignalingPort
-	}
-	if otherConfig.MediaPort != 0 && otherConfig.MediaPort != 8082 {
-		c.MediaPort = otherConfig.MediaPort
 	}
 
 	// 合并信令路径

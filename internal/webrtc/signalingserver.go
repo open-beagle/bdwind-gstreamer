@@ -288,6 +288,42 @@ func (s *SignalingServer) setupEventHandlers() {
 				clientID, errorType, errorMessage)
 		}
 	})
+
+	// ICE候选处理成功事件
+	s.eventBus.Subscribe("ice-candidate:processed", func(data any) {
+		if eventData, ok := data.(map[string]any); ok {
+			clientID := eventData["client_id"].(string)
+			processingTime := eventData["processing_time"].(time.Duration)
+			candidate := eventData["candidate"].(string)
+			success := eventData["success"].(bool)
+
+			if success {
+				log.Printf("🧊 Event: ICE candidate processed successfully for client %s in %v (candidate: %.50s...)",
+					clientID, processingTime, candidate)
+			} else {
+				log.Printf("❌ Event: ICE candidate processing failed for client %s after %v (candidate: %.50s...)",
+					clientID, processingTime, candidate)
+			}
+		}
+	})
+
+	// ICE候选处理失败事件
+	s.eventBus.Subscribe("ice-candidate:failed", func(data any) {
+		if eventData, ok := data.(map[string]any); ok {
+			clientID := eventData["client_id"].(string)
+			errorMessage := eventData["error"].(string)
+			candidate := eventData["candidate"].(string)
+			isNetworkError := eventData["network_error"].(bool)
+
+			if isNetworkError {
+				log.Printf("🌐 Event: ICE candidate network error for client %s: %s (candidate: %.50s...)",
+					clientID, errorMessage, candidate)
+			} else {
+				log.Printf("❌ Event: ICE candidate processing error for client %s: %s (candidate: %.50s...)",
+					clientID, errorMessage, candidate)
+			}
+		}
+	})
 }
 
 // Start 启动信令服务器
@@ -808,8 +844,6 @@ func validateSignalingMessage(message *SignalingMessage) *SignalingError {
 		"offer":         true,
 		"answer":        true,
 		"ice-candidate": true,
-		"answer-ack":    true,
-		"ice-ack":       true,
 		"mouse-click":   true,
 		"mouse-move":    true,
 		"key-press":     true,
@@ -830,7 +864,7 @@ func validateSignalingMessage(message *SignalingMessage) *SignalingError {
 		return &SignalingError{
 			Code:    ErrorCodeInvalidMessageType,
 			Message: fmt.Sprintf("Unknown message type: %s", message.Type),
-			Details: "Supported types: ping, pong, request-offer, offer, answer, ice-candidate, answer-ack, ice-ack, mouse-click, mouse-move, key-press, get-stats",
+			Details: "Supported types: ping, pong, request-offer, offer, answer, ice-candidate, mouse-click, mouse-move, key-press, get-stats",
 			Type:    "validation_error",
 		}
 	}
@@ -1193,6 +1227,28 @@ func getSDPLength(data any) int {
 	}
 
 	return 0
+}
+
+// isNetworkRelatedError 检查是否是网络相关错误
+func isNetworkRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errorStr := strings.ToLower(err.Error())
+	networkKeywords := []string{
+		"network", "connection", "timeout", "unreachable",
+		"refused", "reset", "broken pipe", "no route",
+		"host unreachable", "network unreachable",
+	}
+
+	for _, keyword := range networkKeywords {
+		if strings.Contains(errorStr, keyword) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // getICECandidateInfo 获取ICE候选信息
@@ -1954,7 +2010,7 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 
 // handleAnswerMessage 处理 Answer 消息
 func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage) {
-	log.Printf("📞 Received answer from client %s", c.ID)
+	log.Printf("📞 Processing Answer SDP from client %s (protocol step 2/3)", c.ID)
 
 	// 解析 SDP Answer
 	var sdpData protocol.SDPData
@@ -1993,81 +2049,120 @@ func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage)
 		return
 	}
 
-	// 发送确认
-	ackMessage := c.Server.messageRouter.CreateStandardResponse(
-		protocol.MessageTypeAnswerAck, c.ID, map[string]any{
-			"status":    "success",
-			"timestamp": time.Now().Unix(),
-		})
-
-	if err := c.sendStandardMessage(ackMessage); err != nil {
-		log.Printf("❌ Failed to send answer ack to client %s: %v", c.ID, err)
-	} else {
-		log.Printf("✅ Answer processed for client %s", c.ID)
-	}
+	// Answer 处理成功，ICE 候选收集将自动开始
+	log.Printf("✅ Answer SDP processed successfully for client %s", c.ID)
+	log.Printf("🧊 ICE candidate collection started automatically for client %s (no ACK message sent)", c.ID)
+	log.Printf("📋 Protocol flow: Offer -> Answer -> ICE candidates (correct flow) for client %s", c.ID)
 }
 
 // handleICECandidateMessage 处理 ICE 候选消息
 func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMessage) {
-	log.Printf("🧊 Received ICE candidate from client %s", c.ID)
+	startTime := time.Now()
+	log.Printf("🧊 Received ICE candidate from client %s (message ID: %s)", c.ID, message.ID)
 
 	// 解析 ICE 候选数据
 	var iceData protocol.ICECandidateData
 	if err := message.GetDataAs(&iceData); err != nil {
-		log.Printf("❌ Failed to parse ICE candidate data from client %s: %v", c.ID, err)
+		processingTime := time.Since(startTime)
+		log.Printf("❌ ICE candidate parsing failed for client %s after %v: %v", c.ID, processingTime, err)
+		log.Printf("❌ Raw message data type: %T, content preview: %+v", message.Data, message.Data)
+
+		// 记录错误到客户端统计
+		c.recordError(&SignalingError{
+			Code:    "INVALID_ICE_DATA",
+			Message: "Failed to parse ICE candidate data",
+			Details: err.Error(),
+			Type:    "parsing_error",
+		})
+
 		c.sendStandardErrorMessage("INVALID_ICE_DATA", "Failed to parse ICE candidate data", err.Error())
 		return
 	}
 
-	// 获取 PeerConnection
+	// 验证ICE候选数据完整性
+	if iceData.Candidate.Candidate == "" {
+		processingTime := time.Since(startTime)
+		log.Printf("❌ ICE candidate validation failed for client %s after %v: empty candidate string", c.ID, processingTime)
+		c.sendStandardErrorMessage("INVALID_ICE_DATA", "ICE candidate string cannot be empty", "")
+		return
+	}
+
+	// 获取 PeerConnection 管理器
 	if c.Server.peerConnectionManager == nil {
-		log.Printf("❌ PeerConnection manager not available for client %s", c.ID)
+		processingTime := time.Since(startTime)
+		log.Printf("❌ ICE candidate processing failed for client %s after %v: PeerConnection manager not available", c.ID, processingTime)
 		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
 			"PeerConnection manager is not available", "")
 		return
 	}
 
-	pc, exists := c.Server.peerConnectionManager.GetPeerConnection(c.ID)
-	if !exists {
-		log.Printf("❌ PeerConnection not found for client %s", c.ID)
-		c.sendStandardErrorMessage("PEER_CONNECTION_NOT_FOUND",
-			"PeerConnection not found", "")
-		return
-	}
-
-	// 创建 ICE 候选
-	candidate := webrtc.ICECandidateInit{
-		Candidate: iceData.Candidate.Candidate,
+	// 转换为标准的候选数据格式
+	candidateData := map[string]interface{}{
+		"candidate": iceData.Candidate.Candidate,
 	}
 
 	if iceData.Candidate.SDPMid != nil {
-		candidate.SDPMid = iceData.Candidate.SDPMid
+		candidateData["sdpMid"] = *iceData.Candidate.SDPMid
 	}
 
 	if iceData.Candidate.SDPMLineIndex != nil {
-		lineIndex := uint16(*iceData.Candidate.SDPMLineIndex)
-		candidate.SDPMLineIndex = &lineIndex
+		candidateData["sdpMLineIndex"] = float64(*iceData.Candidate.SDPMLineIndex)
 	}
 
-	// 添加 ICE 候选
-	if err := pc.AddICECandidate(candidate); err != nil {
-		log.Printf("❌ Failed to add ICE candidate for client %s: %v", c.ID, err)
+	// 记录详细的候选信息
+	log.Printf("🔍 ICE candidate details for client %s: candidate='%s', sdpMid='%v', sdpMLineIndex='%v'",
+		c.ID, iceData.Candidate.Candidate, iceData.Candidate.SDPMid, iceData.Candidate.SDPMLineIndex)
+
+	// 直接调用PeerConnection管理器的HandleICECandidate方法
+	log.Printf("🔧 Delegating ICE candidate processing to PeerConnection manager for client %s", c.ID)
+	if err := c.Server.peerConnectionManager.HandleICECandidate(c.ID, candidateData); err != nil {
+		processingTime := time.Since(startTime)
+		log.Printf("❌ ICE candidate processing failed for client %s after %v: %v", c.ID, processingTime, err)
+		log.Printf("❌ Failed candidate details: %+v", candidateData)
+
+		// 检查是否是网络问题
+		isNetworkErr := isNetworkRelatedError(err)
+		if isNetworkErr {
+			log.Printf("🌐 Network connectivity issue detected for client %s during ICE candidate processing", c.ID)
+		}
+
+		// 记录错误到客户端统计
+		c.recordError(&SignalingError{
+			Code:    "ICE_CANDIDATE_FAILED",
+			Message: "Failed to handle ICE candidate",
+			Details: err.Error(),
+			Type:    "webrtc_error",
+		})
+
+		// 触发失败事件（如果事件总线可用）
+		if c.Server.eventBus != nil {
+			c.Server.eventBus.Emit("ice-candidate:failed", map[string]any{
+				"client_id":       c.ID,
+				"error":           err.Error(),
+				"candidate":       iceData.Candidate.Candidate,
+				"network_error":   isNetworkErr,
+				"processing_time": processingTime,
+			})
+		}
+
 		c.sendStandardErrorMessage("ICE_CANDIDATE_FAILED",
-			"Failed to add ICE candidate", err.Error())
+			"Failed to handle ICE candidate", err.Error())
 		return
 	}
 
-	// 发送确认
-	ackMessage := c.Server.messageRouter.CreateStandardResponse(
-		protocol.MessageTypeICEAck, c.ID, map[string]any{
-			"status":    "success",
-			"timestamp": time.Now().Unix(),
-		})
+	// ICE 候选处理成功，记录详细的成功日志
+	processingTime := time.Since(startTime)
+	log.Printf("✅ ICE candidate processed successfully for client %s in %v", c.ID, processingTime)
+	log.Printf("🎯 Successfully processed candidate: %s", iceData.Candidate.Candidate)
 
-	if err := c.sendStandardMessage(ackMessage); err != nil {
-		log.Printf("❌ Failed to send ICE ack to client %s: %v", c.ID, err)
-	} else {
-		log.Printf("✅ ICE candidate processed for client %s", c.ID)
+	// 触发成功事件（如果事件总线可用）
+	if c.Server.eventBus != nil {
+		c.Server.eventBus.Emit("ice-candidate:processed", map[string]any{
+			"client_id":       c.ID,
+			"processing_time": processingTime,
+			"candidate":       iceData.Candidate.Candidate,
+			"success":         true,
+		})
 	}
 }
 
@@ -2370,16 +2465,6 @@ func (c *SignalingClient) handleMessage(message SignalingMessage) {
 		log.Printf("🧊 WebRTC negotiation step 3: Client %s sent ICE candidate (candidate: %s)", c.ID, getICECandidateInfo(message.Data))
 		c.handleIceCandidate(message)
 
-	case "answer-ack":
-		// 处理answer确认
-		log.Printf("Client %s acknowledged answer", c.ID)
-		c.handleAnswerAck(message)
-
-	case "ice-ack":
-		// 处理ICE确认
-		log.Printf("Client %s acknowledged ICE candidate", c.ID)
-		c.handleIceAck(message)
-
 	case "mouse-click":
 		// 处理鼠标点击事件
 		c.handleMouseClick(message)
@@ -2456,7 +2541,7 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 	// 设置ICE候选处理器
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			log.Printf("🧊 Generated ICE candidate for client %s: type=%s, protocol=%s, address=%s",
+			log.Printf("🧊 Generated ICE candidate for client %s: type=%s, protocol=%s, address=%s (protocol step 3/3)",
 				c.ID, candidate.Typ.String(), candidate.Protocol.String(), candidate.Address)
 
 			// 发送ICE候选给客户端 - 支持 selkies 协议
@@ -2471,7 +2556,7 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 				}
 				if iceBytes, err := json.Marshal(selkiesICE); err == nil {
 					c.Send <- iceBytes
-					log.Printf("📤 Selkies ICE candidate sent to client %s", c.ID)
+					log.Printf("📤 ICE candidate sent to client %s (Selkies protocol)", c.ID)
 				} else {
 					log.Printf("❌ Failed to marshal selkies ICE candidate for client %s: %v", c.ID, err)
 				}
@@ -2491,13 +2576,13 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 
 				if candidateData, err := json.Marshal(candidateMessage); err == nil {
 					c.Send <- candidateData
-					log.Printf("📤 ICE candidate sent to client %s", c.ID)
+					log.Printf("📤 ICE candidate sent to client %s (standard protocol)", c.ID)
 				} else {
 					log.Printf("❌ Failed to marshal ICE candidate for client %s: %v", c.ID, err)
 				}
 			}
 		} else {
-			log.Printf("🏁 ICE gathering complete for client %s", c.ID)
+			log.Printf("🏁 ICE gathering complete for client %s - WebRTC negotiation finished", c.ID)
 		}
 	})
 
@@ -2681,43 +2766,20 @@ func (c *SignalingClient) handleAnswer(message SignalingMessage) {
 	}
 
 	log.Printf("🎉 WebRTC negotiation step 2 completed: Answer processed successfully for client %s", c.ID)
-
-	// 发送确认消息
-	log.Printf("📤 Sending answer acknowledgment to client %s", c.ID)
-
-	ack := SignalingMessage{
-		Type:      "answer-ack",
-		PeerID:    c.ID,
-		MessageID: generateMessageID(),
-		Timestamp: time.Now().Unix(),
-		Data: map[string]any{
-			"status":    "received",
-			"processed": true,
-		},
-	}
-
-	if err := c.sendMessage(ack); err != nil {
-		log.Printf("❌ Failed to send answer acknowledgment to client %s: %v", c.ID, err)
-		signalingError := &SignalingError{
-			Code:    ErrorCodeInternalError,
-			Message: "Failed to send answer acknowledgment",
-			Details: err.Error(),
-			Type:    "server_error",
-		}
-		c.recordError(signalingError)
-	} else {
-		log.Printf("✅ Answer acknowledgment sent to client %s", c.ID)
-	}
+	log.Printf("🧊 ICE candidate collection started automatically for client %s (no ACK message sent)", c.ID)
+	log.Printf("📋 Protocol flow: Offer -> Answer -> ICE candidates (correct flow) for client %s", c.ID)
 }
 
 // handleIceCandidate 处理ICE候选
 func (c *SignalingClient) handleIceCandidate(message SignalingMessage) {
-	log.Printf("🧊 WebRTC negotiation step 3: Processing ICE candidate from client %s", c.ID)
+	startTime := time.Now()
+	log.Printf("🧊 WebRTC negotiation step 3: Processing ICE candidate from client %s (message ID: %s)", c.ID, message.MessageID)
 
-	// 获取PeerConnection
+	// 获取PeerConnection管理器
 	pcManager := c.Server.peerConnectionManager
 	if pcManager == nil {
-		log.Printf("❌ WebRTC negotiation failed: PeerConnection manager not available for client %s", c.ID)
+		processingTime := time.Since(startTime)
+		log.Printf("❌ WebRTC negotiation failed after %v: PeerConnection manager not available for client %s", processingTime, c.ID)
 		signalingError := &SignalingError{
 			Code:    ErrorCodeServerUnavailable,
 			Message: "PeerConnection manager not available",
@@ -2729,28 +2791,14 @@ func (c *SignalingClient) handleIceCandidate(message SignalingMessage) {
 		return
 	}
 
-	pc, exists := pcManager.GetPeerConnection(c.ID)
-	if !exists {
-		log.Printf("❌ WebRTC negotiation failed: PeerConnection not found for client %s", c.ID)
-		signalingError := &SignalingError{
-			Code:    ErrorCodeClientNotFound,
-			Message: "PeerConnection not found",
-			Details: "No peer connection exists for this client",
-			Type:    "webrtc_error",
-		}
-		c.recordError(signalingError)
-		c.sendError(signalingError)
-		return
-	}
-
-	log.Printf("✅ PeerConnection found for ICE candidate processing, client %s", c.ID)
-
 	// 解析ICE候选数据 - 验证已经在validateSignalingMessage中完成
 	log.Printf("🔍 Parsing ICE candidate data from client %s", c.ID)
 
 	candidateData, ok := message.Data.(map[string]any)
 	if !ok {
-		log.Printf("❌ WebRTC negotiation failed: Invalid ICE candidate data format from client %s", c.ID)
+		processingTime := time.Since(startTime)
+		log.Printf("❌ WebRTC negotiation failed after %v: Invalid ICE candidate data format from client %s", processingTime, c.ID)
+		log.Printf("❌ Data type received: %T, content: %+v", message.Data, message.Data)
 		signalingError := &SignalingError{
 			Code:    ErrorCodeInvalidMessageData,
 			Message: "Invalid ICE candidate data format",
@@ -2762,13 +2810,15 @@ func (c *SignalingClient) handleIceCandidate(message SignalingMessage) {
 		return
 	}
 
-	candidate, ok := candidateData["candidate"].(string)
-	if !ok {
-		log.Printf("❌ WebRTC negotiation failed: Invalid candidate in ICE candidate from client %s", c.ID)
+	// 验证候选数据完整性
+	candidateStr, hasCandidateField := candidateData["candidate"].(string)
+	if !hasCandidateField || candidateStr == "" {
+		processingTime := time.Since(startTime)
+		log.Printf("❌ WebRTC negotiation failed after %v: Missing or empty candidate field for client %s", processingTime, c.ID)
 		signalingError := &SignalingError{
 			Code:    ErrorCodeInvalidMessageData,
-			Message: "Invalid candidate in ICE candidate",
-			Details: "Candidate must be a string",
+			Message: "Invalid ICE candidate data",
+			Details: "Candidate field is required and must be a non-empty string",
 			Type:    "validation_error",
 		}
 		c.recordError(signalingError)
@@ -2777,62 +2827,58 @@ func (c *SignalingClient) handleIceCandidate(message SignalingMessage) {
 	}
 
 	log.Printf("✅ ICE candidate parsed from client %s: %s", c.ID, getICECandidateInfo(message.Data))
+	log.Printf("🔍 Detailed candidate info for client %s: %+v", c.ID, candidateData)
 
-	sdpMid, _ := candidateData["sdpMid"].(string)
-	sdpMLineIndex, _ := candidateData["sdpMLineIndex"].(float64)
-
-	log.Printf("🔧 Creating ICE candidate for client %s (sdpMid: %s, sdpMLineIndex: %.0f)", c.ID, sdpMid, sdpMLineIndex)
-
-	// 创建ICE候选
-	iceCandidate := webrtc.ICECandidateInit{
-		Candidate:     candidate,
-		SDPMid:        &sdpMid,
-		SDPMLineIndex: (*uint16)(&[]uint16{uint16(sdpMLineIndex)}[0]),
-	}
-
-	// 添加ICE候选
-	log.Printf("🔧 Adding ICE candidate to PeerConnection for client %s", c.ID)
-	err := pc.AddICECandidate(iceCandidate)
+	// 直接调用PeerConnection管理器的HandleICECandidate方法
+	log.Printf("🔧 Delegating ICE candidate processing to PeerConnection manager for client %s", c.ID)
+	err := pcManager.HandleICECandidate(c.ID, candidateData)
 	if err != nil {
-		log.Printf("❌ WebRTC negotiation failed: Failed to add ICE candidate for client %s: %v", c.ID, err)
+		processingTime := time.Since(startTime)
+		log.Printf("❌ WebRTC negotiation failed after %v: Failed to handle ICE candidate for client %s: %v", processingTime, c.ID, err)
+		log.Printf("❌ Failed candidate details: %+v", candidateData)
+
+		// 检查是否是网络问题
+		isNetworkErr := isNetworkRelatedError(err)
+		if isNetworkErr {
+			log.Printf("🌐 Network connectivity issue detected for client %s during ICE candidate processing", c.ID)
+		}
+
 		signalingError := &SignalingError{
 			Code:    ErrorCodeICECandidateFailed,
-			Message: "Failed to add ICE candidate",
+			Message: "Failed to handle ICE candidate",
 			Details: err.Error(),
 			Type:    "webrtc_error",
 		}
 		c.recordError(signalingError)
+
+		// 触发失败事件（如果事件总线可用）
+		if c.Server.eventBus != nil {
+			c.Server.eventBus.Emit("ice-candidate:failed", map[string]any{
+				"client_id":       c.ID,
+				"error":           err.Error(),
+				"candidate":       candidateStr,
+				"network_error":   isNetworkErr,
+				"processing_time": processingTime,
+			})
+		}
+
 		c.sendError(signalingError)
 		return
 	}
 
-	log.Printf("🎉 WebRTC negotiation step 3 completed: ICE candidate added successfully for client %s", c.ID)
+	// ICE 候选处理成功，记录详细的成功日志
+	processingTime := time.Since(startTime)
+	log.Printf("✅ ICE candidate processed successfully for client %s in %v (candidate: %s)", c.ID, processingTime, getICECandidateInfo(message.Data))
+	log.Printf("🎉 WebRTC negotiation step 3 completed: ICE candidate handled successfully for client %s", c.ID)
 
-	// 发送确认消息
-	log.Printf("📤 Sending ICE candidate acknowledgment to client %s", c.ID)
-
-	ack := SignalingMessage{
-		Type:      "ice-ack",
-		PeerID:    c.ID,
-		MessageID: generateMessageID(),
-		Timestamp: time.Now().Unix(),
-		Data: map[string]any{
-			"status":    "received",
-			"processed": true,
-		},
-	}
-
-	if err := c.sendMessage(ack); err != nil {
-		log.Printf("❌ Failed to send ICE candidate acknowledgment to client %s: %v", c.ID, err)
-		signalingError := &SignalingError{
-			Code:    ErrorCodeInternalError,
-			Message: "Failed to send ICE candidate acknowledgment",
-			Details: err.Error(),
-			Type:    "server_error",
-		}
-		c.recordError(signalingError)
-	} else {
-		log.Printf("✅ ICE candidate acknowledgment sent to client %s", c.ID)
+	// 触发成功事件（如果事件总线可用）
+	if c.Server.eventBus != nil {
+		c.Server.eventBus.Emit("ice-candidate:processed", map[string]any{
+			"client_id":       c.ID,
+			"processing_time": processingTime,
+			"candidate":       candidateStr,
+			"success":         true,
+		})
 	}
 }
 
@@ -2910,18 +2956,6 @@ func (c *SignalingClient) handleStatsRequest(message SignalingMessage) {
 		}
 		c.recordError(signalingError)
 	}
-}
-
-// handleAnswerAck 处理answer确认
-func (c *SignalingClient) handleAnswerAck(message SignalingMessage) {
-	log.Printf("Answer acknowledged by client %s", c.ID)
-	// 这里可以添加确认处理逻辑，比如更新连接状态
-}
-
-// handleIceAck 处理ICE确认
-func (c *SignalingClient) handleIceAck(message SignalingMessage) {
-	log.Printf("ICE candidate acknowledged by client %s", c.ID)
-	// 这里可以添加ICE确认处理逻辑
 }
 
 // detectProtocolFromMessage 从消息中检测协议类型

@@ -30,8 +30,6 @@ const (
 
 	// 扩展消息类型
 	MessageTypeRequestOffer MessageType = "request-offer"
-	MessageTypeAnswerAck    MessageType = "answer-ack"
-	MessageTypeICEAck       MessageType = "ice-ack"
 	MessageTypeWelcome      MessageType = "welcome"
 
 	// 媒体控制消息类型
