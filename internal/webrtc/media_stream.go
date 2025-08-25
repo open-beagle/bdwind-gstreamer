@@ -6,8 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/sirupsen/logrus"
 )
 
 // MediaStreamConfig 媒体流配置结构
@@ -87,6 +89,9 @@ type MediaStream interface {
 
 	// GetStats 获取媒体流统计信息
 	GetStats() MediaStreamStats
+
+	// HealthCheck 执行媒体流健康检查
+	HealthCheck() error
 }
 
 // TrackState 轨道状态
@@ -148,6 +153,7 @@ type MediaStreamStats struct {
 // mediaStreamImpl WebRTC媒体流实现
 type mediaStreamImpl struct {
 	config     *MediaStreamConfig
+	logger     *logrus.Entry // 使用 logrus entry 来实现日志管理
 	videoTrack *webrtc.TrackLocalStaticSample
 	audioTrack *webrtc.TrackLocalStaticSample
 
@@ -168,15 +174,17 @@ type mediaStreamImpl struct {
 }
 
 // NewMediaStream 创建新的媒体流
-func NewMediaStream(config *MediaStreamConfig) (MediaStream, error) {
-	if config == nil {
-		config = DefaultMediaStreamConfig()
+func NewMediaStream(cfg *MediaStreamConfig) (MediaStream, error) {
+	if cfg == nil {
+		cfg = DefaultMediaStreamConfig()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	logger := config.GetLoggerWithPrefix("media-stream")
 
 	ms := &mediaStreamImpl{
-		config:         config,
+		config:         cfg,
+		logger:         logger,
 		trackInfo:      make(map[string]*TrackInfo),
 		trackStates:    make(map[string]TrackState),
 		monitoringStop: make(chan struct{}),
@@ -185,10 +193,10 @@ func NewMediaStream(config *MediaStreamConfig) (MediaStream, error) {
 	}
 
 	// 创建视频轨道
-	if config.VideoEnabled {
+	if cfg.VideoEnabled {
 		videoTrack, err := webrtc.NewTrackLocalStaticSample(
-			webrtc.RTPCodecCapability{MimeType: getVideoMimeType(config.VideoCodec)},
-			config.VideoTrackID,
+			webrtc.RTPCodecCapability{MimeType: getVideoMimeType(cfg.VideoCodec)},
+			cfg.VideoTrackID,
 			"video-stream",
 		)
 		if err != nil {
@@ -198,23 +206,23 @@ func NewMediaStream(config *MediaStreamConfig) (MediaStream, error) {
 		ms.videoTrack = videoTrack
 
 		// 注册轨道信息
-		ms.trackInfo[config.VideoTrackID] = &TrackInfo{
-			ID:        config.VideoTrackID,
+		ms.trackInfo[cfg.VideoTrackID] = &TrackInfo{
+			ID:        cfg.VideoTrackID,
 			Kind:      webrtc.RTPCodecTypeVideo,
-			MimeType:  getVideoMimeType(config.VideoCodec),
+			MimeType:  getVideoMimeType(cfg.VideoCodec),
 			State:     TrackStateActive,
 			CreatedAt: time.Now(),
 		}
-		ms.trackStates[config.VideoTrackID] = TrackStateActive
+		ms.trackStates[cfg.VideoTrackID] = TrackStateActive
 		ms.stats.TotalTracks++
 		ms.stats.ActiveTracks++
 	}
 
 	// 创建音频轨道
-	if config.AudioEnabled {
+	if cfg.AudioEnabled {
 		audioTrack, err := webrtc.NewTrackLocalStaticSample(
-			webrtc.RTPCodecCapability{MimeType: getAudioMimeType(config.AudioCodec)},
-			config.AudioTrackID,
+			webrtc.RTPCodecCapability{MimeType: getAudioMimeType(cfg.AudioCodec)},
+			cfg.AudioTrackID,
 			"audio-stream",
 		)
 		if err != nil {
@@ -224,14 +232,14 @@ func NewMediaStream(config *MediaStreamConfig) (MediaStream, error) {
 		ms.audioTrack = audioTrack
 
 		// 注册轨道信息
-		ms.trackInfo[config.AudioTrackID] = &TrackInfo{
-			ID:        config.AudioTrackID,
+		ms.trackInfo[cfg.AudioTrackID] = &TrackInfo{
+			ID:        cfg.AudioTrackID,
 			Kind:      webrtc.RTPCodecTypeAudio,
-			MimeType:  getAudioMimeType(config.AudioCodec),
+			MimeType:  getAudioMimeType(cfg.AudioCodec),
 			State:     TrackStateActive,
 			CreatedAt: time.Now(),
 		}
-		ms.trackStates[config.AudioTrackID] = TrackStateActive
+		ms.trackStates[cfg.AudioTrackID] = TrackStateActive
 		ms.stats.TotalTracks++
 		ms.stats.ActiveTracks++
 	}
@@ -311,26 +319,31 @@ func (ms *mediaStreamImpl) WriteVideo(sample media.Sample) error {
 	ms.mutex.RUnlock()
 
 	if track == nil {
-		fmt.Printf("MediaStream: Video track not available\n")
+		// Warn级别: 样本处理异常 - 视频轨道不可用
+		ms.logger.Warn("Video sample write failed: video track not available")
 		return fmt.Errorf("video track not available")
 	}
 
-	fmt.Printf("MediaStream: Writing video sample to track - size=%d bytes, track_id=%s\n",
-		len(sample.Data), track.ID())
+	// Trace级别: 记录每个样本的详细处理信息
+	ms.logger.Tracef("Writing video sample to track: size=%d bytes, track_id=%s, timestamp=%v",
+		len(sample.Data), track.ID(), sample.Timestamp)
 
 	err := track.WriteSample(sample)
 	if err != nil {
-		fmt.Printf("MediaStream: Error writing sample to track: %v\n", err)
+		// Warn级别: 样本处理异常
+		ms.logger.Warnf("Failed to write video sample to track %s: %v", track.ID(), err)
 		return fmt.Errorf("failed to write video sample: %w", err)
 	}
 
-	fmt.Printf("MediaStream: Video sample written to track successfully\n")
+	// Trace级别: 记录成功写入
+	ms.logger.Trace("Video sample written to track successfully")
 
 	// 更新统计信息
 	ms.mutex.Lock()
 	ms.stats.VideoFramesSent++
 	ms.stats.VideoBytesSent += int64(len(sample.Data))
 	ms.stats.LastVideoTimestamp = time.Now()
+	framesSent := ms.stats.VideoFramesSent
 
 	// 更新轨道信息
 	if trackInfo, exists := ms.trackInfo[track.ID()]; exists {
@@ -339,6 +352,12 @@ func (ms *mediaStreamImpl) WriteVideo(sample media.Sample) error {
 		trackInfo.LastActive = time.Now()
 	}
 	ms.mutex.Unlock()
+
+	// Debug级别: 记录样本处理统计（每 1000 个样本）
+	if framesSent%1000 == 0 {
+		ms.logger.Debugf("Video sample processing milestone: %d frames sent to track %s",
+			framesSent, track.ID())
+	}
 
 	return nil
 }
@@ -350,19 +369,31 @@ func (ms *mediaStreamImpl) WriteAudio(sample media.Sample) error {
 	ms.mutex.RUnlock()
 
 	if track == nil {
+		// Warn级别: 样本处理异常 - 音频轨道不可用
+		ms.logger.Warn("Audio sample write failed: audio track not available")
 		return fmt.Errorf("audio track not available")
 	}
 
+	// Trace级别: 记录每个样本的详细处理信息
+	ms.logger.Tracef("Writing audio sample to track: size=%d bytes, track_id=%s, timestamp=%v",
+		len(sample.Data), track.ID(), sample.Timestamp)
+
 	err := track.WriteSample(sample)
 	if err != nil {
+		// Warn级别: 样本处理异常
+		ms.logger.Warnf("Failed to write audio sample to track %s: %v", track.ID(), err)
 		return fmt.Errorf("failed to write audio sample: %w", err)
 	}
+
+	// Trace级别: 记录成功写入
+	ms.logger.Trace("Audio sample written to track successfully")
 
 	// 更新统计信息
 	ms.mutex.Lock()
 	ms.stats.AudioFramesSent++
 	ms.stats.AudioBytesSent += int64(len(sample.Data))
 	ms.stats.LastAudioTimestamp = time.Now()
+	framesSent := ms.stats.AudioFramesSent
 
 	// 更新轨道信息
 	if trackInfo, exists := ms.trackInfo[track.ID()]; exists {
@@ -371,6 +402,12 @@ func (ms *mediaStreamImpl) WriteAudio(sample media.Sample) error {
 		trackInfo.LastActive = time.Now()
 	}
 	ms.mutex.Unlock()
+
+	// Debug级别: 记录样本处理统计（每 1000 个样本）
+	if framesSent%1000 == 0 {
+		ms.logger.Debugf("Audio sample processing milestone: %d frames sent to track %s",
+			framesSent, track.ID())
+	}
 
 	return nil
 }
@@ -538,6 +575,158 @@ func (ms *mediaStreamImpl) GetStats() MediaStreamStats {
 	}
 
 	return stats
+}
+
+// HealthCheck 执行媒体流健康检查
+func (ms *mediaStreamImpl) HealthCheck() error {
+	ms.mutex.RLock()
+	defer ms.mutex.RUnlock()
+
+	// Trace级别: 记录详细的健康检查步骤和指标
+	ms.logger.Trace("Starting MediaStream health check")
+
+	var issues []string
+	now := time.Now()
+	inactivityThreshold := time.Minute * 2 // 2分钟无活动认为异常
+
+	// Trace级别: 记录检查步骤
+	ms.logger.Tracef("Health check configuration: video_enabled=%v, audio_enabled=%v, inactivity_threshold=%v",
+		ms.config.VideoEnabled, ms.config.AudioEnabled, inactivityThreshold)
+
+	// 检查轨道状态
+	if ms.config.VideoEnabled {
+		// Trace级别: 记录视频轨道检查步骤
+		ms.logger.Trace("Checking video track health")
+
+		if ms.videoTrack == nil {
+			issues = append(issues, "video enabled but track is nil")
+			// Debug级别: 记录轨道状态检查结果
+			ms.logger.Debug("Video track health check failed: track is nil")
+		} else {
+			// 检查视频轨道配置一致性
+			expectedMimeType := getVideoMimeType(ms.config.VideoCodec)
+			actualMimeType := ms.videoTrack.Codec().MimeType
+			if actualMimeType != expectedMimeType {
+				issues = append(issues, fmt.Sprintf("video track MIME type mismatch: expected %s, got %s",
+					expectedMimeType, actualMimeType))
+				// Debug级别: 记录配置一致性验证结果
+				ms.logger.Debugf("Video track MIME type mismatch: expected=%s, actual=%s",
+					expectedMimeType, actualMimeType)
+			}
+
+			// 检查视频轨道活动状态
+			if trackInfo, exists := ms.trackInfo[ms.videoTrack.ID()]; exists {
+				if trackInfo.State != TrackStateActive {
+					issues = append(issues, fmt.Sprintf("video track is not active: state=%s", trackInfo.State.String()))
+					// Debug级别: 记录轨道状态检查结果
+					ms.logger.Debugf("Video track state check failed: state=%s", trackInfo.State.String())
+				}
+
+				// 检查最近活动时间
+				if now.Sub(trackInfo.LastActive) > inactivityThreshold {
+					issues = append(issues, fmt.Sprintf("video track inactive for %v", now.Sub(trackInfo.LastActive)))
+					// Debug级别: 记录轨道状态检查结果
+					ms.logger.Debugf("Video track inactivity detected: last_active=%v, inactive_duration=%v",
+						trackInfo.LastActive, now.Sub(trackInfo.LastActive))
+				}
+
+				// Trace级别: 记录视频轨道详细指标
+				ms.logger.Tracef("Video track metrics: frames_sent=%d, bytes_sent=%d, last_active=%v",
+					trackInfo.FramesSent, trackInfo.BytesSent, trackInfo.LastActive)
+			} else {
+				issues = append(issues, "video track info not found")
+				// Debug级别: 记录轨道状态检查结果
+				ms.logger.Debug("Video track info not found in track registry")
+			}
+		}
+	}
+
+	if ms.config.AudioEnabled {
+		// Trace级别: 记录音频轨道检查步骤
+		ms.logger.Trace("Checking audio track health")
+
+		if ms.audioTrack == nil {
+			issues = append(issues, "audio enabled but track is nil")
+			// Debug级别: 记录轨道状态检查结果
+			ms.logger.Debug("Audio track health check failed: track is nil")
+		} else {
+			// 检查音频轨道配置一致性
+			expectedMimeType := getAudioMimeType(ms.config.AudioCodec)
+			actualMimeType := ms.audioTrack.Codec().MimeType
+			if actualMimeType != expectedMimeType {
+				issues = append(issues, fmt.Sprintf("audio track MIME type mismatch: expected %s, got %s",
+					expectedMimeType, actualMimeType))
+				// Debug级别: 记录配置一致性验证结果
+				ms.logger.Debugf("Audio track MIME type mismatch: expected=%s, actual=%s",
+					expectedMimeType, actualMimeType)
+			}
+
+			// 检查音频轨道活动状态
+			if trackInfo, exists := ms.trackInfo[ms.audioTrack.ID()]; exists {
+				if trackInfo.State != TrackStateActive {
+					issues = append(issues, fmt.Sprintf("audio track is not active: state=%s", trackInfo.State.String()))
+					// Debug级别: 记录轨道状态检查结果
+					ms.logger.Debugf("Audio track state check failed: state=%s", trackInfo.State.String())
+				}
+
+				// 检查最近活动时间
+				if now.Sub(trackInfo.LastActive) > inactivityThreshold {
+					issues = append(issues, fmt.Sprintf("audio track inactive for %v", now.Sub(trackInfo.LastActive)))
+					// Debug级别: 记录轨道状态检查结果
+					ms.logger.Debugf("Audio track inactivity detected: last_active=%v, inactive_duration=%v",
+						trackInfo.LastActive, now.Sub(trackInfo.LastActive))
+				}
+
+				// Trace级别: 记录音频轨道详细指标
+				ms.logger.Tracef("Audio track metrics: frames_sent=%d, bytes_sent=%d, last_active=%v",
+					trackInfo.FramesSent, trackInfo.BytesSent, trackInfo.LastActive)
+			} else {
+				issues = append(issues, "audio track info not found")
+				// Debug级别: 记录轨道状态检查结果
+				ms.logger.Debug("Audio track info not found in track registry")
+			}
+		}
+	}
+
+	// 检查统计信息一致性
+	stats := ms.stats
+	expectedActiveTracks := 0
+	for _, state := range ms.trackStates {
+		if state == TrackStateActive {
+			expectedActiveTracks++
+		}
+	}
+
+	if stats.ActiveTracks != expectedActiveTracks {
+		issues = append(issues, fmt.Sprintf("active track count mismatch: stats=%d, actual=%d",
+			stats.ActiveTracks, expectedActiveTracks))
+		// Debug级别: 记录配置一致性验证结果
+		ms.logger.Debugf("Active track count mismatch: stats_count=%d, calculated_count=%d",
+			stats.ActiveTracks, expectedActiveTracks)
+	}
+
+	// Trace级别: 记录详细的健康检查指标
+	ms.logger.Tracef("Health check statistics: total_tracks=%d, active_tracks=%d, video_frames=%d, audio_frames=%d",
+		stats.TotalTracks, stats.ActiveTracks, stats.VideoFramesSent, stats.AudioFramesSent)
+
+	// 生成健康检查结果
+	if len(issues) > 0 {
+		// Info级别: 记录健康检查结果摘要（失败）
+		ms.logger.Infof("MediaStream health check failed with %d issues", len(issues))
+		// Debug级别: 记录详细的问题列表
+		for i, issue := range issues {
+			ms.logger.Debugf("Health check issue %d: %s", i+1, issue)
+		}
+		return fmt.Errorf("MediaStream health check failed: %v", issues)
+	}
+
+	// Info级别: 记录健康检查结果摘要（通过）
+	ms.logger.Info("MediaStream health check passed successfully")
+	// Debug级别: 记录健康检查通过的详细信息
+	ms.logger.Debugf("Health check passed: %d tracks active, video_enabled=%v, audio_enabled=%v",
+		expectedActiveTracks, ms.config.VideoEnabled, ms.config.AudioEnabled)
+
+	return nil
 }
 
 // getVideoMimeType 根据编码器类型获取视频MIME类型

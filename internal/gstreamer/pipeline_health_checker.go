@@ -3,15 +3,16 @@ package gstreamer
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // PipelineHealthChecker monitors pipeline health and detects issues
 type PipelineHealthChecker struct {
 	pipeline Pipeline
-	logger   *log.Logger
+	logger   *logrus.Entry
 	mu       sync.RWMutex
 
 	// Configuration
@@ -142,13 +143,13 @@ type HealthCheckResult struct {
 }
 
 // NewPipelineHealthChecker creates a new pipeline health checker
-func NewPipelineHealthChecker(ctx context.Context, pipeline Pipeline, logger *log.Logger, config *HealthCheckerConfig) *PipelineHealthChecker {
+func NewPipelineHealthChecker(ctx context.Context, pipeline Pipeline, logger *logrus.Entry, healthConfig *HealthCheckerConfig) *PipelineHealthChecker {
 	if logger == nil {
-		logger = log.Default()
+		logger = logrus.WithField("component", "pipeline-health-checker")
 	}
 
-	if config == nil {
-		config = &HealthCheckerConfig{
+	if healthConfig == nil {
+		healthConfig = &HealthCheckerConfig{
 			CheckInterval: 5 * time.Second,
 			CheckTimeout:  2 * time.Second,
 		}
@@ -159,7 +160,7 @@ func NewPipelineHealthChecker(ctx context.Context, pipeline Pipeline, logger *lo
 	return &PipelineHealthChecker{
 		pipeline: pipeline,
 		logger:   logger,
-		config:   config,
+		config:   healthConfig,
 		ctx:      childCtx,
 		cancel:   cancel,
 		healthStatus: HealthStatus{

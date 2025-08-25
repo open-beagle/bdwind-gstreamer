@@ -10,7 +10,6 @@ type GStreamerConfig struct {
 	Encoding EncoderConfig        `yaml:"encoding" json:"encoding"`
 }
 
-
 // DefaultGStreamerConfig 返回默认的GStreamer配置
 func DefaultGStreamerConfig() *GStreamerConfig {
 	return &GStreamerConfig{
@@ -18,7 +17,6 @@ func DefaultGStreamerConfig() *GStreamerConfig {
 		Encoding: DefaultEncoderConfig(),
 	}
 }
-
 
 // Validate 验证配置
 func (c *GStreamerConfig) Validate() error {
@@ -34,7 +32,6 @@ func (c *GStreamerConfig) Validate() error {
 
 	return nil
 }
-
 
 // SetDefaults sets default values for the GStreamer configuration.
 func (c *GStreamerConfig) SetDefaults() {

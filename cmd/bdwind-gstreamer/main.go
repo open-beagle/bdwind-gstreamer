@@ -76,6 +76,9 @@ func main() {
 		certFile   = flag.String("cert", "", "TLS certificate file")
 		keyFile    = flag.String("key", "", "TLS key file")
 		displayID  = flag.String("display", ":0", "Display ID for capture")
+		logLevel   = flag.String("log-level", "", "Log level (TRACE, DEBUG, INFO, WARN, ERROR)")
+		logOutput  = flag.String("log-output", "", "Log output (stdout, stderr, file)")
+		logFile    = flag.String("log-file", "", "Log file path (when log-output is file)")
 		version    = flag.Bool("version", false, "Show version information")
 	)
 	flag.Parse()
@@ -120,9 +123,32 @@ func main() {
 		cfg.GStreamer.Capture.DisplayID = *displayID
 	}
 
+	// 日志配置覆盖
+	if *logLevel != "" {
+		if level, err := config.ParseLogLevel(*logLevel); err == nil {
+			cfg.Logging.Level = level
+		} else {
+			log.Printf("Invalid log level '%s': %v", *logLevel, err)
+		}
+	}
+	if *logOutput != "" {
+		cfg.Logging.Output = *logOutput
+	}
+	if *logFile != "" {
+		cfg.Logging.File = *logFile
+		if cfg.Logging.Output == "" {
+			cfg.Logging.Output = "file"
+		}
+	}
+
 	// 验证配置
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
+	}
+
+	// 初始化日志系统
+	if err := config.SetupLogger(cfg.Logging); err != nil {
+		log.Fatalf("Failed to setup logger: %v", err)
 	}
 
 	// 检查端口占用
@@ -136,7 +162,7 @@ func main() {
 	log.Printf("✅ All required ports are available")
 
 	// 创建应用
-	app, err := NewBDWindApp(cfg, log.Default())
+	app, err := NewBDWindApp(cfg, nil)
 	if err != nil {
 		log.Fatalf("Failed to create application: %v", err)
 	}

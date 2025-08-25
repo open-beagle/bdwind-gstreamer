@@ -19,6 +19,10 @@ func TestPeerConnectionManager_LifecycleManagement(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "LIFECYCLE_TEST: ", log.LstdFlags)
@@ -78,6 +82,10 @@ func TestPeerConnectionManager_MultiClientScenario(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "MULTI_CLIENT_TEST: ", log.LstdFlags)
@@ -152,6 +160,10 @@ func TestPeerConnectionManager_ConnectionTimeout(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "TIMEOUT_TEST: ", log.LstdFlags)
@@ -207,6 +219,10 @@ func TestPeerConnectionManager_ReconnectionMechanism(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "RECONNECT_TEST: ", log.LstdFlags)
@@ -252,6 +268,10 @@ func TestPeerConnectionManager_StateChangeCallbacks(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "CALLBACK_TEST: ", log.LstdFlags)
@@ -309,6 +329,10 @@ func TestPeerConnectionManager_ICEStateHandling(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "ICE_TEST: ", log.LstdFlags)
@@ -358,6 +382,10 @@ func TestPeerConnectionManager_MetricsTracking(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "METRICS_TEST: ", log.LstdFlags)
@@ -411,6 +439,10 @@ func TestPeerConnectionManager_ConcurrentOperations(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "CONCURRENT_TEST: ", log.LstdFlags)

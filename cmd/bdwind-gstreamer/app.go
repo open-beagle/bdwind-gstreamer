@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/open-beagle/bdwind-gstreamer/internal/gstreamer"
@@ -24,7 +25,7 @@ type BDWindApp struct {
 	webrtcMgr    *webrtc.Manager
 	gstreamerMgr *gstreamer.Manager
 	metricsMgr   *metrics.Manager
-	logger       *log.Logger
+	logger       *logrus.Entry
 	startTime    time.Time
 
 	// Context lifecycle management fields
@@ -35,9 +36,9 @@ type BDWindApp struct {
 }
 
 // NewBDWindApp 创建BDWind应用
-func NewBDWindApp(config *config.Config, logger *log.Logger) (*BDWindApp, error) {
+func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) {
 	if logger == nil {
-		logger = log.Default()
+		logger = config.GetLoggerWithPrefix("app")
 	}
 
 	// Create root context for lifecycle management
@@ -48,8 +49,7 @@ func NewBDWindApp(config *config.Config, logger *log.Logger) (*BDWindApp, error)
 
 	// 创建WebRTC管理器
 	webrtcMgrConfig := &webrtc.ManagerConfig{
-		Config: config,
-		Logger: logger,
+		Config: cfg,
 	}
 
 	webrtcMgr, err := webrtc.NewManager(rootCtx, webrtcMgrConfig)
@@ -60,8 +60,7 @@ func NewBDWindApp(config *config.Config, logger *log.Logger) (*BDWindApp, error)
 
 	// 创建GStreamer管理器
 	gstreamerMgrConfig := &gstreamer.ManagerConfig{
-		Config: config.GStreamer,
-		Logger: logger,
+		Config: cfg.GStreamer,
 	}
 
 	gstreamerMgr, err := gstreamer.NewManager(rootCtx, gstreamerMgrConfig)
@@ -71,21 +70,21 @@ func NewBDWindApp(config *config.Config, logger *log.Logger) (*BDWindApp, error)
 	}
 
 	// 创建webserver管理器（包含认证功能）
-	webserverMgr, err := webserver.NewManager(rootCtx, config.WebServer, logger)
+	webserverMgr, err := webserver.NewManager(rootCtx, cfg.WebServer, config.GetStandardLoggerWithPrefix("webserver"))
 	if err != nil {
 		cancelFunc() // Clean up context on error
 		return nil, fmt.Errorf("failed to create webserver manager: %w", err)
 	}
 
 	// 创建监控管理器
-	metricsMgr, err := metrics.NewManager(rootCtx, config.Metrics, logger)
+	metricsMgr, err := metrics.NewManager(rootCtx, cfg.Metrics, config.GetStandardLoggerWithPrefix("metrics"))
 	if err != nil {
 		cancelFunc() // Clean up context on error
 		return nil, fmt.Errorf("failed to create metrics manager: %w", err)
 	}
 
 	app := &BDWindApp{
-		config:       config,
+		config:       cfg,
 		webserverMgr: webserverMgr,
 		webrtcMgr:    webrtcMgr,
 		gstreamerMgr: gstreamerMgr,
@@ -102,56 +101,147 @@ func NewBDWindApp(config *config.Config, logger *log.Logger) (*BDWindApp, error)
 
 // connectGStreamerToWebRTC connects the GStreamer desktop capture to WebRTC bridge
 func (app *BDWindApp) connectGStreamerToWebRTC() error {
-	app.logger.Printf("Connecting GStreamer desktop capture to WebRTC bridge...")
+	// Info级别: 记录样本回调链路建立成功/失败状态
+	app.logger.Info("Establishing sample callback chain from GStreamer to WebRTC")
+
+	// Debug级别: 记录组件状态验证结果
+	app.logger.Debug("Verifying component availability for sample callback chain")
 
 	// Get the desktop capture from GStreamer manager
 	capture := app.gstreamerMgr.GetCapture()
 	if capture == nil {
+		// Error级别: 链路中断 - GStreamer捕获不可用
+		app.logger.Error("Sample callback chain failed: desktop capture not available")
 		return fmt.Errorf("desktop capture not available")
 	}
+	// Debug级别: 记录组件状态验证结果
+	app.logger.Debug("GStreamer desktop capture component verified")
 
 	// Get the WebRTC bridge from WebRTC manager
 	bridge := app.webrtcMgr.GetBridge()
 	if bridge == nil {
+		// Error级别: 链路中断 - WebRTC桥接器不可用
+		app.logger.Error("Sample callback chain failed: WebRTC bridge not available")
 		return fmt.Errorf("WebRTC bridge not available")
 	}
+	// Debug级别: 记录组件状态验证结果
+	app.logger.Debug("WebRTC bridge component verified")
+
+	// Get MediaStream for validation
+	mediaStream := app.webrtcMgr.GetMediaStream()
+	if mediaStream == nil {
+		// Warn级别: 样本处理异常 - MediaStream不可用
+		app.logger.Warn("Sample callback chain warning: MediaStream not available")
+	} else {
+		// Debug级别: 记录组件状态验证结果和样本处理统计
+		stats := mediaStream.GetStats()
+		app.logger.Debugf("MediaStream status verified: total_tracks=%d, active_tracks=%d",
+			stats.TotalTracks, stats.ActiveTracks)
+	}
+
+	// Trace级别: 记录样本处理统计初始化
+	var videoSampleCount, audioSampleCount int64
+	app.logger.Trace("Initializing sample processing counters")
 
 	// Set up the connection: GStreamer sample callback -> WebRTC bridge
 	capture.SetSampleCallback(func(sample *gstreamer.Sample) error {
 		if sample == nil {
+			// Warn级别: 样本处理异常
+			app.logger.Warn("Sample callback received nil sample")
 			return fmt.Errorf("received nil sample")
 		}
 
+		// Trace级别: 记录每个样本的详细处理信息和类型识别
+		app.logger.Tracef("Processing sample: type=%s, size=%d bytes, timestamp=%v, dimensions=%dx%d",
+			sample.Format.MediaType.String(), sample.Size(), sample.Timestamp,
+			sample.Format.Width, sample.Format.Height)
+
 		// Process the sample through WebRTC bridge
+		var err error
 		if sample.IsVideo() {
-			return bridge.ProcessVideoSample(sample)
+			videoSampleCount++
+			err = bridge.ProcessVideoSample(sample)
+
+			// Debug级别: 记录样本处理统计（每 1000 个样本）
+			if videoSampleCount%1000 == 0 {
+				app.logger.Debugf("Video sample processing milestone: %d samples processed", videoSampleCount)
+			}
+
+			// Trace级别: 记录每个样本的详细处理信息和类型识别
+			app.logger.Tracef("Video sample processed: count=%d, codec=%s, processing_result=%v",
+				videoSampleCount, sample.Format.Codec, err == nil)
 		} else if sample.IsAudio() {
-			return bridge.ProcessAudioSample(sample)
+			audioSampleCount++
+			err = bridge.ProcessAudioSample(sample)
+
+			// Debug级别: 记录样本处理统计（每 1000 个样本）
+			if audioSampleCount%1000 == 0 {
+				app.logger.Debugf("Audio sample processing milestone: %d samples processed", audioSampleCount)
+			}
+
+			// Trace级别: 记录每个样本的详细处理信息和类型识别
+			app.logger.Tracef("Audio sample processed: count=%d, codec=%s, channels=%d, sample_rate=%d, processing_result=%v",
+				audioSampleCount, sample.Format.Codec, sample.Format.Channels, sample.Format.SampleRate, err == nil)
 		}
 
-		return nil
+		if err != nil {
+			// Warn级别: 样本处理异常
+			app.logger.Warnf("Sample processing failed for %s sample: %v",
+				sample.Format.MediaType.String(), err)
+		}
+
+		return err
 	})
 
 	app.gstreamerMgr.SetEncodedSampleCallback(func(sample *gstreamer.Sample) error {
 		if sample == nil {
+			// Warn级别: 样本处理异常
+			app.logger.Warn("Encoded sample callback received nil sample")
 			return fmt.Errorf("received nil sample")
 		}
+
+		// Trace级别: 记录编码样本的详细处理信息和类型识别
+		app.logger.Tracef("Processing encoded sample: type=%s, size=%d bytes, codec=%s, timestamp=%v",
+			sample.Format.MediaType.String(), sample.Size(), sample.Format.Codec, sample.Timestamp)
+
 		// Process the sample through WebRTC bridge
+		var err error
 		if sample.IsVideo() {
-			return bridge.ProcessVideoSample(sample)
+			err = bridge.ProcessVideoSample(sample)
+			// Trace级别: 记录编码视频样本处理结果
+			app.logger.Tracef("Encoded video sample processed: codec=%s, size=%d bytes, result=%v",
+				sample.Format.Codec, sample.Size(), err == nil)
 		} else if sample.IsAudio() {
-			return bridge.ProcessAudioSample(sample)
+			err = bridge.ProcessAudioSample(sample)
+			// Trace级别: 记录编码音频样本处理结果
+			app.logger.Tracef("Encoded audio sample processed: codec=%s, size=%d bytes, result=%v",
+				sample.Format.Codec, sample.Size(), err == nil)
 		}
-		return nil
+
+		if err != nil {
+			// Warn级别: 样本处理异常
+			app.logger.Warnf("Encoded sample processing failed for %s sample: %v",
+				sample.Format.MediaType.String(), err)
+		}
+
+		return err
 	})
 
-	app.logger.Printf("GStreamer desktop capture connected to WebRTC bridge successfully")
+	// Info级别: 记录样本回调链路建立成功状态
+	app.logger.Info("Sample callback chain established successfully")
+	// Debug级别: 记录组件状态验证结果和链路配置详情
+	app.logger.Debug("Sample callback chain configuration:")
+	app.logger.Debug("  Raw sample callback: configured")
+	app.logger.Debug("  Encoded sample callback: configured")
+	app.logger.Debug("  Target bridge: WebRTC bridge")
+	app.logger.Debug("  Component chain: GStreamer -> Bridge -> MediaStream")
+
 	return nil
 }
 
 // Start 启动应用
 func (app *BDWindApp) Start() error {
-	app.logger.Printf("Starting BDWind-GStreamer v1.0.0")
+	app.logger.Info("Starting BDWind-GStreamer v1.0.0")
 
 	// Setup signal handling for graceful shutdown
 	signal.Notify(app.sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -182,15 +272,15 @@ func (app *BDWindApp) Start() error {
 	for i, mgr := range managers {
 		if mgr.name == "webserver" {
 			// Before starting webserver, register other components for route setup
-			app.logger.Printf("Registering components with webserver before starting...")
+			app.logger.Infof("Registering components with webserver before starting...")
 			if err := app.registerComponentsWithWebServer(); err != nil {
-				app.logger.Printf("Failed to register components with webserver: %v", err)
+				app.logger.Errorf("Failed to register components with webserver: %v", err)
 
 				// Rollback: stop already started components
 				for j := i - 1; j >= 0; j-- {
-					app.logger.Printf("Rolling back: stopping %s manager...", managers[j].name)
+					app.logger.Warnf("Rolling back: stopping %s manager...", managers[j].name)
 					if stopErr := managers[j].manager.Stop(app.rootCtx); stopErr != nil {
-						app.logger.Printf("Failed to stop %s during rollback: %v",
+						app.logger.Errorf("Failed to stop %s during rollback: %v",
 							managers[j].name, stopErr)
 					}
 				}
@@ -199,41 +289,41 @@ func (app *BDWindApp) Start() error {
 			}
 		}
 
-		app.logger.Printf("Starting %s manager...", mgr.name)
+		app.logger.Infof("Starting %s manager...", mgr.name)
 
 		if err := mgr.manager.Start(app.rootCtx); err != nil {
-			app.logger.Printf("Failed to start %s manager: %v", mgr.name, err)
+			app.logger.Errorf("Failed to start %s manager: %v", mgr.name, err)
 
 			// Rollback: stop already started components in reverse order
 			for j := i - 1; j >= 0; j-- {
-				app.logger.Printf("Rolling back: stopping %s manager...", managers[j].name)
+				app.logger.Warnf("Rolling back: stopping %s manager...", managers[j].name)
 				if stopErr := managers[j].manager.Stop(app.rootCtx); stopErr != nil {
-					app.logger.Printf("Failed to stop %s during rollback: %v",
+					app.logger.Errorf("Failed to stop %s during rollback: %v",
 						managers[j].name, stopErr)
 				} else {
-					app.logger.Printf("%s manager stopped during rollback", managers[j].name)
+					app.logger.Infof("%s manager stopped during rollback", managers[j].name)
 				}
 			}
 
 			return fmt.Errorf("failed to start %s manager: %w", mgr.name, err)
 		}
 
-		app.logger.Printf("%s manager started successfully", mgr.name)
+		app.logger.Infof("%s manager started successfully", mgr.name)
 	}
 
 	// Connect GStreamer to WebRTC after all components are started
 	if err := app.connectGStreamerToWebRTC(); err != nil {
-		app.logger.Printf("Failed to connect GStreamer to WebRTC: %v", err)
+		app.logger.Warnf("Failed to connect GStreamer to WebRTC: %v", err)
 		// Don't fail the startup, but log the error
 	}
 
-	app.logger.Printf("BDWind-GStreamer application started successfully")
+	app.logger.Infof("BDWind-GStreamer application started successfully")
 	return nil
 }
 
 // Stop 停止应用
 func (app *BDWindApp) Stop(ctx context.Context) error {
-	app.logger.Println("Stopping BDWind-GStreamer application...")
+	app.logger.Info("Stopping BDWind-GStreamer application...")
 
 	// Cancel the root context to signal all components to stop
 	app.cancelFunc()
@@ -268,23 +358,23 @@ func (app *BDWindApp) Stop(ctx context.Context) error {
 
 	// Stop components in reverse order
 	for _, mgr := range managers {
-		app.logger.Printf("Stopping %s manager...", mgr.name)
+		app.logger.Infof("Stopping %s manager...", mgr.name)
 
 		if err := mgr.manager.Stop(ctx); err != nil {
-			app.logger.Printf("Failed to stop %s manager: %v", mgr.name, err)
+			app.logger.Errorf("Failed to stop %s manager: %v", mgr.name, err)
 			errors = append(errors, fmt.Errorf("failed to stop %s: %w", mgr.name, err))
 		} else {
-			app.logger.Printf("%s manager stopped successfully", mgr.name)
+			app.logger.Infof("%s manager stopped successfully", mgr.name)
 		}
 	}
 
 	// Report final status
 	if len(errors) > 0 {
-		app.logger.Printf("BDWind-GStreamer application stopped with %d errors", len(errors))
+		app.logger.Errorf("BDWind-GStreamer application stopped with %d errors", len(errors))
 		return fmt.Errorf("errors during shutdown: %v", errors)
 	}
 
-	app.logger.Println("BDWind-GStreamer application stopped successfully")
+	app.logger.Info("BDWind-GStreamer application stopped successfully")
 	return nil
 }
 
@@ -319,7 +409,7 @@ func (app *BDWindApp) handleSignals() {
 
 	select {
 	case sig := <-app.sigChan:
-		app.logger.Printf("Received signal: %v, initiating graceful shutdown", sig)
+		app.logger.Infof("Received signal: %v, initiating graceful shutdown", sig)
 		app.cancelFunc()
 	case <-app.rootCtx.Done():
 		// Context was cancelled from elsewhere
@@ -334,14 +424,14 @@ func (app *BDWindApp) GetRootContext() context.Context {
 
 // registerComponentsWithWebServer registers all components with the WebServer for route setup
 func (app *BDWindApp) registerComponentsWithWebServer() error {
-	app.logger.Printf("=== Starting component registration with webserver ===")
+	app.logger.Infof("=== Starting component registration with webserver ===")
 
 	webServer := app.webserverMgr.GetWebServer()
 	if webServer == nil {
-		app.logger.Printf("ERROR: webserver instance is nil")
+		app.logger.Error("webserver instance is nil")
 		return fmt.Errorf("webserver instance is nil")
 	}
-	app.logger.Printf("DEBUG: webserver instance obtained successfully")
+	app.logger.Debug("webserver instance obtained successfully")
 
 	// Register components that need to expose HTTP routes
 	// For now, we'll register components that implement the ComponentManager interface
@@ -351,72 +441,72 @@ func (app *BDWindApp) registerComponentsWithWebServer() error {
 	var registrationErrors []error
 
 	// Try to register metrics component
-	app.logger.Printf("--- Attempting to register metrics component ---")
-	app.logger.Printf("DEBUG: metrics manager instance: %T", app.metricsMgr)
-	app.logger.Printf("DEBUG: metrics manager nil check: %v", app.metricsMgr == nil)
+	app.logger.Infof("--- Attempting to register metrics component ---")
+	app.logger.Debugf("metrics manager instance: %T", app.metricsMgr)
+	app.logger.Debugf("metrics manager nil check: %v", app.metricsMgr == nil)
 
 	// Check if metrics manager implements ComponentManager interface
 	if mgr, ok := interface{}(app.metricsMgr).(webserver.ComponentManager); ok {
-		app.logger.Printf("SUCCESS: metrics component implements ComponentManager interface")
-		app.logger.Printf("Registering metrics component with webserver...")
+		app.logger.Infof("SUCCESS: metrics component implements ComponentManager interface")
+		app.logger.Infof("Registering metrics component with webserver...")
 
 		if err := webServer.RegisterComponent("metrics", mgr); err != nil {
-			app.logger.Printf("ERROR: Failed to register metrics component: %v", err)
+			app.logger.Errorf("Failed to register metrics component: %v", err)
 			registrationErrors = append(registrationErrors, fmt.Errorf("failed to register metrics component: %w", err))
 			registrationResults["metrics"] = false
 		} else {
-			app.logger.Printf("SUCCESS: metrics component registered successfully")
+			app.logger.Infof("SUCCESS: metrics component registered successfully")
 			registrationResults["metrics"] = true
 		}
 	} else {
-		app.logger.Printf("SKIP: metrics component does not implement ComponentManager interface")
+		app.logger.Infof("SKIP: metrics component does not implement ComponentManager interface")
 		registrationResults["metrics"] = false
 	}
 
 	// Try to register gstreamer component
-	app.logger.Printf("--- Attempting to register gstreamer component ---")
-	app.logger.Printf("DEBUG: gstreamer manager instance: %T", app.gstreamerMgr)
-	app.logger.Printf("DEBUG: gstreamer manager nil check: %v", app.gstreamerMgr == nil)
+	app.logger.Infof("--- Attempting to register gstreamer component ---")
+	app.logger.Debugf("gstreamer manager instance: %T", app.gstreamerMgr)
+	app.logger.Debugf("gstreamer manager nil check: %v", app.gstreamerMgr == nil)
 
 	// Check if gstreamer manager implements ComponentManager interface
 	if mgr, ok := interface{}(app.gstreamerMgr).(webserver.ComponentManager); ok {
-		app.logger.Printf("SUCCESS: gstreamer component implements ComponentManager interface")
-		app.logger.Printf("Registering gstreamer component with webserver...")
+		app.logger.Infof("SUCCESS: gstreamer component implements ComponentManager interface")
+		app.logger.Infof("Registering gstreamer component with webserver...")
 
 		if err := webServer.RegisterComponent("gstreamer", mgr); err != nil {
-			app.logger.Printf("ERROR: Failed to register gstreamer component: %v", err)
+			app.logger.Errorf("Failed to register gstreamer component: %v", err)
 			registrationErrors = append(registrationErrors, fmt.Errorf("failed to register gstreamer component: %w", err))
 			registrationResults["gstreamer"] = false
 		} else {
-			app.logger.Printf("SUCCESS: gstreamer component registered successfully")
+			app.logger.Infof("SUCCESS: gstreamer component registered successfully")
 			registrationResults["gstreamer"] = true
 		}
 	} else {
-		app.logger.Printf("SKIP: gstreamer component does not implement ComponentManager interface")
+		app.logger.Infof("SKIP: gstreamer component does not implement ComponentManager interface")
 		registrationResults["gstreamer"] = false
 	}
 
 	// Try to register webrtc component
-	app.logger.Printf("--- Attempting to register webrtc component ---")
-	app.logger.Printf("DEBUG: webrtc manager instance: %T", app.webrtcMgr)
-	app.logger.Printf("DEBUG: webrtc manager nil check: %v", app.webrtcMgr == nil)
+	app.logger.Infof("--- Attempting to register webrtc component ---")
+	app.logger.Debugf("webrtc manager instance: %T", app.webrtcMgr)
+	app.logger.Debugf("webrtc manager nil check: %v", app.webrtcMgr == nil)
 
 	// Since the WebRTC manager implements ComponentManager interface (verified by successful build),
 	// we can directly register it without type assertion
-	app.logger.Printf("SUCCESS: webrtc component implements ComponentManager interface")
-	app.logger.Printf("Registering webrtc component with webserver...")
+	app.logger.Infof("SUCCESS: webrtc component implements ComponentManager interface")
+	app.logger.Infof("Registering webrtc component with webserver...")
 
 	if err := webServer.RegisterComponent("webrtc", app.webrtcMgr); err != nil {
-		app.logger.Printf("ERROR: Failed to register webrtc component: %v", err)
+		app.logger.Errorf("Failed to register webrtc component: %v", err)
 		registrationErrors = append(registrationErrors, fmt.Errorf("failed to register webrtc component: %w", err))
 		registrationResults["webrtc"] = false
 	} else {
-		app.logger.Printf("SUCCESS: webrtc component registered successfully")
+		app.logger.Infof("SUCCESS: webrtc component registered successfully")
 		registrationResults["webrtc"] = true
 	}
 
 	// Summary of registration results
-	app.logger.Printf("=== Component registration summary ===")
+	app.logger.Infof("=== Component registration summary ===")
 	successCount := 0
 	for component, success := range registrationResults {
 		status := "FAILED"
@@ -424,26 +514,26 @@ func (app *BDWindApp) registerComponentsWithWebServer() error {
 			status = "SUCCESS"
 			successCount++
 		}
-		app.logger.Printf("Component '%s': %s", component, status)
+		app.logger.Infof("Component '%s': %s", component, status)
 	}
 
-	app.logger.Printf("Total components processed: %d", len(registrationResults))
-	app.logger.Printf("Successfully registered: %d", successCount)
-	app.logger.Printf("Failed/Skipped: %d", len(registrationResults)-successCount)
+	app.logger.Infof("Total components processed: %d", len(registrationResults))
+	app.logger.Infof("Successfully registered: %d", successCount)
+	app.logger.Infof("Failed/Skipped: %d", len(registrationResults)-successCount)
 
 	// If there were registration errors, return the first one
 	if len(registrationErrors) > 0 {
-		app.logger.Printf("ERROR: Component registration completed with %d errors", len(registrationErrors))
+		app.logger.Errorf("Component registration completed with %d errors", len(registrationErrors))
 		return registrationErrors[0]
 	}
 
-	app.logger.Printf("=== Component registration completed successfully ===")
+	app.logger.Infof("=== Component registration completed successfully ===")
 	return nil
 }
 
 // Shutdown initiates graceful shutdown of the application
 func (app *BDWindApp) Shutdown() {
-	app.logger.Println("Initiating application shutdown...")
+	app.logger.Info("Initiating application shutdown...")
 	app.cancelFunc()
 }
 
@@ -454,7 +544,7 @@ func (app *BDWindApp) Wait() {
 
 // ForceShutdown forces immediate shutdown of the application
 func (app *BDWindApp) ForceShutdown() error {
-	app.logger.Println("Force shutdown initiated...")
+	app.logger.Info("Force shutdown initiated...")
 
 	// Cancel context immediately
 	app.cancelFunc()
@@ -479,13 +569,13 @@ func (app *BDWindApp) ForceShutdown() error {
 	// Stop all components, log errors but don't fail
 	for _, mgr := range managers {
 		if err := mgr.manager.Stop(ctx); err != nil {
-			app.logger.Printf("Force shutdown: %s stop error: %v", mgr.name, err)
+			app.logger.Infof("Force shutdown: %s stop error: %v", mgr.name, err)
 		} else {
-			app.logger.Printf("Force shutdown: %s stopped successfully", mgr.name)
+			app.logger.Infof("Force shutdown: %s stopped successfully", mgr.name)
 		}
 	}
 
-	app.logger.Println("Force shutdown completed")
+	app.logger.Info("Force shutdown completed")
 	return nil
 }
 
@@ -496,25 +586,25 @@ func (app *BDWindApp) IsHealthy() bool {
 
 	// 检查 metrics 管理器
 	if app.metricsMgr.IsEnabled() && !app.metricsMgr.IsRunning() {
-		app.logger.Printf("Component metrics is enabled but not running")
+		app.logger.Infof("Component metrics is enabled but not running")
 		return false
 	}
 
 	// 检查 gstreamer 管理器
 	if app.gstreamerMgr.IsEnabled() && !app.gstreamerMgr.IsRunning() {
-		app.logger.Printf("Component gstreamer is enabled but not running")
+		app.logger.Infof("Component gstreamer is enabled but not running")
 		return false
 	}
 
 	// 检查 webrtc 管理器
 	if app.webrtcMgr.IsEnabled() && !app.webrtcMgr.IsRunning() {
-		app.logger.Printf("Component webrtc is enabled but not running")
+		app.logger.Infof("Component webrtc is enabled but not running")
 		return false
 	}
 
 	// 检查 webserver 管理器
 	if app.webserverMgr.IsEnabled() && !app.webserverMgr.IsRunning() {
-		app.logger.Printf("Component webserver is enabled but not running")
+		app.logger.Infof("Component webserver is enabled but not running")
 		return false
 	}
 

@@ -84,12 +84,21 @@ func (m *MockMediaStream) GetStats() MediaStreamStats {
 	return args.Get(0).(MediaStreamStats)
 }
 
+func (m *MockMediaStream) HealthCheck() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
 // TestPeerConnectionManager_CreatePeerConnection 测试创建PeerConnection
 func TestPeerConnectionManager_CreatePeerConnection(t *testing.T) {
 	// 创建模拟媒体流
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "TEST: ", log.LstdFlags)
@@ -154,6 +163,10 @@ func TestPeerConnectionManager_CreateOfferFlow(t *testing.T) {
 	mockMediaStream := &MockMediaStream{}
 	mockMediaStream.On("GetVideoTrack").Return(nil)
 	mockMediaStream.On("GetAudioTrack").Return(nil)
+	mockMediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	// 创建PeerConnection管理器
 	logger := log.New(os.Stdout, "TEST: ", log.LstdFlags)

@@ -3,15 +3,16 @@ package gstreamer
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // PipelineStateManager manages GStreamer pipeline states and provides monitoring and recovery capabilities
 type PipelineStateManager struct {
 	pipeline Pipeline
-	logger   *log.Logger
+	logger   *logrus.Entry
 	mu       sync.RWMutex
 
 	// State tracking
@@ -81,13 +82,13 @@ type StateTransition struct {
 }
 
 // NewPipelineStateManager creates a new pipeline state manager
-func NewPipelineStateManager(ctx context.Context, pipeline Pipeline, logger *log.Logger, config *StateManagerConfig) *PipelineStateManager {
+func NewPipelineStateManager(ctx context.Context, pipeline Pipeline, logger *logrus.Entry, config *StateManagerConfig) *PipelineStateManager {
 	if config == nil {
 		config = DefaultStateManagerConfig()
 	}
 
 	if logger == nil {
-		logger = log.Default()
+		logger = logrus.WithField("component", "pipeline-state-manager")
 	}
 
 	childCtx, cancel := context.WithCancel(ctx)
@@ -126,12 +127,12 @@ func (psm *PipelineStateManager) Start() error {
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
 
-	psm.logger.Printf("Starting pipeline state manager...")
+	psm.logger.Info("Starting pipeline state manager...")
 
 	// Get initial pipeline state
 	initialState, err := psm.pipeline.GetState()
 	if err != nil {
-		psm.logger.Printf("Warning: failed to get initial pipeline state: %v", err)
+		psm.logger.Warnf("Failed to get initial pipeline state: %v", err)
 		initialState = StateNull
 	}
 
@@ -147,7 +148,7 @@ func (psm *PipelineStateManager) Start() error {
 	// Start state monitoring goroutine
 	go psm.monitorStateTransitions()
 
-	psm.logger.Printf("Pipeline state manager started, initial state: %v", initialState)
+	psm.logger.Infof("Pipeline state manager started, initial state: %v", initialState)
 	return nil
 }
 
@@ -156,17 +157,17 @@ func (psm *PipelineStateManager) Stop() error {
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
 
-	psm.logger.Printf("Stopping pipeline state manager...")
+	psm.logger.Info("Stopping pipeline state manager...")
 
 	// Stop health checker
 	if err := psm.healthChecker.Stop(); err != nil {
-		psm.logger.Printf("Warning: failed to stop health checker: %v", err)
+		psm.logger.Warnf("Failed to stop health checker: %v", err)
 	}
 
 	// Cancel context to stop monitoring goroutines
 	psm.cancel()
 
-	psm.logger.Printf("Pipeline state manager stopped")
+	psm.logger.Info("Pipeline state manager stopped")
 	return nil
 }
 
@@ -178,11 +179,11 @@ func (psm *PipelineStateManager) SetState(targetState PipelineState) error {
 	psm.mu.Unlock()
 
 	if currentState == targetState {
-		psm.logger.Printf("Pipeline already in target state: %v", targetState)
+		psm.logger.Debugf("Pipeline already in target state: %v", targetState)
 		return nil
 	}
 
-	psm.logger.Printf("Initiating state transition: %v -> %v", currentState, targetState)
+	psm.logger.Infof("Initiating state transition: %v -> %v", currentState, targetState)
 
 	transition := StateTransition{
 		FromState: currentState,
@@ -210,7 +211,7 @@ func (psm *PipelineStateManager) attemptStateChangeWithRetry(targetState Pipelin
 
 	for attempt := 0; attempt < psm.config.MaxRetryAttempts; attempt++ {
 		if attempt > 0 {
-			psm.logger.Printf("Retrying state change attempt %d/%d after %v",
+			psm.logger.Debugf("Retrying state change attempt %d/%d after %v",
 				attempt+1, psm.config.MaxRetryAttempts, psm.config.RetryDelay)
 			time.Sleep(psm.config.RetryDelay)
 		}
@@ -222,14 +223,14 @@ func (psm *PipelineStateManager) attemptStateChangeWithRetry(targetState Pipelin
 		err := psm.pipeline.SetState(targetState)
 		if err != nil {
 			lastErr = err
-			psm.logger.Printf("State change attempt %d failed: %v", attempt+1, err)
+			psm.logger.Warnf("State change attempt %d failed: %v", attempt+1, err)
 			continue
 		}
 
 		// Wait for state change to complete with timeout
 		if err := psm.waitForStateChange(targetState, psm.config.StateTransitionTimeout); err != nil {
 			lastErr = err
-			psm.logger.Printf("State change timeout on attempt %d: %v", attempt+1, err)
+			psm.logger.Warnf("State change timeout on attempt %d: %v", attempt+1, err)
 			continue
 		}
 
@@ -242,7 +243,7 @@ func (psm *PipelineStateManager) attemptStateChangeWithRetry(targetState Pipelin
 		psm.lastStateChange = time.Now()
 		psm.mu.Unlock()
 
-		psm.logger.Printf("State transition successful: %v (took %v)", targetState, transition.Duration)
+		psm.logger.Infof("State transition successful: %v (took %v)", targetState, transition.Duration)
 		return nil
 	}
 
@@ -251,7 +252,7 @@ func (psm *PipelineStateManager) attemptStateChangeWithRetry(targetState Pipelin
 	transition.Success = false
 	transition.Error = lastErr
 
-	psm.logger.Printf("State transition failed after %d attempts: %v", psm.config.MaxRetryAttempts, lastErr)
+	psm.logger.Errorf("State transition failed after %d attempts: %v", psm.config.MaxRetryAttempts, lastErr)
 
 	// Trigger error handling
 	if psm.errorCallback != nil {
@@ -277,7 +278,7 @@ func (psm *PipelineStateManager) waitForStateChange(targetState PipelineState, t
 		case <-ticker.C:
 			currentState, err := psm.pipeline.GetState()
 			if err != nil {
-				psm.logger.Printf("Warning: failed to get pipeline state during transition: %v", err)
+				psm.logger.Warnf("Failed to get pipeline state during transition: %v", err)
 				continue
 			}
 
@@ -332,12 +333,12 @@ func (psm *PipelineStateManager) monitorStateTransitions() {
 	ticker := time.NewTicker(psm.config.HealthCheckInterval)
 	defer ticker.Stop()
 
-	psm.logger.Printf("Starting pipeline state monitoring...")
+	psm.logger.Debug("Starting pipeline state monitoring...")
 
 	for {
 		select {
 		case <-psm.ctx.Done():
-			psm.logger.Printf("Pipeline state monitoring stopped")
+			psm.logger.Debug("Pipeline state monitoring stopped")
 			return
 		case <-ticker.C:
 			psm.checkStateConsistency()
@@ -349,7 +350,7 @@ func (psm *PipelineStateManager) monitorStateTransitions() {
 func (psm *PipelineStateManager) checkStateConsistency() {
 	actualState, err := psm.pipeline.GetState()
 	if err != nil {
-		psm.logger.Printf("Warning: failed to get pipeline state for consistency check: %v", err)
+		psm.logger.Warnf("Failed to get pipeline state for consistency check: %v", err)
 		return
 	}
 
@@ -357,7 +358,7 @@ func (psm *PipelineStateManager) checkStateConsistency() {
 	trackedState := psm.currentState
 
 	if actualState != trackedState {
-		psm.logger.Printf("State inconsistency detected: tracked=%v, actual=%v", trackedState, actualState)
+		psm.logger.Warnf("State inconsistency detected: tracked=%v, actual=%v", trackedState, actualState)
 
 		// Update our tracked state
 		psm.currentState = actualState
@@ -407,11 +408,11 @@ func (psm *PipelineStateManager) SetErrorCallback(callback func(error, string)) 
 
 // RestartPipeline attempts to restart the pipeline
 func (psm *PipelineStateManager) RestartPipeline() error {
-	psm.logger.Printf("Attempting to restart pipeline...")
+	psm.logger.Info("Attempting to restart pipeline...")
 
 	// Stop pipeline first
 	if err := psm.SetState(StateNull); err != nil {
-		psm.logger.Printf("Warning: failed to stop pipeline during restart: %v", err)
+		psm.logger.Warnf("Failed to stop pipeline during restart: %v", err)
 	}
 
 	// Wait a moment for cleanup
@@ -422,7 +423,7 @@ func (psm *PipelineStateManager) RestartPipeline() error {
 		return fmt.Errorf("failed to restart pipeline: %w", err)
 	}
 
-	psm.logger.Printf("Pipeline restarted successfully")
+	psm.logger.Info("Pipeline restarted successfully")
 	return nil
 }
 

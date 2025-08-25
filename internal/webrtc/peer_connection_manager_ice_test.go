@@ -15,6 +15,10 @@ func TestPeerConnectionManager_HandleICECandidate(t *testing.T) {
 	mediaStream := &MockMediaStream{}
 	mediaStream.On("GetVideoTrack").Return(nil)
 	mediaStream.On("GetAudioTrack").Return(nil)
+	mediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	iceServers := []webrtc.ICEServer{
 		{
@@ -107,6 +111,10 @@ func TestPeerConnectionManager_HandleMultipleICECandidates(t *testing.T) {
 	mediaStream := &MockMediaStream{}
 	mediaStream.On("GetVideoTrack").Return(nil)
 	mediaStream.On("GetAudioTrack").Return(nil)
+	mediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	iceServers := []webrtc.ICEServer{
 		{
@@ -214,6 +222,10 @@ func TestPeerConnectionManager_ICECandidateConnectionStateUpdate(t *testing.T) {
 	mediaStream := &MockMediaStream{}
 	mediaStream.On("GetVideoTrack").Return(nil)
 	mediaStream.On("GetAudioTrack").Return(nil)
+	mediaStream.On("GetStats").Return(MediaStreamStats{
+		TotalTracks:  0,
+		ActiveTracks: 0,
+	})
 
 	iceServers := []webrtc.ICEServer{
 		{

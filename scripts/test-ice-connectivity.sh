@@ -631,7 +631,7 @@ test_turn_servers() {
         echo
 
         # TURN 分配测试（使用正确的参数）
-        echo "3. TURN 分配测试 (UDP模式):"
+        echo "2. TURN 分配测试 (UDP模式):"
         if timeout 20s turnutils_uclient -v -n 3 -u "$username" -w "$password" -p "$port" -y "$host"; then
             echo -e "${GREEN}✓ TURN UDP 分配测试成功${NC}"
         else

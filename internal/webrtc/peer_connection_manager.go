@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/pion/webrtc/v4"
+	"github.com/sirupsen/logrus"
 )
 
 // PeerConnectionManager 管理WebRTC对等连接
@@ -17,7 +19,7 @@ type PeerConnectionManager struct {
 	mediaStream          MediaStream
 	connections          map[string]*PeerConnectionInfo
 	mutex                sync.RWMutex
-	logger               *log.Logger
+	logger               *logrus.Entry
 	connectionTimeout    time.Duration
 	maxConnections       int
 	cleanupInterval      time.Duration
@@ -38,6 +40,7 @@ type PeerConnectionInfo struct {
 	LastActive        time.Time
 	State             webrtc.PeerConnectionState
 	ICEState          webrtc.ICEConnectionState
+	ICEGatheringState webrtc.ICEGatheringState
 	ReconnectAttempts int
 	LastError         error
 	IsHealthy         bool
@@ -45,6 +48,7 @@ type PeerConnectionInfo struct {
 	BytesReceived     uint64
 	PacketsLost       uint32
 	RTT               time.Duration
+	CandidateCount    int // ICE候选数量计数器
 	mutex             sync.RWMutex
 }
 
@@ -88,7 +92,7 @@ func NewPeerConnectionManager(mediaStream MediaStream, iceServers []webrtc.ICESe
 		}
 	}
 
-	config := &webrtc.Configuration{
+	webrtcConfig := &webrtc.Configuration{
 		ICEServers: iceServers,
 		// 为WSL2环境优化ICE配置
 		ICETransportPolicy: webrtc.ICETransportPolicyAll,
@@ -98,11 +102,14 @@ func NewPeerConnectionManager(mediaStream MediaStream, iceServers []webrtc.ICESe
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// 获取 logrus entry 用于结构化日志记录
+	logrusLogger := config.GetLoggerWithPrefix("peer-connection-manager")
+
 	pcm := &PeerConnectionManager{
-		config:               config,
+		config:               webrtcConfig,
 		mediaStream:          mediaStream,
 		connections:          make(map[string]*PeerConnectionInfo),
-		logger:               logger,
+		logger:               logrusLogger,
 		connectionTimeout:    5 * time.Minute,  // 5分钟连接超时
 		maxConnections:       100,              // 最大连接数
 		cleanupInterval:      30 * time.Second, // 30秒清理间隔
@@ -135,7 +142,7 @@ func (pcm *PeerConnectionManager) CreatePeerConnection(clientID string) (*webrtc
 
 	// 如果已存在连接，先关闭
 	if existing, exists := pcm.connections[clientID]; exists {
-		pcm.logger.Printf("Replacing existing connection for client %s", clientID)
+		pcm.logger.Infof("Replacing existing connection for client %s", clientID)
 		existing.PC.Close()
 		delete(pcm.connections, clientID)
 		pcm.connectionMetrics.mutex.Lock()
@@ -149,6 +156,7 @@ func (pcm *PeerConnectionManager) CreatePeerConnection(clientID string) (*webrtc
 		pcm.connectionMetrics.mutex.Lock()
 		pcm.connectionMetrics.FailedConnections++
 		pcm.connectionMetrics.mutex.Unlock()
+		pcm.logger.Errorf("PeerConnection creation failed for client %s: %v", clientID, err)
 		return nil, err
 	}
 
@@ -161,12 +169,14 @@ func (pcm *PeerConnectionManager) CreatePeerConnection(clientID string) (*webrtc
 		LastActive:        now,
 		State:             webrtc.PeerConnectionStateNew,
 		ICEState:          webrtc.ICEConnectionStateNew,
+		ICEGatheringState: webrtc.ICEGatheringStateNew,
 		ReconnectAttempts: 0,
 		IsHealthy:         true,
 		BytesSent:         0,
 		BytesReceived:     0,
 		PacketsLost:       0,
 		RTT:               0,
+		CandidateCount:    0,
 	}
 
 	// 更新指标
@@ -175,8 +185,12 @@ func (pcm *PeerConnectionManager) CreatePeerConnection(clientID string) (*webrtc
 	pcm.connectionMetrics.ActiveConnections++
 	pcm.connectionMetrics.mutex.Unlock()
 
-	pcm.logger.Printf("Created peer connection for client %s (total: %d, active: %d)",
+	pcm.logger.Infof("PeerConnection management completed for client %s (total: %d, active: %d)",
 		clientID, pcm.connectionMetrics.TotalConnections, len(pcm.connections))
+
+	// 启动ICE收集超时监控
+	go pcm.monitorICECollectionTimeout(clientID)
+
 	return pc, nil
 }
 
@@ -199,7 +213,7 @@ func (pcm *PeerConnectionManager) RemovePeerConnection(clientID string) error {
 	if info, exists := pcm.connections[clientID]; exists {
 		info.PC.Close()
 		delete(pcm.connections, clientID)
-		pcm.logger.Printf("Removed peer connection for client %s", clientID)
+		pcm.logger.Infof("Removed peer connection for client %s", clientID)
 		return nil
 	}
 
@@ -238,7 +252,7 @@ func (pcm *PeerConnectionManager) CleanupInactiveConnections(timeout time.Durati
 	now := time.Now()
 	for clientID, info := range pcm.connections {
 		if now.Sub(info.LastActive) > timeout {
-			pcm.logger.Printf("Cleaning up inactive connection for client %s", clientID)
+			pcm.logger.Infof("Cleaning up inactive connection for client %s", clientID)
 			info.PC.Close()
 			delete(pcm.connections, clientID)
 		}
@@ -258,13 +272,13 @@ func (pcm *PeerConnectionManager) startCleanupRoutine() {
 				pcm.performHealthCheck()
 				pcm.cleanupUnhealthyConnections()
 			case <-pcm.ctx.Done():
-				pcm.logger.Printf("PeerConnection manager cleanup routine shutting down")
+				pcm.logger.Info("PeerConnection manager cleanup routine shutting down")
 				return
 			}
 		}
 	}()
 
-	pcm.logger.Printf("PeerConnection manager cleanup routine started")
+	pcm.logger.Info("PeerConnection manager cleanup routine started")
 }
 
 // performHealthCheck 执行连接健康检查
@@ -283,7 +297,7 @@ func (pcm *PeerConnectionManager) performHealthCheck() {
 		// 检查连接超时
 		if now.Sub(info.LastActive) > pcm.connectionTimeout {
 			info.IsHealthy = false
-			pcm.logger.Printf("Connection %s marked as unhealthy due to timeout (last active: %v ago)",
+			pcm.logger.Warnf("Connection %s marked as unhealthy due to timeout (last active: %v ago)",
 				info.ID, now.Sub(info.LastActive))
 		}
 
@@ -293,7 +307,7 @@ func (pcm *PeerConnectionManager) performHealthCheck() {
 			info.ICEState == webrtc.ICEConnectionStateFailed ||
 			info.ICEState == webrtc.ICEConnectionStateDisconnected {
 			info.IsHealthy = false
-			pcm.logger.Printf("Connection %s marked as unhealthy due to state (PC: %s, ICE: %s)",
+			pcm.logger.Warnf("Connection %s marked as unhealthy due to state (PC: %s, ICE: %s)",
 				info.ID, info.State, info.ICEState)
 		}
 
@@ -320,7 +334,7 @@ func (pcm *PeerConnectionManager) cleanupUnhealthyConnections() {
 
 	for _, clientID := range unhealthyClients {
 		if info, exists := pcm.connections[clientID]; exists {
-			pcm.logger.Printf("Cleaning up unhealthy connection for client %s", clientID)
+			pcm.logger.Infof("Cleaning up unhealthy connection for client %s", clientID)
 
 			// 尝试重连
 			if info.ReconnectAttempts < pcm.reconnectAttempts {
@@ -333,7 +347,7 @@ func (pcm *PeerConnectionManager) cleanupUnhealthyConnections() {
 				pcm.connectionMetrics.ActiveConnections--
 				pcm.connectionMetrics.CleanupOperations++
 				pcm.connectionMetrics.mutex.Unlock()
-				pcm.logger.Printf("Permanently removed connection for client %s after %d failed reconnect attempts",
+				pcm.logger.Infof("Permanently removed connection for client %s after %d failed reconnect attempts",
 					clientID, info.ReconnectAttempts)
 			}
 		}
@@ -346,7 +360,7 @@ func (pcm *PeerConnectionManager) attemptReconnection(clientID string, info *Pee
 	info.ReconnectAttempts++
 	info.mutex.Unlock()
 
-	pcm.logger.Printf("Attempting reconnection for client %s (attempt %d/%d)",
+	pcm.logger.Infof("Attempting reconnection for client %s (attempt %d/%d)",
 		clientID, info.ReconnectAttempts, pcm.reconnectAttempts)
 
 	// 延迟重连
@@ -356,7 +370,7 @@ func (pcm *PeerConnectionManager) attemptReconnection(clientID string, info *Pee
 		// 创建新的PeerConnection
 		newPC, err := pcm.createNewPeerConnection(clientID)
 		if err != nil {
-			pcm.logger.Printf("Failed to recreate PeerConnection for client %s: %v", clientID, err)
+			pcm.logger.Errorf("Failed to recreate PeerConnection for client %s: %v", clientID, err)
 			info.mutex.Lock()
 			info.LastError = err
 			info.IsHealthy = false
@@ -382,7 +396,7 @@ func (pcm *PeerConnectionManager) attemptReconnection(clientID string, info *Pee
 			existingInfo.ICEState = webrtc.ICEConnectionStateNew
 			existingInfo.LastError = nil
 
-			pcm.logger.Printf("Successfully reconnected client %s", clientID)
+			pcm.logger.Infof("Successfully reconnected client %s", clientID)
 
 			pcm.connectionMetrics.mutex.Lock()
 			pcm.connectionMetrics.ReconnectAttempts++
@@ -394,33 +408,102 @@ func (pcm *PeerConnectionManager) attemptReconnection(clientID string, info *Pee
 
 // createNewPeerConnection 创建新的PeerConnection（内部方法）
 func (pcm *PeerConnectionManager) createNewPeerConnection(clientID string) (*webrtc.PeerConnection, error) {
+	pcm.logger.Infof("Creating PeerConnection for client %s", clientID)
+	pcm.logger.Trace("Step 1: Creating base PeerConnection instance")
+
 	pc, err := webrtc.NewPeerConnection(*pcm.config)
 	if err != nil {
+		pcm.logger.Errorf("Failed to create PeerConnection for client %s: %v", clientID, err)
 		return nil, fmt.Errorf("failed to create peer connection: %w", err)
 	}
+	pcm.logger.Debug("Base PeerConnection created successfully")
 
-	// 添加媒体轨道
-	if pcm.mediaStream != nil {
-		videoTrack := pcm.mediaStream.GetVideoTrack()
-		if videoTrack != nil {
-			_, err = pc.AddTrack(videoTrack)
-			if err != nil {
-				pc.Close()
-				return nil, fmt.Errorf("failed to add video track: %w", err)
-			}
-		}
+	// MediaStream 状态验证和轨道添加
+	pcm.logger.Trace("Step 2: Validating MediaStream and adding tracks")
 
-		audioTrack := pcm.mediaStream.GetAudioTrack()
-		if audioTrack != nil {
-			_, err = pc.AddTrack(audioTrack)
-			if err != nil {
-				pc.Close()
-				return nil, fmt.Errorf("failed to add audio track: %w", err)
-			}
-		}
+	if pcm.mediaStream == nil {
+		pcm.logger.Debug("MediaStream is nil, skipping track addition")
+		pcm.logger.Info("PeerConnection created successfully without media tracks")
+		pcm.setupEventHandlers(pc, clientID)
+		return pc, nil
 	}
 
+	pcm.logger.Debug("MediaStream validation: MediaStream is available")
+
+	// 获取轨道统计信息用于调试
+	stats := pcm.mediaStream.GetStats()
+	pcm.logger.Debugf("MediaStream statistics: %+v", stats)
+
+	tracksAdded := 0
+	var trackAdditionErrors []string
+
+	// 添加视频轨道
+	pcm.logger.Trace("Step 2a: Processing video track")
+	videoTrack := pcm.mediaStream.GetVideoTrack()
+	if videoTrack != nil {
+		pcm.logger.Debugf("Video track found - ID: %s, MimeType: %s",
+			videoTrack.ID(), videoTrack.Codec().MimeType)
+		pcm.logger.Trace("Adding video track to PeerConnection")
+
+		sender, err := pc.AddTrack(videoTrack)
+		if err != nil {
+			errorMsg := fmt.Sprintf("failed to add video track: %v", err)
+			trackAdditionErrors = append(trackAdditionErrors, errorMsg)
+			pcm.logger.Errorf("Video track addition failed for client %s: %v", clientID, err)
+		} else {
+			tracksAdded++
+			pcm.logger.Debugf("Video track added successfully, Sender available: %v", sender != nil)
+			pcm.logger.Tracef("Video track Sender details: %+v", sender)
+		}
+	} else {
+		pcm.logger.Debug("Video track not available")
+	}
+
+	// 添加音频轨道
+	pcm.logger.Trace("Step 2b: Processing audio track")
+	audioTrack := pcm.mediaStream.GetAudioTrack()
+	if audioTrack != nil {
+		pcm.logger.Debugf("Audio track found - ID: %s, MimeType: %s",
+			audioTrack.ID(), audioTrack.Codec().MimeType)
+		pcm.logger.Trace("Adding audio track to PeerConnection")
+
+		sender, err := pc.AddTrack(audioTrack)
+		if err != nil {
+			errorMsg := fmt.Sprintf("failed to add audio track: %v", err)
+			trackAdditionErrors = append(trackAdditionErrors, errorMsg)
+			pcm.logger.Errorf("Audio track addition failed for client %s: %v", clientID, err)
+		} else {
+			tracksAdded++
+			pcm.logger.Debugf("Audio track added successfully, Sender available: %v", sender != nil)
+			pcm.logger.Tracef("Audio track Sender details: %+v", sender)
+		}
+	} else {
+		pcm.logger.Debug("Audio track not available")
+	}
+
+	// 轨道添加结果摘要
+	if len(trackAdditionErrors) > 0 {
+		// 如果有轨道添加失败，关闭连接并返回错误
+		pc.Close()
+		errorSummary := fmt.Sprintf("Track addition failed: %v", trackAdditionErrors)
+		pcm.logger.Errorf("PeerConnection creation failed for client %s due to track addition errors: %s", clientID, errorSummary)
+		return nil, fmt.Errorf("failed to add media tracks: %s", errorSummary)
+	}
+
+	pcm.logger.Infof("PeerConnection created successfully for client %s with %d media tracks", clientID, tracksAdded)
+	pcm.logger.Debugf("Track addition summary - Video: %v, Audio: %v",
+		videoTrack != nil, audioTrack != nil)
+
 	// 设置事件处理器
+	pcm.logger.Trace("Step 3: Setting up event handlers")
+	pcm.setupEventHandlers(pc, clientID)
+	pcm.logger.Debug("Event handlers configured successfully")
+
+	return pc, nil
+}
+
+// setupEventHandlers 设置PeerConnection事件处理器
+func (pcm *PeerConnectionManager) setupEventHandlers(pc *webrtc.PeerConnection, clientID string) {
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		pcm.handleConnectionStateChange(clientID, state)
 	})
@@ -429,16 +512,22 @@ func (pcm *PeerConnectionManager) createNewPeerConnection(clientID string) (*web
 		pcm.handleICEConnectionStateChange(clientID, state)
 	})
 
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		pcm.logger.Printf("Data channel created for client %s: %s", clientID, dc.Label())
+	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
+		pcm.handleICEGatheringStateChange(clientID, state)
 	})
 
-	return pc, nil
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		pcm.handleICECandidate(clientID, candidate)
+	})
+
+	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		pcm.logger.Debugf("Data channel created for client %s: %s", clientID, dc.Label())
+	})
 }
 
 // handleConnectionStateChange 处理连接状态变化
 func (pcm *PeerConnectionManager) handleConnectionStateChange(clientID string, state webrtc.PeerConnectionState) {
-	pcm.logger.Printf("Client %s connection state changed: %s", clientID, state.String())
+	pcm.logger.Infof("Client %s connection state changed: %s", clientID, state.String())
 
 	pcm.mutex.RLock()
 	info, exists := pcm.connections[clientID]
@@ -468,14 +557,14 @@ func (pcm *PeerConnectionManager) handleConnectionStateChange(clientID string, s
 
 		// 如果连接失败或关闭，标记为需要清理
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			pcm.logger.Printf("Connection for client %s will be cleaned up due to state: %s", clientID, state.String())
+			pcm.logger.Warnf("Connection for client %s will be cleaned up due to state: %s", clientID, state.String())
 		}
 	}
 }
 
 // handleICEConnectionStateChange 处理ICE连接状态变化
 func (pcm *PeerConnectionManager) handleICEConnectionStateChange(clientID string, state webrtc.ICEConnectionState) {
-	pcm.logger.Printf("Client %s ICE connection state changed: %s", clientID, state.String())
+	pcm.logger.Debugf("ICE connection state changed for client %s: %s", clientID, state.String())
 
 	pcm.mutex.RLock()
 	info, exists := pcm.connections[clientID]
@@ -494,6 +583,80 @@ func (pcm *PeerConnectionManager) handleICEConnectionStateChange(clientID string
 			info.IsHealthy = false
 		}
 		info.mutex.Unlock()
+	}
+}
+
+// handleICEGatheringStateChange 处理ICE收集状态变化
+func (pcm *PeerConnectionManager) handleICEGatheringStateChange(clientID string, state webrtc.ICEGatheringState) {
+	pcm.mutex.RLock()
+	info, exists := pcm.connections[clientID]
+	pcm.mutex.RUnlock()
+
+	if !exists {
+		pcm.logger.Warnf("ICE gathering state change for unknown client %s: %s", clientID, state.String())
+		return
+	}
+
+	// 更新连接状态和活跃时间
+	info.mutex.Lock()
+	oldState := info.ICEGatheringState
+	info.ICEGatheringState = state
+	info.LastActive = time.Now()
+	info.mutex.Unlock()
+
+	// 记录状态转换
+	pcm.logger.Debugf("ICE gathering state transition for client %s: %s -> %s", clientID, oldState.String(), state.String())
+
+	switch state {
+	case webrtc.ICEGatheringStateNew:
+		pcm.logger.Debugf("ICE gathering initialized for client %s", clientID)
+	case webrtc.ICEGatheringStateGathering:
+		pcm.logger.Infof("ICE collection started for client %s", clientID)
+	case webrtc.ICEGatheringStateComplete:
+		// 获取最终候选数量
+		info.mutex.RLock()
+		finalCount := info.CandidateCount
+		info.mutex.RUnlock()
+		pcm.logger.Infof("ICE collection completed for client %s with %d candidates", clientID, finalCount)
+	default:
+		pcm.logger.Debugf("ICE gathering state changed for client %s: %s", clientID, state.String())
+	}
+}
+
+// handleICECandidate 处理ICE候选生成
+func (pcm *PeerConnectionManager) handleICECandidate(clientID string, candidate *webrtc.ICECandidate) {
+	pcm.mutex.RLock()
+	info, exists := pcm.connections[clientID]
+	pcm.mutex.RUnlock()
+
+	if !exists {
+		pcm.logger.Warnf("ICE candidate generated for unknown client %s", clientID)
+		return
+	}
+
+	if candidate != nil {
+		// 增加候选计数器并更新活跃时间
+		info.mutex.Lock()
+		info.CandidateCount++
+		currentCount := info.CandidateCount
+		info.LastActive = time.Now()
+		info.mutex.Unlock()
+
+		// 记录详细的ICE候选信息
+		pcm.logger.Tracef("ICE candidate generated for client %s (#%d) - Type: %s, Protocol: %s, Address: %s, Port: %d",
+			clientID, currentCount, candidate.Typ.String(), candidate.Protocol.String(), candidate.Address, candidate.Port)
+
+		// 记录候选数量摘要（每5个候选记录一次）
+		if currentCount%5 == 0 {
+			pcm.logger.Infof("ICE candidate progress for client %s: %d candidates generated", clientID, currentCount)
+		}
+	} else {
+		// ICE收集完成
+		info.mutex.RLock()
+		finalCount := info.CandidateCount
+		info.mutex.RUnlock()
+
+		pcm.logger.Infof("ICE collection completed for client %s - total %d candidates generated", clientID, finalCount)
 	}
 }
 
@@ -585,7 +748,7 @@ func (pcm *PeerConnectionManager) SetConnectionTimeout(timeout time.Duration) {
 	pcm.mutex.Lock()
 	defer pcm.mutex.Unlock()
 	pcm.connectionTimeout = timeout
-	pcm.logger.Printf("Connection timeout set to %v", timeout)
+	pcm.logger.Infof("Connection timeout set to %v", timeout)
 }
 
 // SetMaxConnections 设置最大连接数
@@ -593,7 +756,7 @@ func (pcm *PeerConnectionManager) SetMaxConnections(max int) {
 	pcm.mutex.Lock()
 	defer pcm.mutex.Unlock()
 	pcm.maxConnections = max
-	pcm.logger.Printf("Maximum connections set to %d", max)
+	pcm.logger.Infof("Maximum connections set to %d", max)
 }
 
 // HandleICECandidate 处理ICE候选
@@ -605,19 +768,19 @@ func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateD
 	pcm.mutex.RUnlock()
 
 	if !exists {
-		pcm.logger.Printf("❌ ICE candidate processing failed: peer connection not found for client %s", clientID)
+		pcm.logger.Errorf("ICE candidate processing failed: peer connection not found for client %s", clientID)
 		return fmt.Errorf("peer connection not found for client %s", clientID)
 	}
 
 	// 详细验证候选数据
 	candidate, ok := candidateData["candidate"].(string)
 	if !ok {
-		pcm.logger.Printf("❌ ICE candidate processing failed for client %s: candidate field is missing or not a string", clientID)
+		pcm.logger.Errorf("ICE candidate processing failed for client %s: candidate field is missing or not a string", clientID)
 		return fmt.Errorf("invalid candidate data: candidate field is required and must be a string")
 	}
 
 	if candidate == "" {
-		pcm.logger.Printf("❌ ICE candidate processing failed for client %s: candidate field is empty", clientID)
+		pcm.logger.Errorf("ICE candidate processing failed for client %s: candidate field is empty", clientID)
 		return fmt.Errorf("invalid candidate data: candidate field cannot be empty")
 	}
 
@@ -631,7 +794,7 @@ func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateD
 	}
 
 	// 记录详细的ICE候选信息
-	pcm.logger.Printf("🧊 Processing ICE candidate for client %s: candidate='%s', sdpMid='%s' (present: %t), sdpMLineIndex=%d (present: %t)",
+	pcm.logger.Debugf("Processing ICE candidate for client %s: candidate='%s', sdpMid='%s' (present: %t), sdpMLineIndex=%d (present: %t)",
 		clientID, candidate, sdpMid, hasSdpMid, sdpMLineIndex, hasSdpMLineIndex)
 
 	// 创建ICE候选
@@ -647,7 +810,7 @@ func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateD
 	currentICEState := info.ICEState
 	info.mutex.RUnlock()
 
-	pcm.logger.Printf("🔍 Connection state before ICE candidate processing for client %s: PC=%s, ICE=%s",
+	pcm.logger.Debugf("Connection state before ICE candidate processing for client %s: PC=%s, ICE=%s",
 		clientID, currentState, currentICEState)
 
 	// 更新连接活跃时间（无论处理是否成功）
@@ -661,13 +824,13 @@ func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateD
 
 	if err != nil {
 		// 详细的错误报告
-		pcm.logger.Printf("❌ ICE candidate processing failed for client %s after %v: %v", clientID, processingTime, err)
-		pcm.logger.Printf("❌ Failed candidate details: candidate='%s', sdpMid='%s', sdpMLineIndex=%d", candidate, sdpMid, sdpMLineIndex)
-		pcm.logger.Printf("❌ Connection state during failure: PC=%s, ICE=%s", currentState, currentICEState)
+		pcm.logger.Errorf("ICE candidate processing failed for client %s after %v: %v", clientID, processingTime, err)
+		pcm.logger.Errorf("Failed candidate details: candidate='%s', sdpMid='%s', sdpMLineIndex=%d", candidate, sdpMid, sdpMLineIndex)
+		pcm.logger.Errorf("Connection state during failure: PC=%s, ICE=%s", currentState, currentICEState)
 
 		// 检查是否是网络问题
 		if isNetworkError(err) {
-			pcm.logger.Printf("🌐 Network connectivity issue detected for client %s: %v", clientID, err)
+			pcm.logger.Warnf("Network connectivity issue detected for client %s: %v", clientID, err)
 		}
 
 		// 更新错误统计
@@ -679,8 +842,8 @@ func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateD
 	}
 
 	// 成功处理的详细日志
-	pcm.logger.Printf("✅ ICE candidate processed successfully for client %s in %v", clientID, processingTime)
-	pcm.logger.Printf("🎯 Processed candidate details: candidate='%s', sdpMid='%s', sdpMLineIndex=%d", candidate, sdpMid, sdpMLineIndex)
+	pcm.logger.Infof("ICE candidate processed successfully for client %s in %v", clientID, processingTime)
+	pcm.logger.Debugf("Processed candidate details: candidate='%s', sdpMid='%s', sdpMLineIndex=%d", candidate, sdpMid, sdpMLineIndex)
 
 	// 检查处理后的连接状态
 	info.mutex.RLock()
@@ -689,7 +852,7 @@ func (pcm *PeerConnectionManager) HandleICECandidate(clientID string, candidateD
 	info.mutex.RUnlock()
 
 	if newState != currentState || newICEState != currentICEState {
-		pcm.logger.Printf("🔄 Connection state changed for client %s after ICE candidate: PC=%s->%s, ICE=%s->%s",
+		pcm.logger.Infof("Connection state changed for client %s after ICE candidate: PC=%s->%s, ICE=%s->%s",
 			clientID, currentState, newState, currentICEState, newICEState)
 	}
 
@@ -726,11 +889,11 @@ func (pcm *PeerConnectionManager) HandleMultipleICECandidates(clientID string, c
 	pcm.mutex.RUnlock()
 
 	if !exists {
-		pcm.logger.Printf("❌ Batch ICE candidate processing failed: peer connection not found for client %s", clientID)
+		pcm.logger.Errorf("Batch ICE candidate processing failed: peer connection not found for client %s", clientID)
 		return fmt.Errorf("peer connection not found for client %s", clientID)
 	}
 
-	pcm.logger.Printf("🧊 Starting batch processing of %d ICE candidates for client %s", len(candidates), clientID)
+	pcm.logger.Infof("Starting batch processing of %d ICE candidates for client %s", len(candidates), clientID)
 
 	successCount := 0
 	var lastError error
@@ -742,13 +905,13 @@ func (pcm *PeerConnectionManager) HandleMultipleICECandidates(clientID string, c
 		candidateProcessingTime := time.Since(candidateStartTime)
 
 		if err != nil {
-			pcm.logger.Printf("❌ Failed to process ICE candidate %d/%d for client %s in %v: %v",
+			pcm.logger.Errorf("Failed to process ICE candidate %d/%d for client %s in %v: %v",
 				i+1, len(candidates), clientID, candidateProcessingTime, err)
 			lastError = err
 			failedCandidates = append(failedCandidates, i)
 		} else {
 			successCount++
-			pcm.logger.Printf("✅ Successfully processed ICE candidate %d/%d for client %s in %v",
+			pcm.logger.Debugf("Successfully processed ICE candidate %d/%d for client %s in %v",
 				i+1, len(candidates), clientID, candidateProcessingTime)
 		}
 	}
@@ -762,13 +925,13 @@ func (pcm *PeerConnectionManager) HandleMultipleICECandidates(clientID string, c
 
 	// 详细的批处理结果报告
 	if successCount == len(candidates) {
-		pcm.logger.Printf("🎉 All %d ICE candidates processed successfully for client %s in %v (avg: %v per candidate)",
+		pcm.logger.Infof("All %d ICE candidates processed successfully for client %s in %v (avg: %v per candidate)",
 			len(candidates), clientID, totalProcessingTime, totalProcessingTime/time.Duration(len(candidates)))
 	} else if successCount > 0 {
-		pcm.logger.Printf("⚠️ Partial success: %d/%d ICE candidates processed for client %s in %v (failed indices: %v)",
+		pcm.logger.Warnf("Partial success: %d/%d ICE candidates processed for client %s in %v (failed indices: %v)",
 			successCount, len(candidates), clientID, totalProcessingTime, failedCandidates)
 	} else {
-		pcm.logger.Printf("❌ Complete failure: 0/%d ICE candidates processed for client %s in %v",
+		pcm.logger.Errorf("Complete failure: 0/%d ICE candidates processed for client %s in %v",
 			len(candidates), clientID, totalProcessingTime)
 	}
 
@@ -780,6 +943,43 @@ func (pcm *PeerConnectionManager) HandleMultipleICECandidates(clientID string, c
 	return nil
 }
 
+// monitorICECollectionTimeout 监控ICE收集超时
+func (pcm *PeerConnectionManager) monitorICECollectionTimeout(clientID string) {
+	// ICE收集超时时间设置为30秒
+	timeout := 30 * time.Second
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		// 检查ICE收集是否完成
+		pcm.mutex.RLock()
+		info, exists := pcm.connections[clientID]
+		pcm.mutex.RUnlock()
+
+		if !exists {
+			return // 连接已被清理
+		}
+
+		info.mutex.RLock()
+		gatheringState := info.ICEGatheringState
+		candidateCount := info.CandidateCount
+		info.mutex.RUnlock()
+
+		if gatheringState != webrtc.ICEGatheringStateComplete {
+			if candidateCount == 0 {
+				pcm.logger.Errorf("ICE collection failed for client %s: no candidates generated within %v", clientID, timeout)
+			} else {
+				pcm.logger.Warnf("ICE collection timeout for client %s: %d candidates generated but collection not completed within %v",
+					clientID, candidateCount, timeout)
+			}
+		}
+
+	case <-pcm.ctx.Done():
+		return // 管理器正在关闭
+	}
+}
+
 // Close 关闭所有连接
 func (pcm *PeerConnectionManager) Close() error {
 	pcm.cancel() // 停止清理协程
@@ -789,10 +989,10 @@ func (pcm *PeerConnectionManager) Close() error {
 
 	for clientID, info := range pcm.connections {
 		info.PC.Close()
-		pcm.logger.Printf("Closed peer connection for client %s", clientID)
+		pcm.logger.Infof("Closed peer connection for client %s", clientID)
 	}
 
 	pcm.connections = make(map[string]*PeerConnectionInfo)
-	pcm.logger.Printf("PeerConnection manager closed")
+	pcm.logger.Info("PeerConnection manager closed")
 	return nil
 }

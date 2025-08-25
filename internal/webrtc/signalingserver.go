@@ -185,6 +185,7 @@ func NewSignalingServer(ctx context.Context, encoderConfig *SignalingEncoderConf
 	// 创建PeerConnection管理器
 	var pcManager *PeerConnectionManager
 	if ms, ok := mediaStream.(MediaStream); ok {
+		// 使用标准库logger作为兼容性参数，实际内部会使用logrus
 		pcManager = NewPeerConnectionManager(ms, iceServers, log.Default())
 	}
 
@@ -2117,14 +2118,16 @@ func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMe
 	log.Printf("🔧 Delegating ICE candidate processing to PeerConnection manager for client %s", c.ID)
 	if err := c.Server.peerConnectionManager.HandleICECandidate(c.ID, candidateData); err != nil {
 		processingTime := time.Since(startTime)
-		log.Printf("❌ ICE candidate processing failed for client %s after %v: %v", c.ID, processingTime, err)
-		log.Printf("❌ Failed candidate details: %+v", candidateData)
 
 		// 检查是否是网络问题
 		isNetworkErr := isNetworkRelatedError(err)
 		if isNetworkErr {
+			log.Printf("⚠️ ICE candidate processing timeout/network issue for client %s after %v: %v", c.ID, processingTime, err)
 			log.Printf("🌐 Network connectivity issue detected for client %s during ICE candidate processing", c.ID)
+		} else {
+			log.Printf("❌ ICE candidate processing failed for client %s after %v: %v", c.ID, processingTime, err)
 		}
+		log.Printf("❌ Failed candidate details: %+v", candidateData)
 
 		// 记录错误到客户端统计
 		c.recordError(&SignalingError{
@@ -2834,14 +2837,16 @@ func (c *SignalingClient) handleIceCandidate(message SignalingMessage) {
 	err := pcManager.HandleICECandidate(c.ID, candidateData)
 	if err != nil {
 		processingTime := time.Since(startTime)
-		log.Printf("❌ WebRTC negotiation failed after %v: Failed to handle ICE candidate for client %s: %v", processingTime, c.ID, err)
-		log.Printf("❌ Failed candidate details: %+v", candidateData)
 
 		// 检查是否是网络问题
 		isNetworkErr := isNetworkRelatedError(err)
 		if isNetworkErr {
+			log.Printf("⚠️ WebRTC negotiation timeout/network issue after %v: Failed to handle ICE candidate for client %s: %v", processingTime, c.ID, err)
 			log.Printf("🌐 Network connectivity issue detected for client %s during ICE candidate processing", c.ID)
+		} else {
+			log.Printf("❌ WebRTC negotiation failed after %v: Failed to handle ICE candidate for client %s: %v", processingTime, c.ID, err)
 		}
+		log.Printf("❌ Failed candidate details: %+v", candidateData)
 
 		signalingError := &SignalingError{
 			Code:    ErrorCodeICECandidateFailed,

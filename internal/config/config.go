@@ -22,6 +22,9 @@ type Config struct {
 	// Metrics配置模块
 	Metrics *MetricsConfig `yaml:"metrics" json:"metrics"`
 
+	// 日志配置模块
+	Logging *LoggingConfig `yaml:"logging" json:"logging"`
+
 	// 生命周期管理配置
 	Lifecycle LifecycleConfig `yaml:"lifecycle" json:"lifecycle"`
 }
@@ -48,6 +51,7 @@ func DefaultConfig() *Config {
 		GStreamer: DefaultGStreamerConfig(),
 		WebRTC:    DefaultWebRTCConfig(),
 		Metrics:   DefaultMetricsConfig(),
+		Logging:   DefaultLoggingConfig(),
 	}
 
 	// 生命周期管理默认配置
@@ -110,6 +114,12 @@ func (c *Config) Validate() error {
 	if c.Metrics != nil {
 		if err := c.Metrics.Validate(); err != nil {
 			return fmt.Errorf("invalid metrics config: %w", err)
+		}
+	}
+
+	if c.Logging != nil {
+		if err := c.Logging.Validate(); err != nil {
+			return fmt.Errorf("invalid logging config: %w", err)
 		}
 	}
 
@@ -210,6 +220,15 @@ func (c *Config) Merge(other *Config) error {
 		}
 		if err := c.Metrics.Merge(other.Metrics); err != nil {
 			return fmt.Errorf("failed to merge metrics config: %w", err)
+		}
+	}
+
+	if other.Logging != nil {
+		if c.Logging == nil {
+			c.Logging = DefaultLoggingConfig()
+		}
+		if err := c.Logging.Merge(other.Logging); err != nil {
+			return fmt.Errorf("failed to merge logging config: %w", err)
 		}
 	}
 
@@ -356,6 +375,14 @@ func (c *Config) GetMetricsConfig() *MetricsConfig {
 	return c.Metrics
 }
 
+// GetLoggingConfig 获取Logging配置
+func (c *Config) GetLoggingConfig() *LoggingConfig {
+	if c.Logging == nil {
+		c.Logging = DefaultLoggingConfig()
+	}
+	return c.Logging
+}
+
 // SaveToFile 保存配置到文件
 func (c *Config) SaveToFile(filename string) error {
 	data, err := yaml.Marshal(c)
@@ -376,6 +403,9 @@ func LoadConfigFromEnv() *Config {
 
 	// 从环境变量加载GStreamer配置
 	config.GStreamer.Capture = LoadDesktopCaptureConfigFromEnv()
+
+	// 从环境变量加载日志配置
+	config.Logging = LoadLoggingConfigFromEnv()
 
 	return config
 }

@@ -3,12 +3,12 @@ package webrtc
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/pion/webrtc/v4"
+	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
@@ -16,13 +16,12 @@ import (
 // ManagerConfig WebRTC管理器配置
 type ManagerConfig struct {
 	Config *config.Config
-	Logger *log.Logger
 }
 
 // Manager WebRTC管理器，统一管理所有WebRTC组件
 type Manager struct {
 	config *config.Config
-	logger *log.Logger
+	logger *logrus.Entry // 使用 logrus entry 来实现日志管理
 
 	// WebRTC组件
 	signaling   *SignalingServer
@@ -57,13 +56,18 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 		return nil, fmt.Errorf("config is required")
 	}
 
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.Default()
-	}
-
 	// Use the provided context instead of creating a new one
 	childCtx, cancel := context.WithCancel(ctx)
+
+	// 获取 logrus entry 用于结构化日志记录
+	logger := config.GetLoggerWithPrefix("webrtc-manager")
+
+	logger.Trace("Creating WebRTC manager with configuration")
+	logger.Debugf("WebRTC configuration: codec=%s, resolution=%dx%d@%dfps",
+		cfg.Config.GStreamer.Encoding.Codec,
+		cfg.Config.GStreamer.Capture.Width,
+		cfg.Config.GStreamer.Capture.Height,
+		cfg.Config.GStreamer.Capture.FrameRate)
 
 	manager := &Manager{
 		config: cfg.Config,
@@ -73,24 +77,31 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 	}
 
 	// 初始化组件
+	logger.Trace("Initializing WebRTC components")
 	if err := manager.initializeComponents(); err != nil {
+		logger.Errorf("Failed to initialize WebRTC components: %v", err)
 		cancel()
 		return nil, fmt.Errorf("failed to initialize components: %w", err)
 	}
 
+	logger.Debug("WebRTC manager created successfully")
 	return manager, nil
 }
 
 // initializeComponents 初始化所有WebRTC组件
 func (m *Manager) initializeComponents() error {
+	m.logger.Trace("Starting WebRTC components initialization")
+
 	// 1. 创建SDP生成器
+	m.logger.Trace("Step 1: Creating SDP generator")
 	sdpConfig := &SDPConfig{
 		Codec: string(m.config.GStreamer.Encoding.Codec),
 	}
 	m.sdpGen = NewSDPGenerator(sdpConfig)
-	m.logger.Printf("SDP generator created with codec: %s", m.config.GStreamer.Encoding.Codec)
+	m.logger.Debugf("SDP generator created with codec: %s", m.config.GStreamer.Encoding.Codec)
 
 	// 2. 创建媒体流
+	m.logger.Trace("Step 2: Creating MediaStream")
 	mediaStreamConfig := &MediaStreamConfig{
 		VideoEnabled:    true,
 		AudioEnabled:    false, // 暂时禁用音频
@@ -107,24 +118,66 @@ func (m *Manager) initializeComponents() error {
 		AudioBitrate:    128,
 	}
 
+	m.logger.Tracef("MediaStream configuration: video_enabled=%v, audio_enabled=%v, codec=%s, resolution=%dx%d@%dfps, video_bitrate=%d",
+		mediaStreamConfig.VideoEnabled, mediaStreamConfig.AudioEnabled,
+		mediaStreamConfig.VideoCodec, mediaStreamConfig.VideoWidth,
+		mediaStreamConfig.VideoHeight, mediaStreamConfig.VideoFrameRate,
+		mediaStreamConfig.VideoBitrate)
+
 	var err error
 	m.mediaStream, err = NewMediaStream(mediaStreamConfig)
 	if err != nil {
+		m.logger.Errorf("Failed to create MediaStream: %v", err)
 		return fmt.Errorf("failed to create media stream: %w", err)
 	}
-	m.logger.Printf("Media stream created successfully")
+
+	// 检查轨道创建状态并记录详细信息
+	videoTrack := m.mediaStream.GetVideoTrack()
+	audioTrack := m.mediaStream.GetAudioTrack()
+
+	// 视频轨道状态检查
+	if mediaStreamConfig.VideoEnabled {
+		if videoTrack == nil {
+			m.logger.Warn("Video track creation failed despite being enabled")
+		} else {
+			m.logger.Debugf("Video track created successfully: ID=%s, MimeType=%s",
+				videoTrack.ID(), videoTrack.Codec().MimeType)
+		}
+	}
+
+	// 音频轨道状态检查
+	if mediaStreamConfig.AudioEnabled {
+		if audioTrack == nil {
+			m.logger.Warn("Audio track creation failed despite being enabled")
+		} else {
+			m.logger.Debugf("Audio track created successfully: ID=%s, MimeType=%s",
+				audioTrack.ID(), audioTrack.Codec().MimeType)
+		}
+	}
+
+	// 获取MediaStream统计信息并记录创建结果
+	stats := m.mediaStream.GetStats()
+	m.logger.Debugf("MediaStream creation result: total_tracks=%d, active_tracks=%d",
+		stats.TotalTracks, stats.ActiveTracks)
 
 	// 3. 创建GStreamer桥接器
+	m.logger.Trace("Step 3: Creating GStreamer Bridge")
 	bridgeConfig := DefaultGStreamerBridgeConfig()
+	m.logger.Tracef("Bridge configuration: video_buffer=%d, audio_buffer=%d, video_clock_rate=%d, audio_clock_rate=%d",
+		bridgeConfig.VideoBufferSize, bridgeConfig.AudioBufferSize,
+		bridgeConfig.VideoClockRate, bridgeConfig.AudioClockRate)
+
 	m.bridge = NewGStreamerBridge(bridgeConfig)
 
 	// 设置媒体流到桥接器
 	if err := m.bridge.SetMediaStream(m.mediaStream); err != nil {
+		m.logger.Errorf("Failed to set MediaStream to bridge: %v", err)
 		return fmt.Errorf("failed to set media stream to bridge: %w", err)
 	}
-	m.logger.Printf("GStreamer bridge created and configured")
+	m.logger.Debug("GStreamer bridge created and MediaStream configured successfully")
 
 	// 4. 创建信令服务器
+	m.logger.Trace("Step 4: Creating signaling server")
 	signalingConfig := &SignalingEncoderConfig{
 		Codec: string(m.config.GStreamer.Encoding.Codec),
 	}
@@ -132,12 +185,14 @@ func (m *Manager) initializeComponents() error {
 	// 转换配置中的ICE服务器格式
 	iceServers := m.convertICEServers()
 	m.signaling = NewSignalingServer(m.ctx, signalingConfig, m.mediaStream, iceServers)
-	m.logger.Printf("Signaling server created successfully")
+	m.logger.Debug("Signaling server created successfully")
 
 	// 5. 创建HTTP处理器
+	m.logger.Trace("Step 5: Creating WebRTC handlers")
 	m.handlers = newWebRTCHandlers(m)
-	m.logger.Printf("WebRTC handlers created successfully")
+	m.logger.Debug("WebRTC handlers created successfully")
 
+	m.logger.Trace("WebRTC components initialization completed")
 	return nil
 }
 
@@ -171,11 +226,11 @@ func (m *Manager) convertICEServers() []webrtc.ICEServer {
 				URLs: []string{"stun:stun.l.google.com:19302"},
 			},
 		}
-		m.logger.Printf("No ICE servers configured, using default Google STUN server")
+		m.logger.Debug("No ICE servers configured, using default Google STUN server")
 	} else {
-		m.logger.Printf("Using %d configured ICE servers", len(iceServers))
+		m.logger.Debugf("Using %d configured ICE servers", len(iceServers))
 		for i, server := range iceServers {
-			m.logger.Printf("ICE Server %d: %v", i+1, server.URLs)
+			m.logger.Tracef("ICE Server %d: URLs=%v, Username=%s", i+1, server.URLs, server.Username)
 		}
 	}
 
@@ -188,29 +243,64 @@ func (m *Manager) Start(ctx context.Context) error {
 	defer m.mutex.Unlock()
 
 	if m.running {
+		m.logger.Warn("WebRTC manager already running")
 		return fmt.Errorf("WebRTC manager already running")
 	}
 
-	m.logger.Printf("Starting WebRTC manager...")
+	m.logger.Info("Starting WebRTC manager")
 	m.startTime = time.Now()
 
+	// 验证组件状态
+	m.logger.Trace("Verifying component availability before startup")
+	if m.mediaStream == nil {
+		m.logger.Error("MediaStream is nil, cannot start WebRTC manager")
+		m.logger.Info("WebRTC manager startup failed - MediaStream not initialized")
+		return fmt.Errorf("MediaStream not initialized")
+	}
+	if m.bridge == nil {
+		m.logger.Error("GStreamer bridge is nil, cannot start WebRTC manager")
+		m.logger.Info("WebRTC manager startup failed - GStreamer bridge not initialized")
+		return fmt.Errorf("GStreamer bridge not initialized")
+	}
+	if m.signaling == nil {
+		m.logger.Error("Signaling server is nil, cannot start WebRTC manager")
+		m.logger.Info("WebRTC manager startup failed - Signaling server not initialized")
+		return fmt.Errorf("Signaling server not initialized")
+	}
+
 	// 启动GStreamer桥接器
+	m.logger.Debug("Starting GStreamer bridge")
 	if err := m.bridge.Start(); err != nil {
+		m.logger.Errorf("Failed to start GStreamer bridge: %v", err)
+		m.logger.Info("WebRTC manager startup failed - GStreamer bridge initialization error")
 		return fmt.Errorf("failed to start GStreamer bridge: %w", err)
 	}
-	m.logger.Printf("GStreamer bridge started")
+	m.logger.Debug("GStreamer bridge started successfully")
 
 	// 启动媒体流监控
+	m.logger.Debug("Starting MediaStream track monitoring")
 	if err := m.mediaStream.StartTrackMonitoring(); err != nil {
-		m.logger.Printf("Warning: failed to start media stream monitoring: %v", err)
+		m.logger.Warnf("Failed to start media stream monitoring: %v", err)
+	} else {
+		m.logger.Debug("MediaStream track monitoring started successfully")
 	}
 
+	// 验证MediaStream状态
+	stats := m.mediaStream.GetStats()
+	m.logger.Debugf("MediaStream status verification: total_tracks=%d, active_tracks=%d",
+		stats.TotalTracks, stats.ActiveTracks)
+
 	// 启动信令服务器
+	m.logger.Debug("Starting signaling server")
 	go m.signaling.Start()
-	m.logger.Printf("Signaling server started")
+	m.logger.Debug("Signaling server started successfully")
+
+	// 记录MediaStream创建结果摘要 (Info级别)
+	m.logMediaStreamCreationResult()
 
 	m.running = true
-	m.logger.Printf("WebRTC manager started successfully")
+	uptime := time.Since(m.startTime)
+	m.logger.Infof("WebRTC manager started successfully (startup time: %v)", uptime)
 
 	return nil
 }
@@ -220,40 +310,51 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.mutex.Lock()
 	if !m.running {
 		m.mutex.Unlock()
+		m.logger.Debug("WebRTC manager already stopped")
 		return nil
 	}
 	m.running = false
 	m.mutex.Unlock()
 
-	m.logger.Printf("Stopping WebRTC manager...")
+	m.logger.Info("Stopping WebRTC manager...")
+	stopStartTime := time.Now()
 
 	// 停止信令服务器
+	m.logger.Debug("Stopping signaling server...")
 	m.signaling.Stop()
-	m.logger.Printf("Signaling server stopped")
+	m.logger.Debug("Signaling server stopped")
 
 	// 停止媒体流监控
+	m.logger.Debug("Stopping MediaStream track monitoring...")
 	if err := m.mediaStream.StopTrackMonitoring(); err != nil {
-		m.logger.Printf("Warning: failed to stop media stream monitoring: %v", err)
+		m.logger.Warnf("Failed to stop media stream monitoring: %v", err)
+	} else {
+		m.logger.Debug("MediaStream track monitoring stopped")
 	}
 
 	// 停止GStreamer桥接器
+	m.logger.Debug("Stopping GStreamer bridge...")
 	if err := m.bridge.Stop(); err != nil {
-		m.logger.Printf("Warning: failed to stop GStreamer bridge: %v", err)
+		m.logger.Warnf("Failed to stop GStreamer bridge: %v", err)
 	} else {
-		m.logger.Printf("GStreamer bridge stopped")
+		m.logger.Debug("GStreamer bridge stopped")
 	}
 
 	// 关闭媒体流
+	m.logger.Debug("Closing MediaStream...")
 	if err := m.mediaStream.Close(); err != nil {
-		m.logger.Printf("Warning: failed to close media stream: %v", err)
+		m.logger.Warnf("Failed to close media stream: %v", err)
 	} else {
-		m.logger.Printf("Media stream closed")
+		m.logger.Debug("MediaStream closed")
 	}
 
 	// 取消上下文
 	m.cancel()
 
-	m.logger.Printf("WebRTC manager stopped successfully")
+	stopDuration := time.Since(stopStartTime)
+	totalUptime := time.Since(m.startTime)
+	m.logger.Infof("WebRTC manager stopped successfully (shutdown time: %v, total uptime: %v)",
+		stopDuration, totalUptime)
 	return nil
 }
 
@@ -375,20 +476,48 @@ func (m *Manager) GetComponentStatus() map[string]bool {
 	}
 }
 
+// logMediaStreamCreationResult 记录MediaStream创建结果摘要 (Info级别)
+func (m *Manager) logMediaStreamCreationResult() {
+	if m.mediaStream == nil {
+		m.logger.Info("MediaStream creation failed - no media stream available")
+		return
+	}
+
+	videoTrack := m.mediaStream.GetVideoTrack()
+	audioTrack := m.mediaStream.GetAudioTrack()
+	stats := m.mediaStream.GetStats()
+
+	var trackStatus []string
+	if videoTrack != nil {
+		trackStatus = append(trackStatus, "video")
+	}
+	if audioTrack != nil {
+		trackStatus = append(trackStatus, "audio")
+	}
+
+	if len(trackStatus) > 0 {
+		m.logger.Infof("MediaStream created successfully with %d tracks: %v", stats.TotalTracks, trackStatus)
+	} else {
+		m.logger.Info("MediaStream created but no tracks available")
+	}
+}
+
 // SetupRoutes 设置WebRTC组件的HTTP路由
 // 实现webserver.RouteSetup接口
 func (m *Manager) SetupRoutes(router *mux.Router) error {
 	if m.handlers == nil {
+		m.logger.Error("WebRTC handlers not initialized")
 		return fmt.Errorf("WebRTC handlers not initialized")
 	}
 
-	m.logger.Printf("Setting up WebRTC routes...")
+	m.logger.Debug("Setting up WebRTC routes...")
 
 	// 设置WebRTC相关的所有路由
 	if err := m.handlers.setupWebRTCRoutes(router); err != nil {
+		m.logger.Errorf("Failed to setup WebRTC routes: %v", err)
 		return fmt.Errorf("failed to setup WebRTC routes: %w", err)
 	}
 
-	m.logger.Printf("WebRTC routes setup completed")
+	m.logger.Debug("WebRTC routes setup completed")
 	return nil
 }

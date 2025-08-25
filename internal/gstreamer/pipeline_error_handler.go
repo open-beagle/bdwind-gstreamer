@@ -2,14 +2,17 @@ package gstreamer
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // PipelineErrorHandler handles pipeline errors and implements recovery strategies
 type PipelineErrorHandler struct {
-	logger *log.Logger
+	logger *logrus.Entry
 	mu     sync.RWMutex
 
 	// Configuration
@@ -165,13 +168,13 @@ type RecoveryStrategy struct {
 }
 
 // NewPipelineErrorHandler creates a new pipeline error handler
-func NewPipelineErrorHandler(logger *log.Logger, config *ErrorHandlerConfig) *PipelineErrorHandler {
+func NewPipelineErrorHandler(logger *logrus.Entry, errorConfig *ErrorHandlerConfig) *PipelineErrorHandler {
 	if logger == nil {
-		logger = log.Default()
+		logger = config.GetLoggerWithPrefix("pipeline-error-handler")
 	}
 
-	if config == nil {
-		config = &ErrorHandlerConfig{
+	if errorConfig == nil {
+		errorConfig = &ErrorHandlerConfig{
 			MaxRetryAttempts:    3,
 			RetryDelay:          2 * time.Second,
 			AutoRecovery:        true,
@@ -181,8 +184,8 @@ func NewPipelineErrorHandler(logger *log.Logger, config *ErrorHandlerConfig) *Pi
 
 	peh := &PipelineErrorHandler{
 		logger:             logger,
-		config:             config,
-		errorHistory:       make([]ErrorEvent, 0, config.MaxErrorHistorySize),
+		config:             errorConfig,
+		errorHistory:       make([]ErrorEvent, 0, errorConfig.MaxErrorHistorySize),
 		recoveryStrategies: make(map[ErrorType]RecoveryStrategy),
 	}
 
@@ -287,7 +290,7 @@ func (peh *PipelineErrorHandler) initializeDefaultRecoveryStrategies() {
 
 // HandleError handles a pipeline error and attempts recovery
 func (peh *PipelineErrorHandler) HandleError(errorType ErrorType, message, details, source string) error {
-	peh.logger.Printf("Handling pipeline error: %s - %s", errorType.String(), message)
+	peh.logger.Infof("Handling pipeline error: %s - %s", errorType.String(), message)
 
 	// Create error event
 	errorEvent := ErrorEvent{
@@ -304,7 +307,7 @@ func (peh *PipelineErrorHandler) HandleError(errorType ErrorType, message, detai
 
 	// Determine if automatic recovery should be attempted
 	if !peh.config.AutoRecovery {
-		peh.logger.Printf("Automatic recovery disabled, manual intervention required")
+		peh.logger.Infof("Automatic recovery disabled, manual intervention required")
 		errorEvent.RecoveryAction = RecoveryManualIntervention
 		peh.updateErrorEvent(errorEvent)
 		return fmt.Errorf("pipeline error requires manual intervention: %s", message)
@@ -313,7 +316,7 @@ func (peh *PipelineErrorHandler) HandleError(errorType ErrorType, message, detai
 	// Get recovery strategy for this error type
 	strategy, exists := peh.recoveryStrategies[errorType]
 	if !exists {
-		peh.logger.Printf("No recovery strategy defined for error type: %s", errorType.String())
+		peh.logger.Infof("No recovery strategy defined for error type: %s", errorType.String())
 		errorEvent.RecoveryAction = RecoveryManualIntervention
 		peh.updateErrorEvent(errorEvent)
 		return fmt.Errorf("no recovery strategy for error type %s: %s", errorType.String(), message)
@@ -326,7 +329,7 @@ func (peh *PipelineErrorHandler) HandleError(errorType ErrorType, message, detai
 // attemptRecovery attempts to recover from an error using the specified strategy
 func (peh *PipelineErrorHandler) attemptRecovery(errorEvent ErrorEvent, strategy RecoveryStrategy) error {
 	if !strategy.AutoRecover {
-		peh.logger.Printf("Automatic recovery not enabled for error type: %s", errorEvent.Type.String())
+		peh.logger.Infof("Automatic recovery not enabled for error type: %s", errorEvent.Type.String())
 		errorEvent.RecoveryAction = RecoveryManualIntervention
 		peh.updateErrorEvent(errorEvent)
 		return fmt.Errorf("manual intervention required for error: %s", errorEvent.Message)
@@ -335,7 +338,7 @@ func (peh *PipelineErrorHandler) attemptRecovery(errorEvent ErrorEvent, strategy
 	// Try each recovery action in sequence
 	var lastErr error
 	for _, action := range strategy.Actions {
-		peh.logger.Printf("Attempting recovery action: %s for error: %s", action.String(), errorEvent.Type.String())
+		peh.logger.Infof("Attempting recovery action: %s for error: %s", action.String(), errorEvent.Type.String())
 
 		errorEvent.RecoveryAction = action
 		peh.updateErrorEvent(errorEvent)
@@ -343,7 +346,7 @@ func (peh *PipelineErrorHandler) attemptRecovery(errorEvent ErrorEvent, strategy
 		// Attempt recovery with retries
 		for attempt := 0; attempt < strategy.MaxRetries+1; attempt++ {
 			if attempt > 0 {
-				peh.logger.Printf("Recovery attempt %d/%d for action: %s",
+				peh.logger.Infof("Recovery attempt %d/%d for action: %s",
 					attempt+1, strategy.MaxRetries+1, action.String())
 				time.Sleep(strategy.RetryDelay)
 			}
@@ -354,7 +357,7 @@ func (peh *PipelineErrorHandler) attemptRecovery(errorEvent ErrorEvent, strategy
 			err := peh.executeRecoveryAction(action, errorEvent)
 			if err == nil {
 				// Recovery successful
-				peh.logger.Printf("Recovery successful using action: %s", action.String())
+				peh.logger.Infof("Recovery successful using action: %s", action.String())
 				errorEvent.Resolved = true
 				errorEvent.ResolvedAt = time.Now()
 				peh.updateErrorEvent(errorEvent)
@@ -362,14 +365,14 @@ func (peh *PipelineErrorHandler) attemptRecovery(errorEvent ErrorEvent, strategy
 			}
 
 			lastErr = err
-			peh.logger.Printf("Recovery attempt %d failed: %v", attempt+1, err)
+			peh.logger.Infof("Recovery attempt %d failed: %v", attempt+1, err)
 		}
 
-		peh.logger.Printf("Recovery action %s failed after %d attempts", action.String(), strategy.MaxRetries+1)
+		peh.logger.Infof("Recovery action %s failed after %d attempts", action.String(), strategy.MaxRetries+1)
 	}
 
 	// All recovery actions failed
-	peh.logger.Printf("All recovery actions failed for error: %s", errorEvent.Type.String())
+	peh.logger.Infof("All recovery actions failed for error: %s", errorEvent.Type.String())
 	errorEvent.RecoveryAction = RecoveryManualIntervention
 	peh.updateErrorEvent(errorEvent)
 
@@ -397,7 +400,7 @@ func (peh *PipelineErrorHandler) executeRecoveryAction(action RecoveryAction, er
 
 // executeRetry executes a retry recovery action
 func (peh *PipelineErrorHandler) executeRetry(errorEvent ErrorEvent) error {
-	peh.logger.Printf("Executing retry recovery for error: %s", errorEvent.Type.String())
+	peh.logger.Infof("Executing retry recovery for error: %s", errorEvent.Type.String())
 
 	// For retry, we don't need to do anything special - the calling code
 	// will retry the original operation
@@ -406,7 +409,7 @@ func (peh *PipelineErrorHandler) executeRetry(errorEvent ErrorEvent) error {
 
 // executeRestart executes a restart recovery action
 func (peh *PipelineErrorHandler) executeRestart(errorEvent ErrorEvent) error {
-	peh.logger.Printf("Executing restart recovery for error: %s", errorEvent.Type.String())
+	peh.logger.Infof("Executing restart recovery for error: %s", errorEvent.Type.String())
 
 	if peh.config.StateManager == nil {
 		return fmt.Errorf("state manager not available for restart recovery")
@@ -418,25 +421,25 @@ func (peh *PipelineErrorHandler) executeRestart(errorEvent ErrorEvent) error {
 
 // executeReconfigure executes a reconfigure recovery action
 func (peh *PipelineErrorHandler) executeReconfigure(errorEvent ErrorEvent) error {
-	peh.logger.Printf("Executing reconfigure recovery for error: %s", errorEvent.Type.String())
+	peh.logger.Infof("Executing reconfigure recovery for error: %s", errorEvent.Type.String())
 
 	// This is a placeholder for reconfiguration logic
 	// In a real implementation, you would adjust pipeline configuration
 	// based on the specific error type and context
 
-	peh.logger.Printf("Reconfigure recovery not fully implemented yet")
+	peh.logger.Infof("Reconfigure recovery not fully implemented yet")
 	return fmt.Errorf("reconfigure recovery not implemented")
 }
 
 // executeFallback executes a fallback recovery action
 func (peh *PipelineErrorHandler) executeFallback(errorEvent ErrorEvent) error {
-	peh.logger.Printf("Executing fallback recovery for error: %s", errorEvent.Type.String())
+	peh.logger.Infof("Executing fallback recovery for error: %s", errorEvent.Type.String())
 
 	// This is a placeholder for fallback logic
 	// In a real implementation, you would switch to alternative
 	// configurations or elements based on the error type
 
-	peh.logger.Printf("Fallback recovery not fully implemented yet")
+	peh.logger.Infof("Fallback recovery not fully implemented yet")
 	return fmt.Errorf("fallback recovery not implemented")
 }
 
@@ -516,7 +519,7 @@ func (peh *PipelineErrorHandler) SetRecoveryStrategy(errorType ErrorType, strate
 	defer peh.mu.Unlock()
 
 	peh.recoveryStrategies[errorType] = strategy
-	peh.logger.Printf("Updated recovery strategy for error type: %s", errorType.String())
+	peh.logger.Infof("Updated recovery strategy for error type: %s", errorType.String())
 }
 
 // GetRecoveryStrategy gets the recovery strategy for an error type
