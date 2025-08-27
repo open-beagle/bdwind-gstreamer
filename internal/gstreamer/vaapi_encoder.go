@@ -148,6 +148,11 @@ func (e *VAAAPIEncoder) GetElement() (string, map[string]interface{}, error) {
 
 // UpdateBitrate dynamically updates the encoder bitrate
 func (e *VAAAPIEncoder) UpdateBitrate(bitrate int) error {
+	return e.SetBitrate(bitrate)
+}
+
+// SetBitrate dynamically sets the encoder bitrate (for WebRTC integration)
+func (e *VAAAPIEncoder) SetBitrate(bitrate int) error {
 	if bitrate <= 0 || bitrate > 50000 {
 		return fmt.Errorf("invalid bitrate: %d (must be between 1 and 50000 kbps)", bitrate)
 	}
@@ -157,6 +162,8 @@ func (e *VAAAPIEncoder) UpdateBitrate(bitrate int) error {
 
 	// Update configuration
 	e.config.Bitrate = bitrate
+	e.stats.TargetBitrate = bitrate
+	e.stats.CurrentBitrate = bitrate
 
 	// In real implementation, this would update the GStreamer element property
 	// For now, we'll simulate the update
@@ -164,6 +171,7 @@ func (e *VAAAPIEncoder) UpdateBitrate(bitrate int) error {
 		// gst_element_set_property(e.element, "bitrate", bitrate)
 	}
 
+	e.logger.Infof("VAAPI Encoder: Bitrate set to %d kbps", bitrate)
 	return nil
 }
 

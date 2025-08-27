@@ -3,12 +3,12 @@ package webserver
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/sirupsen/logrus"
 )
 
 // Manager webserver组件管理器
@@ -17,7 +17,7 @@ type Manager struct {
 	config    *config.WebServerConfig
 	server    *http.Server
 	webServer *WebServer
-	logger    *log.Logger
+	logger    *logrus.Entry
 	running   bool
 	startTime time.Time
 	mutex     sync.RWMutex
@@ -26,7 +26,7 @@ type Manager struct {
 }
 
 // NewManager 创建新的webserver管理器
-func NewManager(ctx context.Context, cfg *config.WebServerConfig, logger *log.Logger) (*Manager, error) {
+func NewManager(ctx context.Context, cfg *config.WebServerConfig) (*Manager, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -40,10 +40,8 @@ func NewManager(ctx context.Context, cfg *config.WebServerConfig, logger *log.Lo
 		return nil, fmt.Errorf("invalid webserver config: %w", err)
 	}
 
-	// 创建日志器
-	if logger == nil {
-		logger = log.New(log.Writer(), "[WEBSERVER] ", log.LstdFlags)
-	}
+	// 获取 logrus entry 用于结构化日志记录
+	logger := config.GetLoggerWithPrefix("webserver")
 
 	// 创建webserver实例
 	webServer, err := NewWebServer(cfg)
@@ -72,14 +70,14 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("webserver manager already running")
 	}
 
-	m.logger.Println("Starting webserver manager...")
+	m.logger.Debug("Starting webserver manager...")
 
 	// 创建HTTP服务器
 	addr := fmt.Sprintf("%s:%d", m.config.Host, m.config.Port)
 
-	m.logger.Println("Getting webserver handler...")
+	m.logger.Trace("Getting webserver handler...")
 	handler := m.webServer.GetHandler()
-	m.logger.Println("Webserver handler obtained successfully")
+	m.logger.Trace("Webserver handler obtained successfully")
 
 	m.server = &http.Server{
 		Addr:    addr,
@@ -88,7 +86,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// 在goroutine中启动服务器
 	go func() {
-		m.logger.Printf("Starting webserver on %s", addr)
+		m.logger.Tracef("Starting webserver on %s", addr)
 
 		var err error
 		if m.config.EnableTLS {
@@ -98,7 +96,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 
 		if err != nil && err != http.ErrServerClosed {
-			m.logger.Printf("Webserver error: %v", err)
+			m.logger.Errorf("Webserver error: %v", err)
 		}
 	}()
 
@@ -113,7 +111,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		protocol = "https"
 	}
 
-	m.logger.Printf("Webserver started successfully on %s://%s", protocol, addr)
+	m.logger.Infof("Webserver started successfully on %s://%s", protocol, addr)
 	return nil
 }
 
@@ -126,7 +124,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	m.logger.Println("Stopping webserver manager...")
+	m.logger.Debug("Stopping webserver manager...")
 
 	// 取消context以通知所有子组件停止
 	if m.cancel != nil {
@@ -135,7 +133,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	// 优雅关闭HTTP服务器
 	if m.server != nil {
-		m.logger.Println("Shutting down HTTP server...")
+		m.logger.Trace("Shutting down HTTP server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -148,22 +146,22 @@ func (m *Manager) Stop(ctx context.Context) error {
 		select {
 		case err := <-shutdownDone:
 			if err != nil {
-				m.logger.Printf("Error during server shutdown: %v", err)
+				m.logger.Errorf("Error during server shutdown: %v", err)
 				// 不返回错误，继续清理其他资源
 			} else {
-				m.logger.Println("HTTP server shutdown successfully")
+				m.logger.Trace("HTTP server shutdown successfully")
 			}
 		case <-time.After(6 * time.Second):
-			m.logger.Printf("HTTP server shutdown timeout, forcing close")
+			m.logger.Warnf("HTTP server shutdown timeout, forcing close")
 			// 强制关闭服务器
 			if err := m.server.Close(); err != nil {
-				m.logger.Printf("Error during server force close: %v", err)
+				m.logger.Errorf("Error during server force close: %v", err)
 			}
 		}
 	}
 
 	m.running = false
-	m.logger.Println("Webserver manager stopped successfully")
+	m.logger.Info("Webserver manager stopped successfully")
 	return nil
 }
 
@@ -241,7 +239,7 @@ func (m *Manager) UpdateConfig(newConfig *config.WebServerConfig) error {
 	}
 
 	m.webServer = webServer
-	m.logger.Println("Webserver config updated successfully")
+	m.logger.Trace("Webserver config updated successfully")
 	return nil
 }
 

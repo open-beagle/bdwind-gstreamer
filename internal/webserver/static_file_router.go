@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -15,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/sirupsen/logrus"
 )
 
 // StaticFileError 静态文件服务错误类型
@@ -57,7 +59,7 @@ type StaticFileRouter struct {
 	embeddedFS  fs.FS
 	defaultFile string
 	mimeTypes   map[string]string
-	logger      *log.Logger
+	logger      *logrus.Entry
 
 	// 性能优化相关字段
 	existenceCache map[string]*FileExistenceCache
@@ -86,7 +88,7 @@ func NewStaticFileRouter(externalDir string, embeddedFS fs.FS, defaultFile strin
 	}
 
 	// 创建专用的日志器
-	logger := log.New(log.Writer(), "[STATIC-ROUTER] ", log.LstdFlags)
+	logger := config.GetLoggerWithPrefix("webserver-static-router")
 
 	router := &StaticFileRouter{
 		externalDir: externalDir,
@@ -109,15 +111,15 @@ func NewStaticFileRouter(externalDir string, embeddedFS fs.FS, defaultFile strin
 	}
 
 	// 记录初始化信息
-	logger.Printf("Static file router initialized - External dir: %s, Default file: %s", externalDir, defaultFile)
-	logger.Printf("Performance features enabled - ETag: %v, Cache timeout: %v, Max cache size: %d",
+	logger.Tracef("Static file router initialized - External dir: %s, Default file: %s", externalDir, defaultFile)
+	logger.Tracef("Performance features enabled - ETag: %v, Cache timeout: %v, Max cache size: %d",
 		router.enableETag, router.cacheTimeout, router.maxCacheSize)
 
 	if externalDir != "" {
 		if _, err := os.Stat(externalDir); err != nil {
-			logger.Printf("Warning: External directory not accessible: %v", err)
+			logger.Warnf("External directory not accessible: %v", err)
 		} else {
-			logger.Printf("External directory verified: %s", externalDir)
+			logger.Infof("External directory verified: %s", externalDir)
 		}
 	}
 
@@ -154,7 +156,7 @@ func (sfr *StaticFileRouter) ServeStaticFile(w http.ResponseWriter, r *http.Requ
 	startTime := time.Now()
 	originalPath := r.URL.Path
 
-	sfr.logger.Printf("Serving static file request: %s %s", r.Method, originalPath)
+	sfr.logger.Debugf("Serving static file request: %s %s", r.Method, originalPath)
 
 	// 清理和验证路径
 	cleanPath := sfr.sanitizePath(originalPath)
@@ -164,11 +166,11 @@ func (sfr *StaticFileRouter) ServeStaticFile(w http.ResponseWriter, r *http.Requ
 			Path:    originalPath,
 			Message: "Path contains invalid characters or directory traversal attempts",
 		}
-		sfr.logger.Printf("Invalid path rejected: %s - %v", originalPath, err)
+		sfr.logger.Debugf("Invalid path rejected: %s - %v", originalPath, err)
 		return err
 	}
 
-	sfr.logger.Printf("Path sanitized: %s -> %s", originalPath, cleanPath)
+	sfr.logger.Tracef("Path sanitized: %s -> %s", originalPath, cleanPath)
 
 	// 检查文件是否存在
 	exists, isExternal := sfr.FileExists(cleanPath)
@@ -178,7 +180,7 @@ func (sfr *StaticFileRouter) ServeStaticFile(w http.ResponseWriter, r *http.Requ
 			Path:    cleanPath,
 			Message: "File not found in external directory or embedded filesystem",
 		}
-		sfr.logger.Printf("File not found: %s", cleanPath)
+		sfr.logger.Debugf("File not found: %s", cleanPath)
 		return err
 	}
 
@@ -186,7 +188,7 @@ func (sfr *StaticFileRouter) ServeStaticFile(w http.ResponseWriter, r *http.Requ
 	if isExternal {
 		source = "external"
 	}
-	sfr.logger.Printf("File found in %s filesystem: %s", source, cleanPath)
+	sfr.logger.Debugf("File found in %s filesystem: %s", source, cleanPath)
 
 	// 获取缓存的文件信息
 	cachedInfo := sfr.getCachedFileInfo(cleanPath)
@@ -204,15 +206,15 @@ func (sfr *StaticFileRouter) ServeStaticFile(w http.ResponseWriter, r *http.Requ
 		ctx.LastModified = cachedInfo.modTime
 		ctx.Size = cachedInfo.size
 		ctx.ETag = cachedInfo.etag
-		sfr.logger.Printf("Using cached metadata for file: %s (size: %d, etag: %s)",
+		sfr.logger.Debugf("Using cached metadata for file: %s (size: %d, etag: %s)",
 			cleanPath, ctx.Size, ctx.ETag)
 	}
 
-	sfr.logger.Printf("Content type detected: %s for file: %s", ctx.ContentType, cleanPath)
+	sfr.logger.Debugf("Content type detected: %s for file: %s", ctx.ContentType, cleanPath)
 
 	// 检查条件请求（If-None-Match, If-Modified-Since）
 	if sfr.checkConditionalRequest(r, ctx) {
-		sfr.logger.Printf("Conditional request matched, returning 304 Not Modified for: %s", cleanPath)
+		sfr.logger.Debugf("Conditional request matched, returning 304 Not Modified for: %s", cleanPath)
 		w.WriteHeader(http.StatusNotModified)
 		return nil
 	}
@@ -227,21 +229,21 @@ func (sfr *StaticFileRouter) ServeStaticFile(w http.ResponseWriter, r *http.Requ
 
 	duration := time.Since(startTime)
 	if err != nil {
-		sfr.logger.Printf("Failed to serve file %s from %s filesystem: %v (took %v)", cleanPath, source, err, duration)
+		sfr.logger.Debugf("Failed to serve file %s from %s filesystem: %v (took %v)", cleanPath, source, err, duration)
 		return err
 	}
 
-	sfr.logger.Printf("Successfully served file %s from %s filesystem (took %v)", cleanPath, source, duration)
+	sfr.logger.Debugf("Successfully served file %s from %s filesystem (took %v)", cleanPath, source, duration)
 	return nil
 }
 
 // FileExists 检查文件是否存在（带缓存）
 func (sfr *StaticFileRouter) FileExists(path string) (bool, bool) {
-	sfr.logger.Printf("Checking file existence: %s", path)
+	sfr.logger.Tracef("Checking file existence: %s", path)
 
 	// 检查缓存
 	if cached := sfr.getCachedFileInfo(path); cached != nil {
-		sfr.logger.Printf("File existence found in cache: %s (exists: %v, external: %v)",
+		sfr.logger.Tracef("File existence found in cache: %s (exists: %v, external: %v)",
 			path, cached.exists, cached.isExternal)
 		return cached.exists, cached.isExternal
 	}
@@ -264,13 +266,13 @@ func (sfr *StaticFileRouter) checkFileExistence(path string) (bool, bool, *FileE
 	// 首先检查外部目录
 	if sfr.externalDir != "" {
 		externalPath := filepath.Join(sfr.externalDir, path)
-		sfr.logger.Printf("Checking external path: %s", externalPath)
+		sfr.logger.Tracef("Checking external path: %s", externalPath)
 
 		if info, err := os.Stat(externalPath); err == nil {
 			if info.IsDir() {
-				sfr.logger.Printf("Path is directory (skipping): %s", externalPath)
+				sfr.logger.Tracef("Path is directory (skipping): %s", externalPath)
 			} else {
-				sfr.logger.Printf("File found in external directory: %s (size: %d bytes)", externalPath, info.Size())
+				sfr.logger.Tracef("File found in external directory: %s (size: %d bytes)", externalPath, info.Size())
 				cacheInfo.exists = true
 				cacheInfo.isExternal = true
 				cacheInfo.size = info.Size()
@@ -279,19 +281,19 @@ func (sfr *StaticFileRouter) checkFileExistence(path string) (bool, bool, *FileE
 				return true, true, cacheInfo
 			}
 		} else {
-			sfr.logger.Printf("External file not found or error: %s - %v", externalPath, err)
+			sfr.logger.Tracef("External file not found or error: %s - %v", externalPath, err)
 		}
 	}
 
 	// 然后检查嵌入文件系统
 	if sfr.embeddedFS != nil {
-		sfr.logger.Printf("Checking embedded filesystem: %s", path)
+		sfr.logger.Tracef("Checking embedded filesystem: %s", path)
 
 		if info, err := fs.Stat(sfr.embeddedFS, path); err == nil {
 			if info.IsDir() {
-				sfr.logger.Printf("Path is directory in embedded FS (skipping): %s", path)
+				sfr.logger.Tracef("Path is directory in embedded FS (skipping): %s", path)
 			} else {
-				sfr.logger.Printf("File found in embedded filesystem: %s (size: %d bytes)", path, info.Size())
+				sfr.logger.Tracef("File found in embedded filesystem: %s (size: %d bytes)", path, info.Size())
 				cacheInfo.exists = true
 				cacheInfo.isExternal = false
 				cacheInfo.size = info.Size()
@@ -300,11 +302,11 @@ func (sfr *StaticFileRouter) checkFileExistence(path string) (bool, bool, *FileE
 				return true, false, cacheInfo
 			}
 		} else {
-			sfr.logger.Printf("Embedded file not found or error: %s - %v", path, err)
+			sfr.logger.Tracef("Embedded file not found or error: %s - %v", path, err)
 		}
 	}
 
-	sfr.logger.Printf("File not found in any filesystem: %s", path)
+	sfr.logger.Tracef("File not found in any filesystem: %s", path)
 	cacheInfo.exists = false
 	return false, false, cacheInfo
 }
@@ -321,7 +323,7 @@ func (sfr *StaticFileRouter) getCachedFileInfo(path string) *FileExistenceCache 
 
 	// 检查缓存是否过期
 	if time.Since(cached.lastCheck) > sfr.cacheTimeout {
-		sfr.logger.Printf("Cache expired for file: %s", path)
+		sfr.logger.Debugf("Cache expired for file: %s", path)
 		return nil
 	}
 
@@ -339,7 +341,7 @@ func (sfr *StaticFileRouter) setCachedFileInfo(path string, info *FileExistenceC
 	}
 
 	sfr.existenceCache[path] = info
-	sfr.logger.Printf("Cached file info for: %s (exists: %v, external: %v)",
+	sfr.logger.Debugf("Cached file info for: %s (exists: %v, external: %v)",
 		path, info.exists, info.isExternal)
 }
 
@@ -357,7 +359,7 @@ func (sfr *StaticFileRouter) evictOldestCacheEntry() {
 
 	if oldestPath != "" {
 		delete(sfr.existenceCache, oldestPath)
-		sfr.logger.Printf("Evicted oldest cache entry: %s", oldestPath)
+		sfr.logger.Debugf("Evicted oldest cache entry: %s", oldestPath)
 	}
 }
 
@@ -374,7 +376,7 @@ func (sfr *StaticFileRouter) generateETag(path string, modTime time.Time, size i
 	h.Write([]byte(strconv.FormatInt(size, 10)))
 
 	etag := fmt.Sprintf(`"%x"`, h.Sum(nil))
-	sfr.logger.Printf("Generated ETag for %s: %s", path, etag)
+	sfr.logger.Debugf("Generated ETag for %s: %s", path, etag)
 	return etag
 }
 
@@ -385,7 +387,7 @@ func (sfr *StaticFileRouter) ClearCache() {
 
 	count := len(sfr.existenceCache)
 	sfr.existenceCache = make(map[string]*FileExistenceCache)
-	sfr.logger.Printf("Cleared %d cache entries", count)
+	sfr.logger.Debugf("Cleared %d cache entries", count)
 }
 
 // GetCacheStats 获取缓存统计信息
@@ -402,13 +404,13 @@ func (sfr *StaticFileRouter) SetCacheTimeout(timeout time.Duration) {
 	defer sfr.cacheMutex.Unlock()
 
 	sfr.cacheTimeout = timeout
-	sfr.logger.Printf("Cache timeout set to: %v", timeout)
+	sfr.logger.Debugf("Cache timeout set to: %v", timeout)
 }
 
 // SetETagEnabled 启用或禁用ETag
 func (sfr *StaticFileRouter) SetETagEnabled(enabled bool) {
 	sfr.enableETag = enabled
-	sfr.logger.Printf("ETag support %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
+	sfr.logger.Debugf("ETag support %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
 }
 
 // GetContentType 获取文件的Content-Type
@@ -433,52 +435,52 @@ func (sfr *StaticFileRouter) GetContentType(filename string) string {
 // sanitizePath 清理和验证路径，防止目录遍历攻击
 func (sfr *StaticFileRouter) sanitizePath(requestPath string) string {
 	originalPath := requestPath
-	sfr.logger.Printf("Sanitizing path: %s", originalPath)
+	sfr.logger.Tracef("Sanitizing path: %s", originalPath)
 
 	// 移除查询参数和片段
 	if idx := strings.Index(requestPath, "?"); idx != -1 {
 		requestPath = requestPath[:idx]
-		sfr.logger.Printf("Removed query parameters: %s", requestPath)
+		sfr.logger.Tracef("Removed query parameters: %s", requestPath)
 	}
 	if idx := strings.Index(requestPath, "#"); idx != -1 {
 		requestPath = requestPath[:idx]
-		sfr.logger.Printf("Removed fragment: %s", requestPath)
+		sfr.logger.Tracef("Removed fragment: %s", requestPath)
 	}
 
 	// 检查原始路径是否包含目录遍历尝试
 	if strings.Contains(requestPath, "..") {
-		sfr.logger.Printf("Directory traversal attempt detected in path: %s", originalPath)
+		sfr.logger.Tracef("Directory traversal attempt detected in path: %s", originalPath)
 		return ""
 	}
 
 	// 检查是否包含空字节（安全检查）
 	if strings.Contains(requestPath, "\x00") {
-		sfr.logger.Printf("Null byte detected in path: %s", originalPath)
+		sfr.logger.Tracef("Null byte detected in path: %s", originalPath)
 		return ""
 	}
 
 	// 检查路径长度限制
 	if len(requestPath) > 1024 {
-		sfr.logger.Printf("Path too long (%d characters): %s", len(requestPath), originalPath)
+		sfr.logger.Tracef("Path too long (%d characters): %s", len(requestPath), originalPath)
 		return ""
 	}
 
 	// 清理路径
 	cleanPath := path.Clean(requestPath)
-	sfr.logger.Printf("Path cleaned: %s -> %s", requestPath, cleanPath)
+	sfr.logger.Tracef("Path cleaned: %s -> %s", requestPath, cleanPath)
 
 	// 移除前导斜杠
 	cleanPath = strings.TrimPrefix(cleanPath, "/")
 
 	// 再次检查清理后的路径是否包含目录遍历
 	if strings.Contains(cleanPath, "..") {
-		sfr.logger.Printf("Directory traversal attempt detected after cleaning: %s", cleanPath)
+		sfr.logger.Tracef("Directory traversal attempt detected after cleaning: %s", cleanPath)
 		return ""
 	}
 
 	// 检查是否为空或只包含斜杠
 	if cleanPath == "" || cleanPath == "." {
-		sfr.logger.Printf("Empty or root path, using default file: %s", sfr.defaultFile)
+		sfr.logger.Tracef("Empty or root path, using default file: %s", sfr.defaultFile)
 		return sfr.defaultFile
 	}
 
@@ -486,22 +488,22 @@ func (sfr *StaticFileRouter) sanitizePath(requestPath string) string {
 	invalidChars := []string{"<", ">", ":", "\"", "|", "?", "*"}
 	for _, char := range invalidChars {
 		if strings.Contains(cleanPath, char) {
-			sfr.logger.Printf("Invalid character '%s' detected in path: %s", char, cleanPath)
+			sfr.logger.Tracef("Invalid character '%s' detected in path: %s", char, cleanPath)
 			return ""
 		}
 	}
 
-	sfr.logger.Printf("Path sanitization successful: %s -> %s", originalPath, cleanPath)
+	sfr.logger.Tracef("Path sanitization successful: %s -> %s", originalPath, cleanPath)
 	return cleanPath
 }
 
 // setResponseHeaders 设置HTTP响应头
 func (sfr *StaticFileRouter) setResponseHeaders(w http.ResponseWriter, ctx *StaticFileContext) {
-	sfr.logger.Printf("Setting response headers for file: %s", ctx.FilePath)
+	sfr.logger.Debugf("Setting response headers for file: %s", ctx.FilePath)
 
 	// 设置Content-Type
 	w.Header().Set("Content-Type", ctx.ContentType)
-	sfr.logger.Printf("Content-Type set to: %s", ctx.ContentType)
+	sfr.logger.Debugf("Content-Type set to: %s", ctx.ContentType)
 
 	// 设置缓存头
 	w.Header().Set("Cache-Control", "public, max-age=3600")
@@ -510,25 +512,25 @@ func (sfr *StaticFileRouter) setResponseHeaders(w http.ResponseWriter, ctx *Stat
 	if !ctx.LastModified.IsZero() {
 		lastModified := ctx.LastModified.UTC().Format(http.TimeFormat)
 		w.Header().Set("Last-Modified", lastModified)
-		sfr.logger.Printf("Last-Modified set to: %s", lastModified)
+		sfr.logger.Debugf("Last-Modified set to: %s", lastModified)
 	}
 
 	// 设置ETag（如果启用）
 	if sfr.enableETag && ctx.ETag != "" {
 		w.Header().Set("ETag", ctx.ETag)
-		sfr.logger.Printf("ETag set to: %s", ctx.ETag)
+		sfr.logger.Debugf("ETag set to: %s", ctx.ETag)
 	}
 
 	// 设置Content-Length（如果已知）
 	if ctx.Size > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", ctx.Size))
-		sfr.logger.Printf("Content-Length set to: %d", ctx.Size)
+		sfr.logger.Debugf("Content-Length set to: %d", ctx.Size)
 	}
 
 	// 设置Accept-Ranges头以支持范围请求（用于大文件优化）
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	sfr.logger.Printf("Response headers set successfully for file: %s", ctx.FilePath)
+	sfr.logger.Debugf("Response headers set successfully for file: %s", ctx.FilePath)
 }
 
 // checkConditionalRequest 检查条件请求
@@ -536,7 +538,7 @@ func (sfr *StaticFileRouter) checkConditionalRequest(r *http.Request, ctx *Stati
 	// 检查If-None-Match (ETag)
 	if ifNoneMatch := r.Header.Get("If-None-Match"); ifNoneMatch != "" && ctx.ETag != "" {
 		if ifNoneMatch == ctx.ETag || ifNoneMatch == "*" {
-			sfr.logger.Printf("ETag matched: %s", ifNoneMatch)
+			sfr.logger.Debugf("ETag matched: %s", ifNoneMatch)
 			return true
 		}
 	}
@@ -545,7 +547,7 @@ func (sfr *StaticFileRouter) checkConditionalRequest(r *http.Request, ctx *Stati
 	if ifModifiedSince := r.Header.Get("If-Modified-Since"); ifModifiedSince != "" && !ctx.LastModified.IsZero() {
 		if t, err := time.Parse(http.TimeFormat, ifModifiedSince); err == nil {
 			if !ctx.LastModified.After(t.Add(1 * time.Second)) {
-				sfr.logger.Printf("File not modified since %s", t.Format(time.RFC3339))
+				sfr.logger.Debugf("File not modified since %s", t.Format(time.RFC3339))
 				return true
 			}
 		}
@@ -557,7 +559,7 @@ func (sfr *StaticFileRouter) checkConditionalRequest(r *http.Request, ctx *Stati
 // serveExternalFile 提供外部文件
 func (sfr *StaticFileRouter) serveExternalFile(w http.ResponseWriter, r *http.Request, ctx *StaticFileContext) error {
 	externalPath := filepath.Join(sfr.externalDir, ctx.FilePath)
-	sfr.logger.Printf("Serving external file: %s", externalPath)
+	sfr.logger.Debugf("Serving external file: %s", externalPath)
 
 	// 如果上下文中没有文件信息，获取文件信息
 	if ctx.Size == 0 || ctx.LastModified.IsZero() {
@@ -569,7 +571,7 @@ func (sfr *StaticFileRouter) serveExternalFile(w http.ResponseWriter, r *http.Re
 				Message: "Failed to get file information",
 				Err:     err,
 			}
-			sfr.logger.Printf("Stat error for external file: %v", staticErr)
+			sfr.logger.Debugf("Stat error for external file: %v", staticErr)
 			return staticErr
 		}
 
@@ -579,7 +581,7 @@ func (sfr *StaticFileRouter) serveExternalFile(w http.ResponseWriter, r *http.Re
 		ctx.ETag = sfr.generateETag(externalPath, ctx.LastModified, ctx.Size)
 	}
 
-	sfr.logger.Printf("External file info - Size: %d bytes, Modified: %s, ETag: %s",
+	sfr.logger.Debugf("External file info - Size: %d bytes, Modified: %s, ETag: %s",
 		ctx.Size, ctx.LastModified.Format(time.RFC3339), ctx.ETag)
 
 	// 设置响应头
@@ -612,16 +614,16 @@ func (sfr *StaticFileRouter) serveExternalFile(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		sfr.logger.Printf("Read error for external file: %v", staticErr)
+		sfr.logger.Debugf("Read error for external file: %v", staticErr)
 		return staticErr
 	}
 
-	sfr.logger.Printf("Successfully read external file: %s (%d bytes)", externalPath, len(content))
+	sfr.logger.Debugf("Successfully read external file: %s (%d bytes)", externalPath, len(content))
 
 	// 写入内容
 	bytesWritten, err := w.Write(content)
 	if err != nil {
-		sfr.logger.Printf("Error writing response for external file %s: %v", externalPath, err)
+		sfr.logger.Debugf("Error writing response for external file %s: %v", externalPath, err)
 		return &StaticFileError{
 			Type:    ErrorTypeReadError,
 			Path:    externalPath,
@@ -630,13 +632,13 @@ func (sfr *StaticFileRouter) serveExternalFile(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	sfr.logger.Printf("Successfully wrote %d bytes for external file: %s", bytesWritten, externalPath)
+	sfr.logger.Debugf("Successfully wrote %d bytes for external file: %s", bytesWritten, externalPath)
 	return nil
 }
 
 // serveExternalFileStream 流式传输外部文件（用于大文件优化）
 func (sfr *StaticFileRouter) serveExternalFileStream(w http.ResponseWriter, r *http.Request, ctx *StaticFileContext, externalPath string) error {
-	sfr.logger.Printf("Using stream transfer for large external file: %s (%d bytes)", externalPath, ctx.Size)
+	sfr.logger.Debugf("Using stream transfer for large external file: %s (%d bytes)", externalPath, ctx.Size)
 
 	file, err := os.Open(externalPath)
 	if err != nil {
@@ -656,7 +658,7 @@ func (sfr *StaticFileRouter) serveExternalFileStream(w http.ResponseWriter, r *h
 				Err:     err,
 			}
 		}
-		sfr.logger.Printf("Open error for external file: %v", staticErr)
+		sfr.logger.Debugf("Open error for external file: %v", staticErr)
 		return staticErr
 	}
 	defer file.Close()
@@ -667,7 +669,7 @@ func (sfr *StaticFileRouter) serveExternalFileStream(w http.ResponseWriter, r *h
 
 	bytesWritten, err := io.CopyBuffer(w, file, buffer)
 	if err != nil {
-		sfr.logger.Printf("Error streaming external file %s: %v", externalPath, err)
+		sfr.logger.Debugf("Error streaming external file %s: %v", externalPath, err)
 		return &StaticFileError{
 			Type:    ErrorTypeReadError,
 			Path:    externalPath,
@@ -676,13 +678,13 @@ func (sfr *StaticFileRouter) serveExternalFileStream(w http.ResponseWriter, r *h
 		}
 	}
 
-	sfr.logger.Printf("Successfully streamed %d bytes for external file: %s", bytesWritten, externalPath)
+	sfr.logger.Debugf("Successfully streamed %d bytes for external file: %s", bytesWritten, externalPath)
 	return nil
 }
 
 // serveEmbeddedFile 提供嵌入文件
 func (sfr *StaticFileRouter) serveEmbeddedFile(w http.ResponseWriter, r *http.Request, ctx *StaticFileContext) error {
-	sfr.logger.Printf("Serving embedded file: %s", ctx.FilePath)
+	sfr.logger.Debugf("Serving embedded file: %s", ctx.FilePath)
 
 	// 如果上下文中没有文件信息，获取文件信息
 	if ctx.Size == 0 || ctx.LastModified.IsZero() {
@@ -690,10 +692,10 @@ func (sfr *StaticFileRouter) serveEmbeddedFile(w http.ResponseWriter, r *http.Re
 			ctx.LastModified = info.ModTime()
 			ctx.Size = info.Size()
 			ctx.ETag = sfr.generateETag(ctx.FilePath, ctx.LastModified, ctx.Size)
-			sfr.logger.Printf("Embedded file info - Size: %d bytes, Modified: %s, ETag: %s",
+			sfr.logger.Debugf("Embedded file info - Size: %d bytes, Modified: %s, ETag: %s",
 				ctx.Size, ctx.LastModified.Format(time.RFC3339), ctx.ETag)
 		} else {
-			sfr.logger.Printf("Warning: Could not get embedded file info: %v", err)
+			sfr.logger.Debugf("Warning: Could not get embedded file info: %v", err)
 		}
 	}
 
@@ -714,16 +716,16 @@ func (sfr *StaticFileRouter) serveEmbeddedFile(w http.ResponseWriter, r *http.Re
 			Message: "Failed to read embedded file content",
 			Err:     err,
 		}
-		sfr.logger.Printf("Read error for embedded file: %v", staticErr)
+		sfr.logger.Debugf("Read error for embedded file: %v", staticErr)
 		return staticErr
 	}
 
-	sfr.logger.Printf("Successfully read embedded file: %s (%d bytes)", ctx.FilePath, len(content))
+	sfr.logger.Debugf("Successfully read embedded file: %s (%d bytes)", ctx.FilePath, len(content))
 
 	// 写入内容
 	bytesWritten, err := w.Write(content)
 	if err != nil {
-		sfr.logger.Printf("Error writing response for embedded file %s: %v", ctx.FilePath, err)
+		sfr.logger.Debugf("Error writing response for embedded file %s: %v", ctx.FilePath, err)
 		return &StaticFileError{
 			Type:    ErrorTypeReadError,
 			Path:    ctx.FilePath,
@@ -732,13 +734,13 @@ func (sfr *StaticFileRouter) serveEmbeddedFile(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	sfr.logger.Printf("Successfully wrote %d bytes for embedded file: %s", bytesWritten, ctx.FilePath)
+	sfr.logger.Debugf("Successfully wrote %d bytes for embedded file: %s", bytesWritten, ctx.FilePath)
 	return nil
 }
 
 // serveEmbeddedFileStream 流式传输嵌入文件（用于大文件优化）
 func (sfr *StaticFileRouter) serveEmbeddedFileStream(w http.ResponseWriter, r *http.Request, ctx *StaticFileContext) error {
-	sfr.logger.Printf("Using stream transfer for large embedded file: %s (%d bytes)", ctx.FilePath, ctx.Size)
+	sfr.logger.Debugf("Using stream transfer for large embedded file: %s (%d bytes)", ctx.FilePath, ctx.Size)
 
 	file, err := sfr.embeddedFS.Open(ctx.FilePath)
 	if err != nil {
@@ -748,7 +750,7 @@ func (sfr *StaticFileRouter) serveEmbeddedFileStream(w http.ResponseWriter, r *h
 			Message: "Failed to open embedded file for streaming",
 			Err:     err,
 		}
-		sfr.logger.Printf("Open error for embedded file: %v", staticErr)
+		sfr.logger.Debugf("Open error for embedded file: %v", staticErr)
 		return staticErr
 	}
 	defer file.Close()
@@ -759,7 +761,7 @@ func (sfr *StaticFileRouter) serveEmbeddedFileStream(w http.ResponseWriter, r *h
 
 	bytesWritten, err := io.CopyBuffer(w, file, buffer)
 	if err != nil {
-		sfr.logger.Printf("Error streaming embedded file %s: %v", ctx.FilePath, err)
+		sfr.logger.Debugf("Error streaming embedded file %s: %v", ctx.FilePath, err)
 		return &StaticFileError{
 			Type:    ErrorTypeReadError,
 			Path:    ctx.FilePath,
@@ -768,7 +770,7 @@ func (sfr *StaticFileRouter) serveEmbeddedFileStream(w http.ResponseWriter, r *h
 		}
 	}
 
-	sfr.logger.Printf("Successfully streamed %d bytes for embedded file: %s", bytesWritten, ctx.FilePath)
+	sfr.logger.Debugf("Successfully streamed %d bytes for embedded file: %s", bytesWritten, ctx.FilePath)
 	return nil
 }
 
@@ -789,14 +791,14 @@ func CreateStaticFileRouterFromConfig(externalDir string, defaultFile string) *S
 }
 
 // SetLogger 设置自定义日志器
-func (sfr *StaticFileRouter) SetLogger(logger *log.Logger) {
+func (sfr *StaticFileRouter) SetLogger(logger *logrus.Entry) {
 	if logger != nil {
 		sfr.logger = logger
-		sfr.logger.Printf("Custom logger set for static file router")
+		sfr.logger.Debugf("Custom logger set for static file router")
 	}
 }
 
 // GetLogger 获取当前日志器
-func (sfr *StaticFileRouter) GetLogger() *log.Logger {
+func (sfr *StaticFileRouter) GetLogger() *logrus.Entry {
 	return sfr.logger
 }

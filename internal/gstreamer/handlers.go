@@ -3,11 +3,11 @@ package gstreamer
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
@@ -15,12 +15,14 @@ import (
 // gstreamerHandlers GStreamer组件的HTTP处理器
 type gstreamerHandlers struct {
 	manager *Manager
+	logger  *logrus.Entry
 }
 
 // newGStreamerHandlers 创建GStreamer处理器实例
 func newGStreamerHandlers(manager *Manager) *gstreamerHandlers {
 	return &gstreamerHandlers{
 		manager: manager,
+		logger:  config.GetLoggerWithPrefix("gstreamer-handlers"),
 	}
 }
 
@@ -125,7 +127,7 @@ func (h *gstreamerHandlers) handleCaptureRestart(w http.ResponseWriter, r *http.
 	// 停止捕获
 	if err := capture.Stop(); err != nil {
 		// 记录错误但继续重启
-		log.Printf("Warning: failed to stop capture during restart: %v", err)
+		h.logger.Infof("Warning: failed to stop capture during restart: %v", err)
 	}
 
 	// 重新启动捕获
@@ -277,7 +279,7 @@ func (h *gstreamerHandlers) handleDisplayScreenshot(w http.ResponseWriter, r *ht
 func (h *gstreamerHandlers) writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("Failed to encode JSON: %v", err)
+		h.logger.Infof("Failed to encode JSON: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }

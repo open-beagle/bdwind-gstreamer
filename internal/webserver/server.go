@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/open-beagle/bdwind-gstreamer/internal/webserver/auth"
@@ -28,6 +28,7 @@ type WebServer struct {
 	running    bool
 	startTime  time.Time
 	components map[string]ComponentManager // 注册的组件
+	logger     *logrus.Entry
 }
 
 // NewWebServer 创建Web服务器
@@ -44,6 +45,7 @@ func NewWebServer(cfg *config.WebServerConfig) (*WebServer, error) {
 		router:     router,
 		startTime:  time.Now(),
 		components: make(map[string]ComponentManager),
+		logger:     config.GetLoggerWithPrefix("webserver"),
 	}
 
 	// 创建HTTP服务器
@@ -190,7 +192,7 @@ func (ws *WebServer) handleComponentStats(w http.ResponseWriter, r *http.Request
 func (ws *WebServer) writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("Failed to encode JSON: %v", err)
+		ws.logger.Errorf("Failed to encode JSON: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
@@ -205,7 +207,7 @@ func (ws *WebServer) Start() error {
 
 	ws.running = true
 
-	log.Printf("Starting web server on %s", ws.server.Addr)
+	ws.logger.Infof("Starting web server on %s", ws.server.Addr)
 
 	if ws.config.EnableTLS {
 		return ws.server.ListenAndServeTLS(ws.config.TLS.CertFile, ws.config.TLS.KeyFile)
@@ -220,7 +222,7 @@ func (ws *WebServer) Stop(ctx context.Context) error {
 	ws.running = false
 	ws.mutex.Unlock()
 
-	log.Println("Stopping web server...")
+	ws.logger.Info("Stopping web server...")
 
 	// 只停止HTTP服务器，其他组件由main管理
 	return ws.server.Shutdown(ctx)
@@ -243,7 +245,7 @@ func (ws *WebServer) RegisterComponent(name string, component ComponentManager) 
 	}
 
 	ws.components[name] = component
-	log.Printf("Component %s registered successfully", name)
+	ws.logger.Debugf("Component %s registered successfully", name)
 
 	// 如果服务器已经运行，立即设置组件路由
 	if ws.running {
@@ -252,7 +254,7 @@ func (ws *WebServer) RegisterComponent(name string, component ComponentManager) 
 			delete(ws.components, name)
 			return fmt.Errorf("failed to setup routes for component %s: %w", name, err)
 		}
-		log.Printf("Routes for component %s setup successfully", name)
+		ws.logger.Debugf("Routes for component %s setup successfully", name)
 	}
 
 	return nil
@@ -268,7 +270,7 @@ func (ws *WebServer) UnregisterComponent(name string) error {
 	}
 
 	delete(ws.components, name)
-	log.Printf("Component %s unregistered successfully", name)
+	ws.logger.Debugf("Component %s unregistered successfully", name)
 
 	// 注意：路由无法动态移除，需要重启服务器才能完全移除组件路由
 	return nil
@@ -298,26 +300,26 @@ func (ws *WebServer) ListComponents() []string {
 // setupComponentRoutes 设置组件路由
 // 注意：调用此方法的函数必须已经持有mutex锁
 func (ws *WebServer) setupComponentRoutes() error {
-	log.Printf("Setting up routes for %d registered components", len(ws.components))
+	ws.logger.Debugf("Setting up routes for %d registered components", len(ws.components))
 
 	// 为每个已注册的组件设置路由
 	for name, component := range ws.components {
-		log.Printf("Setting up routes for component: %s", name)
+		ws.logger.Debugf("Setting up routes for component: %s", name)
 
 		// 先检查组件是否为nil
 		if component == nil {
-			log.Printf("Component %s is nil, skipping", name)
+			ws.logger.Debugf("Component %s is nil, skipping", name)
 			continue
 		}
 
 		if err := component.SetupRoutes(ws.router); err != nil {
-			log.Printf("Failed to setup routes for component %s: %v", name, err)
+			ws.logger.Errorf("Failed to setup routes for component %s: %v", name, err)
 			return fmt.Errorf("failed to setup routes for component %s: %w", name, err)
 		}
-		log.Printf("Routes for component %s setup successfully", name)
+		ws.logger.Debugf("Routes for component %s setup successfully", name)
 	}
 
-	log.Println("All component routes setup completed")
+	ws.logger.Info("All component routes setup completed")
 	return nil
 }
 

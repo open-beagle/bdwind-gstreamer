@@ -17,6 +17,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
@@ -64,14 +66,13 @@ func goHandleAppsinkSample(sample *C.GstSample) {
 	videoSample := NewVideoSample(data, width, height, "raw")
 
 	if err := dc.sampleCallback(videoSample); err != nil {
-		fmt.Printf("Error in sample callback: %v\n", err)
+		dc.logger.Errorf("Error in sample callback: %v", err)
 	}
 
 	dc.statsCollector.recordFrame()
 
 	C.gst_buffer_unmap(buffer, &mapInfo)
 }
-
 
 // CaptureStats contains statistics about the capture
 type CaptureStats struct {
@@ -271,6 +272,9 @@ type DesktopCapture interface {
 
 	// GetAppsink returns the appsink element for external processing
 	GetAppsink() Element
+
+	// SetFrameRate dynamically sets the capture frame rate (for WebRTC integration)
+	SetFrameRate(frameRate int) error
 }
 
 // Implementation of the DesktopCapture interface
@@ -290,6 +294,7 @@ type desktopCapture struct {
 	isRunning      bool
 	statsCollector *statsCollector
 	sampleCallback func(*Sample) error
+	logger         *logrus.Entry
 }
 
 // NewDesktopCapture creates a new desktop capture with validated configuration
@@ -305,6 +310,7 @@ func NewDesktopCapture(cfg config.DesktopCaptureConfig) (DesktopCapture, error) 
 		frameCount:     0,
 		frameTimings:   make([]int64, 100), // Buffer for latency measurements
 		statsCollector: newStatsCollector(),
+		logger:         config.GetLoggerWithPrefix("gstreamer-desktop-capture"),
 	}, nil
 }
 
@@ -354,7 +360,7 @@ func (dc *desktopCapture) Start() error {
 	}
 
 	// Start pipeline
-	fmt.Printf("Starting GStreamer pipeline for display: %s\n", dc.config.DisplayID)
+	dc.logger.Infof("Starting GStreamer pipeline for display: %s", dc.config.DisplayID)
 	err = dc.pipeline.Start()
 	if err != nil {
 		return fmt.Errorf("failed to start pipeline: %w", err)
@@ -363,9 +369,9 @@ func (dc *desktopCapture) Start() error {
 	// Verify pipeline state
 	state, err := dc.pipeline.GetState()
 	if err != nil {
-		fmt.Printf("Warning: failed to get pipeline state: %v\n", err)
+		dc.logger.Warnf("Failed to get pipeline state: %v", err)
 	} else {
-		fmt.Printf("Pipeline state after start: %v\n", state)
+		dc.logger.Debugf("Pipeline state after start: %v", state)
 	}
 
 	dc.isRunning = true
@@ -377,8 +383,8 @@ func (dc *desktopCapture) Start() error {
 	// Reset statistics collector
 	dc.statsCollector.reset()
 
-	fmt.Printf("Desktop capture pipeline started successfully for display: %s\n", dc.config.DisplayID)
-	fmt.Printf("Pipeline configuration: %dx%d@%dfps, Quality: %s\n",
+	dc.logger.Infof("Desktop capture pipeline started successfully for display: %s", dc.config.DisplayID)
+	dc.logger.Infof("Pipeline configuration: %dx%d@%dfps, Quality: %s",
 		dc.config.Width, dc.config.Height, dc.config.FrameRate, dc.config.Quality)
 
 	atomic.StorePointer(&desktopCapturePtr, unsafe.Pointer(dc))
@@ -834,7 +840,7 @@ func (dc *desktopCapture) configureWaylandMultiMonitor() error {
 				if err != nil {
 					// If output property is not supported, log but don't fail
 					// This is because different Wayland compositors may have different capabilities
-					fmt.Printf("Warning: failed to set output property (may not be supported): %v\n", err)
+					dc.logger.Warnf("Failed to set output property (may not be supported): %v", err)
 				}
 			}
 		}
@@ -1001,7 +1007,7 @@ func (dc *desktopCapture) simulateFrameGeneration() {
 		return
 	}
 
-	fmt.Printf("Starting simulated frame generation for testing\n")
+	dc.logger.Debug("Starting simulated frame generation for testing")
 
 	ticker := time.NewTicker(time.Duration(1000/dc.config.FrameRate) * time.Millisecond)
 	defer ticker.Stop()
@@ -1044,12 +1050,12 @@ func (dc *desktopCapture) simulateFrameGeneration() {
 
 			// Call the callback
 			if err := dc.sampleCallback(sample); err != nil {
-				fmt.Printf("Error in sample callback: %v\n", err)
+				dc.logger.Errorf("Error in sample callback: %v", err)
 			} else {
 				// Update statistics
 				dc.statsCollector.recordFrame()
 				if frameCount%30 == 0 { // Log every 30 frames (1 second at 30fps)
-					fmt.Printf("Generated frame %d, size: %d bytes\n", frameCount, len(dummyData))
+					dc.logger.Debugf("Generated frame %d, size: %d bytes", frameCount, len(dummyData))
 				}
 			}
 
@@ -1061,7 +1067,7 @@ func (dc *desktopCapture) simulateFrameGeneration() {
 		}
 	}
 
-	fmt.Printf("Stopped simulated frame generation\n")
+	dc.logger.Debug("Stopped simulated frame generation")
 }
 
 // GetAppsink returns the appsink element for external processing
@@ -1069,6 +1075,20 @@ func (dc *desktopCapture) GetAppsink() Element {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	return dc.appsinkElem
+}
+
+// SetFrameRate dynamically sets the capture frame rate (for WebRTC integration)
+func (dc *desktopCapture) SetFrameRate(frameRate int) error {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+
+	// Update configuration
+	dc.config.FrameRate = frameRate
+
+	// In a real implementation, this would update the GStreamer videorate element
+	// For now, we'll just update the internal state
+	dc.logger.Infof("Frame rate set to %d fps", frameRate)
+	return nil
 }
 
 // monitorDataFlow monitors the pipeline data flow and logs statistics
@@ -1086,20 +1106,20 @@ func (dc *desktopCapture) monitorDataFlow() {
 			// Get current pipeline state
 			state, err := dc.pipeline.GetState()
 			if err != nil {
-				fmt.Printf("Warning: failed to get pipeline state: %v\n", err)
+				dc.logger.Warnf("Failed to get pipeline state: %v", err)
 				continue
 			}
 
 			// Get capture statistics
 			stats := dc.GetStats()
 
-			fmt.Printf("Pipeline Status - State: %v, Frames: %d, FPS: %.2f, Dropped: %d\n",
+			dc.logger.Debugf("Pipeline Status - State: %v, Frames: %d, FPS: %.2f, Dropped: %d",
 				state, stats.FramesCapture, stats.CurrentFPS, stats.FramesDropped)
 
 			// Check if we're receiving data
 			if stats.FramesCapture == 0 && time.Since(dc.startTime) > 10*time.Second {
-				fmt.Printf("Warning: No frames captured after 10 seconds - pipeline may not be producing data\n")
-				fmt.Printf("Display: %s, Pipeline State: %v\n", dc.config.DisplayID, state)
+				dc.logger.Warnf("No frames captured after 10 seconds - pipeline may not be producing data")
+				dc.logger.Warnf("Display: %s, Pipeline State: %v", dc.config.DisplayID, state)
 			}
 
 		default:
@@ -1110,7 +1130,6 @@ func (dc *desktopCapture) monitorDataFlow() {
 		}
 	}
 }
-
 
 // simulateFrameCapture simulates a frame capture event for testing/demo purposes
 // In a real implementation, this would be called by GStreamer callbacks

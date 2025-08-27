@@ -11,6 +11,7 @@ package gstreamer
 #include <glib-object.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 // Forward declarations for callback functions
 extern gboolean goGstBusWatchCallback(GstBus *bus, GstMessage *message, gpointer user_data);
@@ -163,6 +164,36 @@ static gboolean gst_element_factory_is_available_go(const gchar *factory_name) {
         return TRUE;
     }
     return FALSE;
+}
+
+// GStreamer logging configuration functions
+static void gst_debug_set_default_threshold_go(int level) {
+    gst_debug_set_default_threshold(level);
+}
+
+static void gst_debug_set_log_file_go(const gchar *filename) {
+    if (filename && strlen(filename) > 0) {
+        // Remove any existing log function first
+        gst_debug_remove_log_function(gst_debug_log_default);
+
+        // Open the log file
+        FILE *log_file = fopen(filename, "a");
+        if (log_file) {
+            // Add log function with file output
+            gst_debug_add_log_function(gst_debug_log_default, log_file, NULL);
+        } else {
+            // Fall back to default (stderr) if file cannot be opened
+            gst_debug_add_log_function(gst_debug_log_default, NULL, NULL);
+        }
+    } else {
+        // Use default console output (stderr)
+        gst_debug_remove_log_function(gst_debug_log_default);
+        gst_debug_add_log_function(gst_debug_log_default, NULL, NULL);
+    }
+}
+
+static void gst_debug_set_colored_go(gboolean colored) {
+    gst_debug_set_colored(colored);
 }
 
 // Helper functions for setting properties
@@ -1251,6 +1282,37 @@ func IsElementFactoryAvailable(factoryName string) bool {
 	defer C.free(unsafe.Pointer(cFactoryName))
 
 	return C.gst_element_factory_is_available_go(cFactoryName) != 0
+}
+
+// GStreamer logging configuration functions
+
+// SetDebugLevel sets the global GStreamer debug level
+// Level should be between 0 (NONE) and 9 (LOG)
+func SetDebugLevel(level int) {
+	C.gst_debug_set_default_threshold_go(C.int(level))
+}
+
+// SetLogFile sets the GStreamer log output file
+// If filename is empty, logging will go to console (stderr)
+func SetLogFile(filename string) {
+	if filename == "" {
+		C.gst_debug_set_log_file_go(nil)
+	} else {
+		cFilename := C.CString(filename)
+		defer C.free(unsafe.Pointer(cFilename))
+		C.gst_debug_set_log_file_go(cFilename)
+	}
+}
+
+// SetColoredOutput enables or disables colored log output
+func SetColoredOutput(colored bool) {
+	var cColored C.gboolean
+	if colored {
+		cColored = 1
+	} else {
+		cColored = 0
+	}
+	C.gst_debug_set_colored_go(cColored)
 }
 
 //export goGstBusWatchCallback

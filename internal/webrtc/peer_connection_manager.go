@@ -3,14 +3,14 @@ package webrtc
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/pion/webrtc/v4"
 	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // PeerConnectionManager 管理WebRTC对等连接
@@ -79,7 +79,7 @@ type ConnectionHealthStatus struct {
 }
 
 // NewPeerConnectionManager 创建对等连接管理器
-func NewPeerConnectionManager(mediaStream MediaStream, iceServers []webrtc.ICEServer, logger *log.Logger) *PeerConnectionManager {
+func NewPeerConnectionManager(mediaStream MediaStream, iceServers []webrtc.ICEServer) *PeerConnectionManager {
 	// 如果没有提供ICE服务器，使用默认的
 	if len(iceServers) == 0 {
 		iceServers = []webrtc.ICEServer{
@@ -103,7 +103,7 @@ func NewPeerConnectionManager(mediaStream MediaStream, iceServers []webrtc.ICESe
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// 获取 logrus entry 用于结构化日志记录
-	logrusLogger := config.GetLoggerWithPrefix("peer-connection-manager")
+	logrusLogger := config.GetLoggerWithPrefix("webrtc-peer-connection-manager")
 
 	pcm := &PeerConnectionManager{
 		config:               webrtcConfig,
@@ -278,7 +278,7 @@ func (pcm *PeerConnectionManager) startCleanupRoutine() {
 		}
 	}()
 
-	pcm.logger.Info("PeerConnection manager cleanup routine started")
+	pcm.logger.Trace("PeerConnection manager cleanup routine started")
 }
 
 // performHealthCheck 执行连接健康检查

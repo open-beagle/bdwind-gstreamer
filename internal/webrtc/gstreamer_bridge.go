@@ -138,7 +138,7 @@ func NewGStreamerBridge(cfg *GStreamerBridgeConfig) GStreamerBridge {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	logger := config.GetLoggerWithPrefix("gstreamer-bridge")
+	logger := config.GetLoggerWithPrefix("webrtc-gstreamer-bridge")
 
 	return &gstreamerBridgeImpl{
 		config:      cfg,
@@ -211,7 +211,7 @@ func (gb *gstreamerBridgeImpl) Start() error {
 	go gb.processAudioSamples()
 
 	// Info级别: 记录样本回调链路建立成功状态
-	gb.logger.Info("GStreamer bridge started successfully")
+	gb.logger.Debug("GStreamer bridge started successfully")
 	// Debug级别: 记录处理协程状态
 	gb.logger.Debug("Sample processing goroutines started")
 

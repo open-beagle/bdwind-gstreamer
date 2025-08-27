@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,23 +11,28 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // webrtcHandlers WebRTC组件的HTTP处理器
 type webrtcHandlers struct {
 	manager *Manager
+	logger  *logrus.Entry
 }
 
 // newWebRTCHandlers 创建WebRTC处理器实例
 func newWebRTCHandlers(manager *Manager) *webrtcHandlers {
 	return &webrtcHandlers{
 		manager: manager,
+		logger:  config.GetLoggerWithPrefix("webrtc-handlers"),
 	}
 }
 
 // setupWebRTCRoutes 设置WebRTC相关的所有路由
 func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
-	log.Printf("[WebRTC] 开始设置WebRTC路由...")
+	h.logger.Trace("开始设置WebRTC路由...")
 
 	// WebRTC API路由
 	webrtcAPI := router.PathPrefix("/api/webrtc").Subrouter()
@@ -38,50 +42,50 @@ func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
 	webrtcAPI.HandleFunc("/stats", h.handleStats).Methods("GET")
 	webrtcAPI.HandleFunc("/config", h.handleConfig).Methods("GET", "POST")
 	webrtcAPI.HandleFunc("/ice-servers", h.handleICEServers).Methods("GET") // selkies 兼容性
-	log.Printf("[WebRTC] WebRTC API路由已注册: /api/webrtc/*")
+	h.logger.Trace("WebRTC API路由已注册: /api/webrtc/*")
 
 	// 调试和诊断API路由
 	debugAPI := router.PathPrefix("/api/debug").Subrouter()
 	debugAPI.HandleFunc("/logs", h.handleDebugLogs).Methods("POST")
 	debugAPI.HandleFunc("/diagnostics", h.handleDiagnostics).Methods("GET", "POST")
 	debugAPI.HandleFunc("/export", h.handleDebugExport).Methods("POST")
-	log.Printf("[WebRTC] 调试API路由已注册: /api/debug/*")
+	h.logger.Trace("调试API路由已注册: /api/debug/*")
 
 	// 健康检查和测试API
 	router.HandleFunc("/api/health", h.handleHealth).Methods("GET")
 	router.HandleFunc("/api/ping", h.handlePing).Methods("GET")
 	router.HandleFunc("/api/bandwidth-test/download", h.handleBandwidthTestDownload).Methods("GET")
 	router.HandleFunc("/api/bandwidth-test/upload", h.handleBandwidthTestUpload).Methods("POST")
-	log.Printf("[WebRTC] 健康检查和测试API路由已注册")
+	h.logger.Trace("健康检查和测试API路由已注册")
 
 	// WebSocket信令路由
 	router.HandleFunc("/api/signaling", h.handleWebSocket).Methods("GET")
-	log.Printf("[WebRTC] 主要WebSocket路由已注册: /api/signaling")
-	log.Printf("[WebRTC] WebSocket处理器配置信息:")
-	log.Printf("[WebRTC]   - 路径: /api/signaling")
-	log.Printf("[WebRTC]   - 方法: GET")
-	log.Printf("[WebRTC]   - 处理器: handleWebSocket")
-	log.Printf("[WebRTC]   - 跨域检查: 允许所有来源")
-	log.Printf("[WebRTC]   - 读缓冲区大小: 1024 bytes")
-	log.Printf("[WebRTC]   - 写缓冲区大小: 1024 bytes")
-	log.Printf("[WebRTC]   - 握手超时: 10 seconds")
+	h.logger.Trace("主要WebSocket路由已注册: /api/signaling")
+	h.logger.Trace("WebSocket处理器配置信息:")
+	h.logger.Trace("  - 路径: /api/signaling")
+	h.logger.Trace("  - 方法: GET")
+	h.logger.Trace("  - 处理器: handleWebSocket")
+	h.logger.Trace("  - 跨域检查: 允许所有来源")
+	h.logger.Trace("  - 读缓冲区大小: 1024 bytes")
+	h.logger.Trace("  - 写缓冲区大小: 1024 bytes")
+	h.logger.Trace("  - 握手超时: 10 seconds")
 
 	router.HandleFunc("/api/signaling/{app}", h.handleSignaling).Methods("GET")
-	log.Printf("[WebRTC] 应用特定信令路由已注册: /api/signaling/{app}")
-	log.Printf("[WebRTC] 应用信令处理器配置信息:")
-	log.Printf("[WebRTC]   - 路径: /api/signaling/{app}")
-	log.Printf("[WebRTC]   - 方法: GET")
-	log.Printf("[WebRTC]   - 处理器: handleSignaling")
-	log.Printf("[WebRTC]   - 支持应用特定连接")
+	h.logger.Trace("应用特定信令路由已注册: /api/signaling/{app}")
+	h.logger.Trace("应用信令处理器配置信息:")
+	h.logger.Trace("  - 路径: /api/signaling/{app}")
+	h.logger.Trace("  - 方法: GET")
+	h.logger.Trace("  - 处理器: handleSignaling")
+	h.logger.Trace("  - 支持应用特定连接")
 
-	log.Printf("[WebRTC] 所有WebRTC路由设置完成")
-	log.Printf("[WebRTC] 路由摘要:")
-	log.Printf("[WebRTC]   - WebRTC API: /api/webrtc/*")
-	log.Printf("[WebRTC]   - 调试API: /api/debug/*")
-	log.Printf("[WebRTC]   - 健康检查: /api/health, /api/ping")
-	log.Printf("[WebRTC]   - 带宽测试: /api/bandwidth-test/*")
-	log.Printf("[WebRTC]   - 主要WebSocket: /api/signaling")
-	log.Printf("[WebRTC]   - 应用信令: /api/signaling/{app}")
+	h.logger.Trace("所有WebRTC路由设置完成")
+	h.logger.Trace("路由摘要:")
+	h.logger.Trace("  - WebRTC API: /api/webrtc/*")
+	h.logger.Trace("  - 调试API: /api/debug/*")
+	h.logger.Trace("  - 健康检查: /api/health, /api/ping")
+	h.logger.Trace("  - 带宽测试: /api/bandwidth-test/*")
+	h.logger.Trace("  - 主要WebSocket: /api/signaling")
+	h.logger.Trace("  - 应用信令: /api/signaling/{app}")
 
 	return nil
 }
@@ -89,37 +93,37 @@ func (h *webrtcHandlers) setupWebRTCRoutes(router *mux.Router) error {
 // WebSocket处理器
 func (h *webrtcHandlers) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 记录连接请求的详细信息
-	log.Printf("[WebRTC] WebSocket连接请求开始")
-	log.Printf("[WebRTC] 请求详情: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-	log.Printf("[WebRTC] 客户端信息:")
-	log.Printf("[WebRTC]   - 远程地址: %s", r.RemoteAddr)
-	log.Printf("[WebRTC]   - User-Agent: %s", r.Header.Get("User-Agent"))
-	log.Printf("[WebRTC]   - Origin: %s", r.Header.Get("Origin"))
-	log.Printf("[WebRTC]   - Host: %s", r.Header.Get("Host"))
-	log.Printf("[WebRTC]   - Referer: %s", r.Header.Get("Referer"))
-	log.Printf("[WebRTC]   - X-Forwarded-For: %s", r.Header.Get("X-Forwarded-For"))
-	log.Printf("[WebRTC]   - X-Real-IP: %s", r.Header.Get("X-Real-IP"))
+	h.logger.Trace("WebSocket连接请求开始")
+	h.logger.Tracef("请求详情: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	h.logger.Trace("客户端信息:")
+	h.logger.Tracef("  - 远程地址: %s", r.RemoteAddr)
+	h.logger.Tracef("  - User-Agent: %s", r.Header.Get("User-Agent"))
+	h.logger.Tracef("  - Origin: %s", r.Header.Get("Origin"))
+	h.logger.Tracef("  - Host: %s", r.Header.Get("Host"))
+	h.logger.Tracef("  - Referer: %s", r.Header.Get("Referer"))
+	h.logger.Tracef("  - X-Forwarded-For: %s", r.Header.Get("X-Forwarded-For"))
+	h.logger.Tracef("  - X-Real-IP: %s", r.Header.Get("X-Real-IP"))
 
 	// 记录WebSocket特定的请求头
-	log.Printf("[WebRTC] WebSocket协议头:")
-	log.Printf("[WebRTC]   - Connection: %s", r.Header.Get("Connection"))
-	log.Printf("[WebRTC]   - Upgrade: %s", r.Header.Get("Upgrade"))
-	log.Printf("[WebRTC]   - Sec-WebSocket-Version: %s", r.Header.Get("Sec-WebSocket-Version"))
-	log.Printf("[WebRTC]   - Sec-WebSocket-Key: %s", r.Header.Get("Sec-WebSocket-Key"))
-	log.Printf("[WebRTC]   - Sec-WebSocket-Protocol: %s", r.Header.Get("Sec-WebSocket-Protocol"))
-	log.Printf("[WebRTC]   - Sec-WebSocket-Extensions: %s", r.Header.Get("Sec-WebSocket-Extensions"))
+	h.logger.Trace("WebSocket协议头:")
+	h.logger.Tracef("  - Connection: %s", r.Header.Get("Connection"))
+	h.logger.Tracef("  - Upgrade: %s", r.Header.Get("Upgrade"))
+	h.logger.Tracef("  - Sec-WebSocket-Version: %s", r.Header.Get("Sec-WebSocket-Version"))
+	h.logger.Tracef("  - Sec-WebSocket-Key: %s", r.Header.Get("Sec-WebSocket-Key"))
+	h.logger.Tracef("  - Sec-WebSocket-Protocol: %s", r.Header.Get("Sec-WebSocket-Protocol"))
+	h.logger.Tracef("  - Sec-WebSocket-Extensions: %s", r.Header.Get("Sec-WebSocket-Extensions"))
 
 	// 验证WebSocket升级请求的有效性
 	if r.Method != "GET" {
-		log.Printf("[WebRTC] WebSocket升级失败: 无效的HTTP方法 %s (必须是GET)", r.Method)
+		h.logger.Tracef("WebSocket升级失败: 无效的HTTP方法 %s (必须是GET)", r.Method)
 		http.Error(w, "Method not allowed for WebSocket upgrade", http.StatusMethodNotAllowed)
 		return
 	}
 
 	if r.Header.Get("Connection") == "" || r.Header.Get("Upgrade") == "" {
-		log.Printf("[WebRTC] WebSocket升级失败: 缺少必要的升级头")
-		log.Printf("[WebRTC]   - Connection头: %s", r.Header.Get("Connection"))
-		log.Printf("[WebRTC]   - Upgrade头: %s", r.Header.Get("Upgrade"))
+		h.logger.Trace("WebSocket升级失败: 缺少必要的升级头")
+		h.logger.Tracef("  - Connection头: %s", r.Header.Get("Connection"))
+		h.logger.Tracef("  - Upgrade头: %s", r.Header.Get("Upgrade"))
 		http.Error(w, "Missing WebSocket upgrade headers", http.StatusBadRequest)
 		return
 	}
@@ -127,11 +131,11 @@ func (h *webrtcHandlers) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
-			log.Printf("[WebRTC] WebSocket跨域检查:")
-			log.Printf("[WebRTC]   - Origin: %s", origin)
-			log.Printf("[WebRTC]   - Host: %s", r.Header.Get("Host"))
-			log.Printf("[WebRTC]   - 跨域策略: 允许所有来源 (开发模式)")
-			log.Printf("[WebRTC]   - 检查结果: 允许连接")
+			h.logger.Trace("WebSocket跨域检查:")
+			h.logger.Tracef("  - Origin: %s", origin)
+			h.logger.Tracef("  - Host: %s", r.Header.Get("Host"))
+			h.logger.Trace("  - 跨域策略: 允许所有来源 (开发模式)")
+			h.logger.Trace("  - 检查结果: 允许连接")
 			return true // 允许跨域，实际应用中应该更严格
 		},
 		ReadBufferSize:   1024,
@@ -139,117 +143,117 @@ func (h *webrtcHandlers) handleWebSocket(w http.ResponseWriter, r *http.Request)
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	log.Printf("[WebRTC] 开始WebSocket协议升级...")
-	log.Printf("[WebRTC] 升级器配置:")
-	log.Printf("[WebRTC]   - 读缓冲区大小: %d bytes", upgrader.ReadBufferSize)
-	log.Printf("[WebRTC]   - 写缓冲区大小: %d bytes", upgrader.WriteBufferSize)
-	log.Printf("[WebRTC]   - 握手超时时间: %v", upgrader.HandshakeTimeout)
-	log.Printf("[WebRTC]   - 跨域检查: 启用")
+	h.logger.Trace("开始WebSocket协议升级...")
+	h.logger.Trace("升级器配置:")
+	h.logger.Tracef("  - 读缓冲区大小: %d bytes", upgrader.ReadBufferSize)
+	h.logger.Tracef("  - 写缓冲区大小: %d bytes", upgrader.WriteBufferSize)
+	h.logger.Tracef("  - 握手超时时间: %v", upgrader.HandshakeTimeout)
+	h.logger.Trace("  - 跨域检查: 启用")
 
 	// 记录升级过程开始时间
 	upgradeStartTime := time.Now()
-	log.Printf("[WebRTC] 升级开始时间: %s", upgradeStartTime.Format("2006-01-02 15:04:05.000"))
+	h.logger.Tracef("升级开始时间: %s", upgradeStartTime.Format("2006-01-02 15:04:05.000"))
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	upgradeDuration := time.Since(upgradeStartTime)
 
 	if err != nil {
-		log.Printf("[WebRTC] WebSocket升级失败!")
-		log.Printf("[WebRTC] 升级失败详情:")
-		log.Printf("[WebRTC]   - 错误信息: %v", err)
-		log.Printf("[WebRTC]   - 升级耗时: %v", upgradeDuration)
-		log.Printf("[WebRTC]   - 请求方法: %s", r.Method)
-		log.Printf("[WebRTC]   - 请求路径: %s", r.URL.Path)
-		log.Printf("[WebRTC]   - 客户端地址: %s", r.RemoteAddr)
-		log.Printf("[WebRTC]   - User-Agent: %s", r.Header.Get("User-Agent"))
-		log.Printf("[WebRTC]   - Origin: %s", r.Header.Get("Origin"))
+		h.logger.Info("WebSocket升级失败!")
+		h.logger.Info("升级失败详情:")
+		h.logger.Infof("  - 错误信息: %v", err)
+		h.logger.Infof("  - 升级耗时: %v", upgradeDuration)
+		h.logger.Infof("  - 请求方法: %s", r.Method)
+		h.logger.Infof("  - 请求路径: %s", r.URL.Path)
+		h.logger.Infof("  - 客户端地址: %s", r.RemoteAddr)
+		h.logger.Infof("  - User-Agent: %s", r.Header.Get("User-Agent"))
+		h.logger.Infof("  - Origin: %s", r.Header.Get("Origin"))
 
 		// 根据错误类型提供更详细的诊断信息
 		if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-			log.Printf("[WebRTC]   - 错误类型: 意外的连接关闭")
+			h.logger.Info("  - 错误类型: 意外的连接关闭")
 		} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-			log.Printf("[WebRTC]   - 错误类型: 正常连接关闭")
+			h.logger.Info("  - 错误类型: 正常连接关闭")
 		} else {
-			log.Printf("[WebRTC]   - 错误类型: 升级协议错误")
+			h.logger.Info("  - 错误类型: 升级协议错误")
 		}
 
 		return
 	}
 
-	log.Printf("[WebRTC] WebSocket连接升级成功!")
-	log.Printf("[WebRTC] 连接建立详情:")
-	log.Printf("[WebRTC]   - 升级耗时: %v", upgradeDuration)
-	log.Printf("[WebRTC]   - 连接建立时间: %s", time.Now().Format("2006-01-02 15:04:05.000"))
-	log.Printf("[WebRTC]   - 客户端远程地址: %s", r.RemoteAddr)
-	log.Printf("[WebRTC]   - 本地服务器地址: %s", conn.LocalAddr().String())
-	log.Printf("[WebRTC]   - 远程客户端地址: %s", conn.RemoteAddr().String())
+	h.logger.Trace("WebSocket连接升级成功!")
+	h.logger.Trace("连接建立详情:")
+	h.logger.Tracef("  - 升级耗时: %v", upgradeDuration)
+	h.logger.Tracef("  - 连接建立时间: %s", time.Now().Format("2006-01-02 15:04:05.000"))
+	h.logger.Tracef("  - 客户端远程地址: %s", r.RemoteAddr)
+	h.logger.Tracef("  - 本地服务器地址: %s", conn.LocalAddr().String())
+	h.logger.Tracef("  - 远程客户端地址: %s", conn.RemoteAddr().String())
 
 	// 记录连接的技术参数
-	log.Printf("[WebRTC] 连接技术参数:")
-	log.Printf("[WebRTC]   - 协议: WebSocket")
-	log.Printf("[WebRTC]   - 子协议: %s", conn.Subprotocol())
-	log.Printf("[WebRTC]   - 读缓冲区: %d bytes", upgrader.ReadBufferSize)
-	log.Printf("[WebRTC]   - 写缓冲区: %d bytes", upgrader.WriteBufferSize)
-	log.Printf("[WebRTC]   - 握手超时: %v", upgrader.HandshakeTimeout)
+	h.logger.Trace("连接技术参数:")
+	h.logger.Trace("  - 协议: WebSocket")
+	h.logger.Tracef("  - 子协议: %s", conn.Subprotocol())
+	h.logger.Tracef("  - 读缓冲区: %d bytes", upgrader.ReadBufferSize)
+	h.logger.Tracef("  - 写缓冲区: %d bytes", upgrader.WriteBufferSize)
+	h.logger.Tracef("  - 握手超时: %v", upgrader.HandshakeTimeout)
 	conn.EnableWriteCompression(false) // 禁用写压缩
-	log.Printf("[WebRTC]   - 压缩支持: 已禁用")
+	h.logger.Trace("  - 压缩支持: 已禁用")
 
 	// 记录客户端环境信息
 	userAgent := r.Header.Get("User-Agent")
-	log.Printf("[WebRTC] 客户端环境分析:")
+	h.logger.Trace("客户端环境分析:")
 	if userAgent != "" {
-		log.Printf("[WebRTC]   - 浏览器信息: %s", userAgent)
+		h.logger.Tracef("  - 浏览器信息: %s", userAgent)
 		// 简单的浏览器检测
 		if contains(userAgent, "Chrome") {
-			log.Printf("[WebRTC]   - 浏览器类型: Chrome/Chromium")
+			h.logger.Trace("  - 浏览器类型: Chrome/Chromium")
 		} else if contains(userAgent, "Firefox") {
-			log.Printf("[WebRTC]   - 浏览器类型: Firefox")
+			h.logger.Trace("  - 浏览器类型: Firefox")
 		} else if contains(userAgent, "Safari") {
-			log.Printf("[WebRTC]   - 浏览器类型: Safari")
+			h.logger.Trace("  - 浏览器类型: Safari")
 		} else if contains(userAgent, "Edge") {
-			log.Printf("[WebRTC]   - 浏览器类型: Microsoft Edge")
+			h.logger.Trace("  - 浏览器类型: Microsoft Edge")
 		} else {
-			log.Printf("[WebRTC]   - 浏览器类型: 未知")
+			h.logger.Trace("  - 浏览器类型: 未知")
 		}
 	} else {
-		log.Printf("[WebRTC]   - 浏览器信息: 未提供")
+		h.logger.Trace("  - 浏览器信息: 未提供")
 	}
 
 	// 记录连接状态和准备传递给信令服务器
-	log.Printf("[WebRTC] 连接状态检查:")
-	log.Printf("[WebRTC]   - 连接对象: %p", conn)
-	log.Printf("[WebRTC]   - 连接状态: 已建立")
-	log.Printf("[WebRTC]   - 准备传递给信令服务器: 是")
+	h.logger.Trace("连接状态检查:")
+	h.logger.Tracef("  - 连接对象: %p", conn)
+	h.logger.Trace("  - 连接状态: 已建立")
+	h.logger.Trace("  - 准备传递给信令服务器: 是")
 
 	// 获取当前活跃连接数
 	currentClientCount := h.manager.signaling.GetClientCount()
-	log.Printf("[WebRTC] 连接统计:")
-	log.Printf("[WebRTC]   - 当前活跃连接数: %d", currentClientCount)
-	log.Printf("[WebRTC]   - 新连接后预期连接数: %d", currentClientCount+1)
+	h.logger.Trace("连接统计:")
+	h.logger.Tracef("  - 当前活跃连接数: %d", currentClientCount)
+	h.logger.Tracef("  - 新连接后预期连接数: %d", currentClientCount+1)
 
 	// 不要在这里关闭连接，让信令服务器管理连接生命周期
 	// 处理WebSocket连接
-	log.Printf("[WebRTC] 将WebSocket连接传递给信令服务器处理...")
-	log.Printf("[WebRTC] 信令服务器状态:")
-	log.Printf("[WebRTC]   - 信令服务器对象: %p", h.manager.signaling)
-	log.Printf("[WebRTC]   - 传递时间: %s", time.Now().Format("2006-01-02 15:04:05.000"))
+	h.logger.Trace("将WebSocket连接传递给信令服务器处理...")
+	h.logger.Trace("信令服务器状态:")
+	h.logger.Tracef("  - 信令服务器对象: %p", h.manager.signaling)
+	h.logger.Tracef("  - 传递时间: %s", time.Now().Format("2006-01-02 15:04:05.000"))
 
 	// 调用信令服务器处理连接
 	h.manager.signaling.HandleWebSocketConnection(conn)
 
-	log.Printf("[WebRTC] WebSocket连接已成功传递给信令服务器处理")
+	h.logger.Trace("WebSocket连接已成功传递给信令服务器处理")
 }
 
 func (h *webrtcHandlers) handleSignaling(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	appName := vars["app"]
 
-	log.Printf("[WebRTC] 应用特定信令连接请求: app=%s, %s %s from %s", appName, r.Method, r.URL.Path, r.RemoteAddr)
-	log.Printf("[WebRTC] 应用信令请求头: User-Agent=%s, Origin=%s", r.Header.Get("User-Agent"), r.Header.Get("Origin"))
+	h.logger.Tracef("应用特定信令连接请求: app=%s, %s %s from %s", appName, r.Method, r.URL.Path, r.RemoteAddr)
+	h.logger.Tracef("应用信令请求头: User-Agent=%s, Origin=%s", r.Header.Get("User-Agent"), r.Header.Get("Origin"))
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			log.Printf("[WebRTC] 应用信令跨域检查: app=%s, Origin=%s, 允许连接", appName, r.Header.Get("Origin"))
+			h.logger.Tracef("应用信令跨域检查: app=%s, Origin=%s, 允许连接", appName, r.Header.Get("Origin"))
 			return true // 允许跨域，实际应用中应该更严格
 		},
 		ReadBufferSize:   1024,
@@ -257,25 +261,25 @@ func (h *webrtcHandlers) handleSignaling(w http.ResponseWriter, r *http.Request)
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	log.Printf("[WebRTC] 开始应用信令WebSocket升级: app=%s", appName)
+	h.logger.Tracef("开始应用信令WebSocket升级: app=%s", appName)
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[WebRTC] 应用信令WebSocket升级失败: app=%s, error=%v", appName, err)
-		log.Printf("[WebRTC] 应用信令升级失败详情: 应用=%s, 请求方法=%s, 路径=%s, 来源=%s", appName, r.Method, r.URL.Path, r.RemoteAddr)
+		h.logger.Tracef("应用信令WebSocket升级失败: app=%s, error=%v", appName, err)
+		h.logger.Tracef("应用信令升级失败详情: 应用=%s, 请求方法=%s, 路径=%s, 来源=%s", appName, r.Method, r.URL.Path, r.RemoteAddr)
 		return
 	}
 
-	log.Printf("[WebRTC] 应用信令WebSocket连接成功建立: app=%s, 来源=%s", appName, r.RemoteAddr)
-	log.Printf("[WebRTC] 应用信令连接配置:")
-	log.Printf("[WebRTC]   - 应用名称: %s", appName)
-	log.Printf("[WebRTC]   - 读缓冲区: 1024 bytes")
-	log.Printf("[WebRTC]   - 写缓冲区: 1024 bytes")
-	log.Printf("[WebRTC]   - 握手超时: 10s")
-	log.Printf("[WebRTC]   - 跨域策略: 允许所有")
+	h.logger.Tracef("应用信令WebSocket连接成功建立: app=%s, 来源=%s", appName, r.RemoteAddr)
+	h.logger.Trace("应用信令连接配置:")
+	h.logger.Tracef("  - 应用名称: %s", appName)
+	h.logger.Trace("  - 读缓冲区: 1024 bytes")
+	h.logger.Trace("  - 写缓冲区: 1024 bytes")
+	h.logger.Trace("  - 握手超时: 10s")
+	h.logger.Trace("  - 跨域策略: 允许所有")
 
 	// 不要在这里关闭连接，让信令服务器管理连接生命周期
 	// 处理特定应用的信令连接
-	log.Printf("[WebRTC] 将应用信令连接传递给信令服务器处理: app=%s", appName)
+	h.logger.Tracef("将应用信令连接传递给信令服务器处理: app=%s", appName)
 	h.manager.signaling.HandleAppConnection(conn, appName)
 }
 
@@ -462,7 +466,7 @@ func (h *webrtcHandlers) handleGetConfig(w http.ResponseWriter, r *http.Request)
 		Timestamp: time.Now().Unix(),
 	}
 
-	log.Printf("WebRTC config requested, returning %d ICE servers", len(iceServers))
+	h.logger.Tracef("WebRTC config requested, returning %d ICE servers", len(iceServers))
 	h.writeConfigResponse(w, http.StatusOK, response)
 }
 
@@ -484,7 +488,7 @@ func (h *webrtcHandlers) handleUpdateConfig(w http.ResponseWriter, r *http.Reque
 
 	// TODO: 实现配置更新逻辑
 	// 这里应该验证配置并更新WebRTC管理器的设置
-	log.Printf("WebRTC configuration update requested: %+v", newConfig)
+	h.logger.Tracef("WebRTC configuration update requested: %+v", newConfig)
 
 	response := &WebRTCConfigResponse{
 		Success:   true,
@@ -505,7 +509,7 @@ func (h *webrtcHandlers) convertICEServersToFrontendFormat() ([]map[string]any, 
 
 	for i, server := range h.manager.config.WebRTC.ICEServers {
 		if len(server.URLs) == 0 {
-			log.Printf("Warning: ICE server %d has no URLs, skipping", i)
+			h.logger.Tracef("Warning: ICE server %d has no URLs, skipping", i)
 			continue
 		}
 
@@ -606,7 +610,7 @@ func (h *webrtcHandlers) writeConfigResponse(w http.ResponseWriter, statusCode i
 	w.WriteHeader(statusCode)
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Printf("Failed to encode WebRTC config response: %v", err)
+		h.logger.Tracef("Failed to encode WebRTC config response: %v", err)
 		// 如果JSON编码失败，发送简单的错误响应
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"success":false,"error":{"code":"ENCODING_ERROR","message":"Failed to encode response"}}`))
@@ -632,7 +636,7 @@ func (h *webrtcHandlers) writeConfigError(w http.ResponseWriter, statusCode int,
 func (h *webrtcHandlers) writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("Failed to encode JSON: %v", err)
+		h.logger.Tracef("Failed to encode JSON: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
@@ -658,12 +662,12 @@ func (h *webrtcHandlers) handleDebugLogs(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 记录接收到的调试日志
-	log.Printf("收到调试日志: 会话ID=%s, 日志数量=%d", logData.SessionID, len(logData.Logs))
+	h.logger.Tracef("收到调试日志: 会话ID=%s, 日志数量=%d", logData.SessionID, len(logData.Logs))
 
 	// 这里可以将日志存储到数据库或文件系统
 	// 目前只是记录到服务器日志
 	for _, logEntry := range logData.Logs {
-		log.Printf("[DEBUG] [%s] [%s] %s", logEntry.Level, logEntry.Category, logEntry.Message)
+		h.logger.Tracef("[DEBUG] [%s] [%s] %s", logEntry.Level, logEntry.Category, logEntry.Message)
 	}
 
 	h.writeJSON(w, map[string]interface{}{
@@ -717,7 +721,7 @@ func (h *webrtcHandlers) handlePostDiagnostics(w http.ResponseWriter, r *http.Re
 	}
 
 	// 记录诊断数据
-	log.Printf("收到诊断数据: %+v", diagnosticData)
+	h.logger.Tracef("收到诊断数据: %+v", diagnosticData)
 
 	h.writeJSON(w, map[string]interface{}{
 		"success": true,
@@ -868,7 +872,7 @@ func (h *webrtcHandlers) handleICEServers(w http.ResponseWriter, r *http.Request
 		"iceTransportPolicy": "all",
 	}
 
-	log.Printf("ICE servers config requested (selkies format), returning %d servers", len(iceServers))
+	h.logger.Tracef("ICE servers config requested (selkies format), returning %d servers", len(iceServers))
 	h.writeJSON(w, response)
 }
 
@@ -882,7 +886,7 @@ func (h *webrtcHandlers) convertICEServersToSelkiesFormat() ([]map[string]any, e
 
 	for i, server := range h.manager.config.WebRTC.ICEServers {
 		if len(server.URLs) == 0 {
-			log.Printf("Warning: ICE server %d has no URLs, skipping", i)
+			h.logger.Tracef("Warning: ICE server %d has no URLs, skipping", i)
 			continue
 		}
 

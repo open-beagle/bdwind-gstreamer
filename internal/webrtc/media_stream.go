@@ -6,10 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // MediaStreamConfig 媒体流配置结构
@@ -180,7 +181,7 @@ func NewMediaStream(cfg *MediaStreamConfig) (MediaStream, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	logger := config.GetLoggerWithPrefix("media-stream")
+	logger := config.GetLoggerWithPrefix("webrtc-media-stream")
 
 	ms := &mediaStreamImpl{
 		config:         cfg,

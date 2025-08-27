@@ -2,8 +2,11 @@ package protocol
 
 import (
 	"fmt"
-	"log"
 	"sync"
+
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // ProtocolManager 协议管理器
@@ -14,6 +17,7 @@ type ProtocolManager struct {
 	autoDetection   bool
 	mutex           sync.RWMutex
 	config          *ManagerConfig
+	logger          *logrus.Entry
 }
 
 // ManagerConfig 管理器配置
@@ -43,23 +47,24 @@ type ProcessingResult struct {
 }
 
 // NewProtocolManager 创建协议管理器
-func NewProtocolManager(config *ManagerConfig) *ProtocolManager {
-	if config == nil {
-		config = DefaultManagerConfig()
+func NewProtocolManager(cfg *ManagerConfig) *ProtocolManager {
+	if cfg == nil {
+		cfg = DefaultManagerConfig()
 	}
 
 	manager := &ProtocolManager{
 		adapters:        make(map[ProtocolVersion]ProtocolAdapter),
-		defaultProtocol: config.DefaultProtocol,
-		autoDetection:   config.AutoDetection,
-		config:          config,
+		defaultProtocol: cfg.DefaultProtocol,
+		autoDetection:   cfg.AutoDetection,
+		config:          cfg,
+		logger:          config.GetLoggerWithPrefix("webrtc-protocol-manager"),
 	}
 
 	// 初始化验证器
-	if config.ValidatorConfig == nil {
-		config.ValidatorConfig = DefaultValidatorConfig()
+	if cfg.ValidatorConfig == nil {
+		cfg.ValidatorConfig = DefaultValidatorConfig()
 	}
-	manager.validator = NewMessageValidator(config.ValidatorConfig)
+	manager.validator = NewMessageValidator(cfg.ValidatorConfig)
 
 	// 注册默认适配器
 	manager.registerDefaultAdapters()
@@ -89,9 +94,7 @@ func (pm *ProtocolManager) RegisterAdapter(protocol ProtocolVersion, adapter Pro
 
 	pm.adapters[protocol] = adapter
 
-	if pm.config.EnableLogging {
-		log.Printf("Protocol adapter registered: %s", protocol)
-	}
+	pm.logger.Debugf("Protocol adapter registered: %s", protocol)
 }
 
 // UnregisterAdapter 注销协议适配器
@@ -101,9 +104,7 @@ func (pm *ProtocolManager) UnregisterAdapter(protocol ProtocolVersion) {
 
 	delete(pm.adapters, protocol)
 
-	if pm.config.EnableLogging {
-		log.Printf("Protocol adapter unregistered: %s", protocol)
-	}
+	pm.logger.Debugf("Protocol adapter unregistered: %s", protocol)
 }
 
 // DetectProtocol 检测协议类型
@@ -132,10 +133,8 @@ func (pm *ProtocolManager) DetectProtocol(data []byte) *DetectionResult {
 	// 	}
 	// }
 
-	if pm.config.EnableLogging {
-		log.Printf("Protocol detection result: %s (confidence: %.2f) - %s",
-			bestMatch.Protocol, bestMatch.Confidence, bestMatch.Reason)
-	}
+	pm.logger.Debugf("Protocol detection result: %s (confidence: %.2f) - %s",
+		bestMatch.Protocol, bestMatch.Confidence, bestMatch.Reason)
 
 	return bestMatch
 }
@@ -194,9 +193,7 @@ func (pm *ProtocolManager) ParseMessage(data []byte, protocol ...ProtocolVersion
 		// }
 	}
 
-	if pm.config.EnableLogging {
-		log.Printf("Message parsed successfully: type=%s, protocol=%s", message.Type, targetProtocol)
-	}
+	pm.logger.Debugf("Message parsed successfully: type=%s, protocol=%s", message.Type, targetProtocol)
 
 	return result, nil
 }
@@ -237,10 +234,8 @@ func (pm *ProtocolManager) FormatMessage(message *StandardMessage, protocol ...P
 		return nil, fmt.Errorf("failed to format message: %w", err)
 	}
 
-	if pm.config.EnableLogging {
-		log.Printf("Message formatted successfully: type=%s, protocol=%s, size=%d bytes",
-			message.Type, targetProtocol, len(data))
-	}
+	pm.logger.Debugf("Message formatted successfully: type=%s, protocol=%s, size=%d bytes",
+		message.Type, targetProtocol, len(data))
 
 	return data, nil
 }
@@ -262,10 +257,8 @@ func (pm *ProtocolManager) ConvertMessage(data []byte, fromProtocol, toProtocol 
 		return nil, fmt.Errorf("failed to format target message: %w", err)
 	}
 
-	if pm.config.EnableLogging {
-		log.Printf("Message converted: %s -> %s, size: %d -> %d bytes",
-			fromProtocol, toProtocol, len(data), len(convertedData))
-	}
+	pm.logger.Debugf("Message converted: %s -> %s, size: %d -> %d bytes",
+		fromProtocol, toProtocol, len(data), len(convertedData))
 
 	return convertedData, nil
 }
@@ -310,9 +303,7 @@ func (pm *ProtocolManager) SetDefaultProtocol(protocol ProtocolVersion) error {
 	pm.defaultProtocol = protocol
 	pm.config.DefaultProtocol = protocol
 
-	if pm.config.EnableLogging {
-		log.Printf("Default protocol changed to: %s", protocol)
-	}
+	pm.logger.Infof("Default protocol changed to: %s", protocol)
 
 	return nil
 }
@@ -325,9 +316,7 @@ func (pm *ProtocolManager) SetAutoDetection(enabled bool) {
 	pm.autoDetection = enabled
 	pm.config.AutoDetection = enabled
 
-	if pm.config.EnableLogging {
-		log.Printf("Auto detection %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
-	}
+	pm.logger.Infof("Auto detection %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
 }
 
 // GetStats 获取统计信息
@@ -361,9 +350,7 @@ func (pm *ProtocolManager) ClearHistory() {
 		pm.validator.ClearHistory()
 	}
 
-	if pm.config.EnableLogging {
-		log.Printf("Message history cleared")
-	}
+	pm.logger.Debug("Message history cleared")
 }
 
 // getAdapter 获取适配器（线程安全）
@@ -415,9 +402,7 @@ func (pm *ProtocolManager) registerDefaultAdapters() {
 	selkiesAdapter := NewSelkiesAdapter(selkiesConfig)
 	pm.RegisterAdapter(ProtocolVersionSelkies, selkiesAdapter)
 
-	if pm.config.EnableLogging {
-		log.Printf("Default protocol adapters registered: GStreamer, Selkies")
-	}
+	pm.logger.Trace("Default protocol adapters registered: GStreamer, Selkies")
 }
 
 // UpdateConfig 更新配置
@@ -446,9 +431,7 @@ func (pm *ProtocolManager) UpdateConfig(config *ManagerConfig) error {
 		pm.validator.SetConfig(config.ValidatorConfig)
 	}
 
-	if pm.config.EnableLogging {
-		log.Printf("Protocol manager configuration updated")
-	}
+	pm.logger.Info("Protocol manager configuration updated")
 
 	return nil
 }

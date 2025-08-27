@@ -187,7 +187,7 @@ func (phc *PipelineHealthChecker) Start() error {
 	// Start health monitoring goroutine
 	go phc.healthCheckLoop()
 
-	phc.logger.Printf("Pipeline health checker started")
+	phc.logger.Tracef("Pipeline health checker started")
 	return nil
 }
 
@@ -203,7 +203,7 @@ func (phc *PipelineHealthChecker) Stop() error {
 	phc.running = false
 	phc.cancel()
 
-	phc.logger.Printf("Pipeline health checker stopped")
+	phc.logger.Tracef("Pipeline health checker stopped")
 	return nil
 }
 
@@ -212,12 +212,12 @@ func (phc *PipelineHealthChecker) healthCheckLoop() {
 	ticker := time.NewTicker(phc.config.CheckInterval)
 	defer ticker.Stop()
 
-	phc.logger.Printf("Starting pipeline health monitoring loop...")
+	phc.logger.Tracef("Starting pipeline health monitoring loop...")
 
 	for {
 		select {
 		case <-phc.ctx.Done():
-			phc.logger.Printf("Health check loop stopped")
+			phc.logger.Tracef("Health check loop stopped")
 			return
 		case <-ticker.C:
 			phc.performHealthCheck()
@@ -228,7 +228,7 @@ func (phc *PipelineHealthChecker) healthCheckLoop() {
 // performHealthCheck performs a comprehensive health check
 func (phc *PipelineHealthChecker) performHealthCheck() {
 	if phc.config.VerboseLogging {
-		phc.logger.Printf("Performing pipeline health check...")
+		phc.logger.Tracef("Performing pipeline health check...")
 	}
 
 	checkStart := time.Now()
@@ -285,17 +285,30 @@ func (phc *PipelineHealthChecker) performHealthCheck() {
 	phc.updateIssues(issues)
 	phc.mu.Unlock()
 
-	// Log health status
-	if overallHealth >= HealthWarning || phc.config.VerboseLogging {
-		phc.logger.Printf("Health check completed: %s (took %v)",
+	// Log health status with appropriate severity levels based on requirements
+	switch overallHealth {
+	case HealthHealthy:
+		// Requirement 3.2: DEBUG level when no problems found
+		phc.logger.Debugf("Health check completed: %s (took %v)",
 			overallHealth.String(), time.Since(checkStart))
-
-		if len(issues) > 0 {
-			phc.logger.Printf("Found %d health issues:", len(issues))
-			for _, issue := range issues {
-				phc.logger.Printf("  - %s: %s", issue.Type.String(), issue.Message)
-			}
+		if phc.config.VerboseLogging {
+			phc.logger.Debugf("All health checks passed successfully")
 		}
+	case HealthWarning:
+		// Requirement 3.3: WARN level for warning-level problems
+		phc.logger.Warnf("Health check completed: %s (took %v)",
+			overallHealth.String(), time.Since(checkStart))
+		phc.logHealthCheckSummary(issues, logrus.WarnLevel)
+	case HealthCritical, HealthFailed:
+		// Requirement 3.4: ERROR level for critical problems
+		phc.logger.Errorf("Health check completed: %s (took %v)",
+			overallHealth.String(), time.Since(checkStart))
+		phc.logHealthCheckSummary(issues, logrus.ErrorLevel)
+	default:
+		// Unknown health status - log at WARN level as it indicates an unexpected condition
+		phc.logger.Warnf("Health check completed with unknown status: %s (took %v)",
+			overallHealth.String(), time.Since(checkStart))
+		phc.logHealthCheckSummary(issues, logrus.WarnLevel)
 	}
 
 	// Notify callbacks
@@ -358,6 +371,8 @@ func (phc *PipelineHealthChecker) checkBusMessages(ctx context.Context) HealthCh
 	// Get pipeline bus
 	bus, err := phc.pipeline.GetBus()
 	if err != nil {
+		// Log bus unavailability as ERROR level - this affects core functionality
+		phc.logger.Errorf("Failed to get pipeline bus: %v", err)
 		result.Status = HealthCritical
 		result.Message = fmt.Sprintf("Failed to get pipeline bus: %v", err)
 		result.Details["error"] = err.Error()
@@ -365,64 +380,79 @@ func (phc *PipelineHealthChecker) checkBusMessages(ctx context.Context) HealthCh
 		return result
 	}
 
-	// Check for messages (non-blocking)
+	// Check for messages using non-blocking approach
+	// This implementation removes dependency on context timeout and implements
+	// non-blocking message checking as required by task 2
 	var errorCount, warningCount int
 	var lastError, lastWarning string
 
-	for {
-		select {
-		case <-ctx.Done():
-			// Timeout reached
-			result.Status = HealthWarning
-			result.Message = "Bus message check timed out"
+	// Set a reasonable limit to prevent infinite loops
+	maxMessages := 100
+	messageCount := 0
+
+	// Non-blocking message processing loop
+	for messageCount < maxMessages {
+		// Try to pop a message (non-blocking)
+		msg, err := bus.Pop()
+		if err != nil {
+			// Log message retrieval failure as ERROR level - this is an actual error
+			phc.logger.Errorf("Failed to pop bus message: %v", err)
+			result.Status = HealthCritical
+			result.Message = fmt.Sprintf("Failed to pop bus message: %v", err)
+			result.Details["error"] = err.Error()
+			result.Details["processed_messages"] = messageCount
 			result.Duration = time.Since(start)
 			return result
-		default:
-			// Try to pop a message
-			msg, err := bus.Pop()
-			if err != nil {
-				result.Status = HealthWarning
-				result.Message = fmt.Sprintf("Failed to pop bus message: %v", err)
-				result.Details["error"] = err.Error()
-				result.Duration = time.Since(start)
-				return result
-			}
+		}
 
-			if msg == nil {
-				// No more messages
-				break
-			}
+		if msg == nil {
+			// No more messages available - this is normal, break the loop immediately
+			// This distinguishes between "no messages" (healthy) and actual errors
+			break
+		}
 
-			// Process message based on type
-			msgType := msg.GetType()
-			switch msgType {
-			case MessageError:
-				errorCount++
-				if err, debug := msg.ParseError(); err != nil {
-					lastError = fmt.Sprintf("%v (debug: %s)", err, debug)
-				}
-			case MessageWarning:
-				warningCount++
-				// Warning parsing would be similar to error parsing
-				lastWarning = "Warning message received"
+		messageCount++
+
+		// Process message based on type
+		msgType := msg.GetType()
+		switch msgType {
+		case MessageError:
+			errorCount++
+			if err, debug := msg.ParseError(); err != nil {
+				lastError = fmt.Sprintf("%v (debug: %s)", err, debug)
+				// Log individual error messages at ERROR level
+				phc.logger.Errorf("Pipeline bus error message: %v (debug: %s)", err, debug)
 			}
+		case MessageWarning:
+			warningCount++
+			// Warning parsing would be similar to error parsing
+			lastWarning = "Warning message received"
+			// Log individual warning messages at WARN level
+			phc.logger.Warnf("Pipeline bus warning message received")
 		}
 	}
 
-	// Determine health status based on messages
+	// Determine health status based on messages found
 	if errorCount > 0 {
 		result.Status = HealthCritical
 		result.Message = fmt.Sprintf("Found %d error messages, last: %s", errorCount, lastError)
 		result.Details["error_count"] = errorCount
 		result.Details["last_error"] = lastError
+		result.Details["processed_messages"] = messageCount
 	} else if warningCount > 0 {
 		result.Status = HealthWarning
 		result.Message = fmt.Sprintf("Found %d warning messages", warningCount)
 		result.Details["warning_count"] = warningCount
 		result.Details["last_warning"] = lastWarning
+		result.Details["processed_messages"] = messageCount
 	} else {
 		result.Status = HealthHealthy
 		result.Message = "No error or warning messages"
+		result.Details["processed_messages"] = messageCount
+		// Log successful check at DEBUG level when verbose logging is enabled
+		if phc.config.VerboseLogging {
+			phc.logger.Debugf("Bus message check completed successfully, processed %d messages", messageCount)
+		}
 	}
 
 	result.Duration = time.Since(start)
@@ -542,6 +572,119 @@ func (phc *PipelineHealthChecker) updateIssues(newIssues []HealthIssue) {
 		}
 		if !found {
 			phc.healthStatus.Issues = append(phc.healthStatus.Issues, newIssue)
+		}
+	}
+}
+
+// logHealthCheckSummary logs a detailed summary of health issues categorized by type and severity
+// Requirement 3.5: Clear categorization of issues by type and severity in health check summary
+func (phc *PipelineHealthChecker) logHealthCheckSummary(issues []HealthIssue, logLevel logrus.Level) {
+	if len(issues) == 0 {
+		return
+	}
+
+	// Categorize issues by severity
+	var criticalIssues, warningIssues []HealthIssue
+	for _, issue := range issues {
+		switch issue.Severity {
+		case HealthCritical, HealthFailed:
+			criticalIssues = append(criticalIssues, issue)
+		case HealthWarning:
+			warningIssues = append(warningIssues, issue)
+		}
+	}
+
+	// Log summary header
+	totalIssues := len(criticalIssues) + len(warningIssues)
+	switch logLevel {
+	case logrus.ErrorLevel:
+		phc.logger.Errorf("Health check summary: %d total issues (%d critical, %d warnings)",
+			totalIssues, len(criticalIssues), len(warningIssues))
+	case logrus.WarnLevel:
+		phc.logger.Warnf("Health check summary: %d total issues (%d critical, %d warnings)",
+			totalIssues, len(criticalIssues), len(warningIssues))
+	default:
+		phc.logger.Infof("Health check summary: %d total issues (%d critical, %d warnings)",
+			totalIssues, len(criticalIssues), len(warningIssues))
+	}
+
+	// Log critical issues first
+	if len(criticalIssues) > 0 {
+		switch logLevel {
+		case logrus.ErrorLevel:
+			phc.logger.Errorf("Critical issues:")
+		case logrus.WarnLevel:
+			phc.logger.Warnf("Critical issues:")
+		default:
+			phc.logger.Infof("Critical issues:")
+		}
+
+		// Group critical issues by type for better readability
+		criticalByType := make(map[IssueType][]HealthIssue)
+		for _, issue := range criticalIssues {
+			criticalByType[issue.Type] = append(criticalByType[issue.Type], issue)
+		}
+
+		for issueType, typeIssues := range criticalByType {
+			switch logLevel {
+			case logrus.ErrorLevel:
+				phc.logger.Errorf("  %s (%d):", issueType.String(), len(typeIssues))
+			case logrus.WarnLevel:
+				phc.logger.Warnf("  %s (%d):", issueType.String(), len(typeIssues))
+			default:
+				phc.logger.Infof("  %s (%d):", issueType.String(), len(typeIssues))
+			}
+
+			for _, issue := range typeIssues {
+				switch logLevel {
+				case logrus.ErrorLevel:
+					phc.logger.Errorf("    - %s: %s", issue.CheckName, issue.Message)
+				case logrus.WarnLevel:
+					phc.logger.Warnf("    - %s: %s", issue.CheckName, issue.Message)
+				default:
+					phc.logger.Infof("    - %s: %s", issue.CheckName, issue.Message)
+				}
+			}
+		}
+	}
+
+	// Log warning issues
+	if len(warningIssues) > 0 {
+		switch logLevel {
+		case logrus.ErrorLevel:
+			phc.logger.Errorf("Warning issues:")
+		case logrus.WarnLevel:
+			phc.logger.Warnf("Warning issues:")
+		default:
+			phc.logger.Infof("Warning issues:")
+		}
+
+		// Group warning issues by type for better readability
+		warningByType := make(map[IssueType][]HealthIssue)
+		for _, issue := range warningIssues {
+			warningByType[issue.Type] = append(warningByType[issue.Type], issue)
+		}
+
+		for issueType, typeIssues := range warningByType {
+			switch logLevel {
+			case logrus.ErrorLevel:
+				phc.logger.Errorf("  %s (%d):", issueType.String(), len(typeIssues))
+			case logrus.WarnLevel:
+				phc.logger.Warnf("  %s (%d):", issueType.String(), len(typeIssues))
+			default:
+				phc.logger.Infof("  %s (%d):", issueType.String(), len(typeIssues))
+			}
+
+			for _, issue := range typeIssues {
+				switch logLevel {
+				case logrus.ErrorLevel:
+					phc.logger.Errorf("    - %s: %s", issue.CheckName, issue.Message)
+				case logrus.WarnLevel:
+					phc.logger.Warnf("    - %s: %s", issue.CheckName, issue.Message)
+				default:
+					phc.logger.Infof("    - %s: %s", issue.CheckName, issue.Message)
+				}
+			}
 		}
 	}
 }

@@ -15,17 +15,17 @@ type NVENCEncoder struct {
 }
 
 // NewNVENCEncoder creates a new NVENC encoder
-func NewNVENCEncoder(config config.EncoderConfig) (*NVENCEncoder, error) {
+func NewNVENCEncoder(cfg config.EncoderConfig) (*NVENCEncoder, error) {
 	if !IsNVENCAvailable() {
 		return nil, fmt.Errorf("NVENC is not available on this system")
 	}
 
 	encoder := &NVENCEncoder{
-		BaseEncoder: NewBaseEncoder(config),
-		deviceID:    config.HardwareDevice,
+		BaseEncoder: NewBaseEncoder(cfg),
+		deviceID:    cfg.HardwareDevice,
 	}
 
-	if err := encoder.Initialize(config); err != nil {
+	if err := encoder.Initialize(cfg); err != nil {
 		return nil, fmt.Errorf("failed to initialize NVENC encoder: %w", err)
 	}
 
@@ -142,6 +142,11 @@ func (e *NVENCEncoder) GetElement() (string, map[string]interface{}, error) {
 
 // UpdateBitrate dynamically updates the encoder bitrate
 func (e *NVENCEncoder) UpdateBitrate(bitrate int) error {
+	return e.SetBitrate(bitrate)
+}
+
+// SetBitrate dynamically sets the encoder bitrate (for WebRTC integration)
+func (e *NVENCEncoder) SetBitrate(bitrate int) error {
 	if bitrate <= 0 || bitrate > 50000 {
 		return fmt.Errorf("invalid bitrate: %d (must be between 1 and 50000 kbps)", bitrate)
 	}
@@ -151,6 +156,8 @@ func (e *NVENCEncoder) UpdateBitrate(bitrate int) error {
 
 	// Update configuration
 	e.config.Bitrate = bitrate
+	e.stats.TargetBitrate = bitrate
+	e.stats.CurrentBitrate = bitrate
 
 	// In real implementation, this would update the GStreamer element property
 	// For now, we'll simulate the update
@@ -158,6 +165,7 @@ func (e *NVENCEncoder) UpdateBitrate(bitrate int) error {
 		// gst_element_set_property(e.element, "bitrate", bitrate)
 	}
 
+	e.logger.Infof("NVENC Encoder: Bitrate set to %d kbps", bitrate)
 	return nil
 }
 

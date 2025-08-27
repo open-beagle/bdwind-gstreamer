@@ -3,10 +3,13 @@ package webrtc
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // ConcurrentMessageRouter 并发消息路由器
@@ -26,6 +29,9 @@ type ConcurrentMessageRouter struct {
 
 	// 统计
 	stats *ConcurrentRoutingStats
+
+	// 日志
+	logger *logrus.Entry
 
 	// 控制
 	ctx     context.Context
@@ -107,6 +113,9 @@ type MessageWorker struct {
 	totalTime      time.Duration
 	isIdle         int32
 
+	// 日志
+	logger *logrus.Entry
+
 	// 控制
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -173,19 +182,20 @@ func DefaultConcurrentRouterConfig() *ConcurrentRouterConfig {
 }
 
 // NewConcurrentMessageRouter 创建并发消息路由器
-func NewConcurrentMessageRouter(baseRouter *MessageRouter, config *ConcurrentRouterConfig, performanceMonitor *PerformanceMonitor) *ConcurrentMessageRouter {
-	if config == nil {
-		config = DefaultConcurrentRouterConfig()
+func NewConcurrentMessageRouter(baseRouter *MessageRouter, cfg *ConcurrentRouterConfig, performanceMonitor *PerformanceMonitor) *ConcurrentMessageRouter {
+	if cfg == nil {
+		cfg = DefaultConcurrentRouterConfig()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	router := &ConcurrentMessageRouter{
 		baseRouter:         baseRouter,
-		messageQueue:       make(chan *MessageTask, config.QueueSize),
+		messageQueue:       make(chan *MessageTask, cfg.QueueSize),
 		performanceMonitor: performanceMonitor,
-		config:             config,
+		config:             cfg,
 		stats:              &ConcurrentRoutingStats{},
+		logger:             config.GetLoggerWithPrefix("webrtc-concurrent-router"),
 		ctx:                ctx,
 		cancel:             cancel,
 	}
@@ -232,6 +242,7 @@ func (cmr *ConcurrentMessageRouter) createWorker(id int) *MessageWorker {
 		ID:       id,
 		router:   cmr.baseRouter,
 		taskChan: make(chan *MessageTask, 10), // 每个工作器的小缓冲区
+		logger:   config.GetLoggerWithPrefix("webrtc-concurrent-router").WithField("worker_id", id),
 		ctx:      ctx,
 		cancel:   cancel,
 		isIdle:   1, // 初始状态为空闲
@@ -246,7 +257,7 @@ func (cmr *ConcurrentMessageRouter) Start() error {
 		return fmt.Errorf("concurrent router is already running")
 	}
 
-	log.Printf("🚀 Starting concurrent message router with %d workers", cmr.config.WorkerCount)
+	cmr.logger.Debugf("🚀 Starting concurrent message router with %d workers", cmr.config.WorkerCount)
 
 	// 启动工作器
 	for _, worker := range cmr.workerPool.workers {
@@ -261,7 +272,7 @@ func (cmr *ConcurrentMessageRouter) Start() error {
 		go cmr.metricsCollector()
 	}
 
-	log.Printf("✅ Concurrent message router started")
+	cmr.logger.Debug("✅ Concurrent message router started")
 	return nil
 }
 
@@ -271,7 +282,7 @@ func (cmr *ConcurrentMessageRouter) Stop() error {
 		return fmt.Errorf("concurrent router is not running")
 	}
 
-	log.Printf("🛑 Stopping concurrent message router...")
+	cmr.logger.Info("🛑 Stopping concurrent message router...")
 
 	// 停止接收新任务
 	close(cmr.messageQueue)
@@ -284,7 +295,7 @@ func (cmr *ConcurrentMessageRouter) Stop() error {
 	// 取消上下文
 	cmr.cancel()
 
-	log.Printf("✅ Concurrent message router stopped")
+	cmr.logger.Info("✅ Concurrent message router stopped")
 	return nil
 }
 
@@ -351,13 +362,13 @@ func (cmr *ConcurrentMessageRouter) RouteMessage(messageBytes []byte, clientID s
 
 // taskDispatcher 任务分发器
 func (cmr *ConcurrentMessageRouter) taskDispatcher() {
-	log.Printf("📡 Task dispatcher started")
+	cmr.logger.Debug("📡 Task dispatcher started")
 
 	for {
 		select {
 		case task, ok := <-cmr.messageQueue:
 			if !ok {
-				log.Printf("📡 Task dispatcher stopping - message queue closed")
+				cmr.logger.Debug("📡 Task dispatcher stopping - message queue closed")
 				return
 			}
 
@@ -384,7 +395,7 @@ func (cmr *ConcurrentMessageRouter) taskDispatcher() {
 			}
 
 		case <-cmr.ctx.Done():
-			log.Printf("📡 Task dispatcher stopping - context cancelled")
+			cmr.logger.Debug("📡 Task dispatcher stopping - context cancelled")
 			return
 		}
 	}
@@ -395,14 +406,14 @@ func (cmr *ConcurrentMessageRouter) metricsCollector() {
 	ticker := time.NewTicker(cmr.config.MetricsInterval)
 	defer ticker.Stop()
 
-	log.Printf("📊 Metrics collector started")
+	cmr.logger.Debug("📊 Metrics collector started")
 
 	for {
 		select {
 		case <-ticker.C:
 			cmr.collectMetrics()
 		case <-cmr.ctx.Done():
-			log.Printf("📊 Metrics collector stopping")
+			cmr.logger.Debug("📊 Metrics collector stopping")
 			return
 		}
 	}
@@ -442,27 +453,27 @@ func (cmr *ConcurrentMessageRouter) collectMetrics() {
 	}
 
 	// 记录详细指标
-	log.Printf("📊 Concurrent Router Metrics: Queue=%d, Active=%d/%d, Throughput=%.2f/s, Utilization=%.1f%%",
+	cmr.logger.Debugf("📊 Concurrent Router Metrics: Queue=%d, Active=%d/%d, Throughput=%.2f/s, Utilization=%.1f%%",
 		cmr.stats.QueueDepth, activeWorkers, cmr.config.WorkerCount,
 		cmr.stats.ThroughputPerSec, cmr.stats.WorkerUtilization)
 }
 
 // start 启动工作器
 func (mw *MessageWorker) start() {
-	log.Printf("👷 Worker %d started", mw.ID)
+	mw.logger.Debugf("👷 Worker %d started", mw.ID)
 
 	for {
 		select {
 		case task, ok := <-mw.taskChan:
 			if !ok {
-				log.Printf("👷 Worker %d stopping - task channel closed", mw.ID)
+				mw.logger.Debugf("👷 Worker %d stopping - task channel closed", mw.ID)
 				return
 			}
 
 			mw.processTask(task)
 
 		case <-mw.ctx.Done():
-			log.Printf("👷 Worker %d stopping - context cancelled", mw.ID)
+			mw.logger.Debugf("👷 Worker %d stopping - context cancelled", mw.ID)
 			return
 		}
 	}
@@ -470,7 +481,7 @@ func (mw *MessageWorker) start() {
 
 // stop 停止工作器
 func (mw *MessageWorker) stop() {
-	log.Printf("👷 Worker %d stopping...", mw.ID)
+	mw.logger.Debugf("👷 Worker %d stopping...", mw.ID)
 	close(mw.taskChan)
 	mw.cancel()
 }
@@ -511,7 +522,7 @@ func (mw *MessageWorker) processTask(task *MessageTask) {
 		// 结果发送成功
 	case <-time.After(1 * time.Second):
 		// 结果发送超时，记录错误
-		log.Printf("❌ Worker %d failed to send result for task %s", mw.ID, task.ID)
+		mw.logger.Errorf("❌ Worker %d failed to send result for task %s", mw.ID, task.ID)
 	}
 }
 

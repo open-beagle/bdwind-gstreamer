@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
@@ -59,6 +61,9 @@ type Encoder interface {
 	// UpdateBitrate dynamically updates the encoder bitrate
 	UpdateBitrate(bitrate int) error
 
+	// SetBitrate dynamically sets the encoder bitrate (for WebRTC integration)
+	SetBitrate(bitrate int) error
+
 	// ForceKeyframe forces the encoder to generate a keyframe
 	ForceKeyframe() error
 
@@ -97,20 +102,23 @@ type BaseEncoder struct {
 	element interface{}
 	// Callback for encoded samples
 	sampleCallback func(*Sample) error
+	// Logger for this encoder
+	logger *logrus.Entry
 }
 
 // NewBaseEncoder creates a new base encoder
-func NewBaseEncoder(config config.EncoderConfig) *BaseEncoder {
+func NewBaseEncoder(cfg config.EncoderConfig) *BaseEncoder {
 	now := time.Now()
 	encoder := &BaseEncoder{
-		config: config,
+		config: cfg,
 		stats: EncoderStats{
 			StartTime:      now,
 			LastUpdate:     now,
-			TargetBitrate:  config.Bitrate,
-			CurrentBitrate: config.Bitrate,
+			TargetBitrate:  cfg.Bitrate,
+			CurrentBitrate: cfg.Bitrate,
 			MinLatency:     9999999, // Initialize to high value
 		},
+		logger: config.GetLoggerWithPrefix("gstreamer-encoder"),
 	}
 	encoder.statsCollector = NewEncoderStatsCollector(encoder)
 	return encoder
@@ -121,7 +129,7 @@ func (e *BaseEncoder) PushFrame(sample *Sample) error {
 	// This is a placeholder. In a real implementation, this method would
 	// send the sample to the GStreamer element for encoding.
 	// For now, we'll just log that a frame was received.
-	fmt.Printf("BaseEncoder: Received frame with size %d\n", len(sample.Data))
+	e.logger.Debugf("Received frame with size %d", len(sample.Data))
 
 	// Simulate encoding by updating stats
 	e.statsCollector.RecordFrameEncoded(false, 10, 0.9, e.config.Bitrate)
@@ -184,6 +192,27 @@ func (e *BaseEncoder) UpdateConfig(newConfig config.EncoderConfig) error {
 
 	e.config = newConfig
 	return nil
+}
+
+// SetBitrate dynamically sets the encoder bitrate (for WebRTC integration)
+func (e *BaseEncoder) SetBitrate(bitrate int) error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	// Update configuration
+	e.config.Bitrate = bitrate
+	e.stats.TargetBitrate = bitrate
+	e.stats.CurrentBitrate = bitrate
+
+	// In a real implementation, this would update the GStreamer element properties
+	// For now, we'll just update the internal state
+	e.logger.Infof("Bitrate set to %d kbps", bitrate)
+	return nil
+}
+
+// UpdateBitrate is an alias for SetBitrate for interface compatibility
+func (e *BaseEncoder) UpdateBitrate(bitrate int) error {
+	return e.SetBitrate(bitrate)
 }
 
 // EncoderFactory creates encoders based on type
@@ -361,14 +390,30 @@ func fileExists(filename string) bool {
 
 // NewX264Encoder is implemented in x264_encoder.go
 
-// NewVP8Encoder creates a VP8 encoder (stub implementation)
+// NewVP8Encoder creates a VP8 encoder
 func NewVP8Encoder(cfg config.EncoderConfig) (Encoder, error) {
-	return nil, fmt.Errorf("VP8 encoder not yet implemented")
+	encoder := &VP8Encoder{
+		BaseEncoder: NewBaseEncoder(cfg),
+	}
+
+	if err := encoder.Initialize(cfg); err != nil {
+		return nil, fmt.Errorf("failed to initialize VP8 encoder: %w", err)
+	}
+
+	return encoder, nil
 }
 
-// NewVP9Encoder creates a VP9 encoder (stub implementation)
+// NewVP9Encoder creates a VP9 encoder
 func NewVP9Encoder(cfg config.EncoderConfig) (Encoder, error) {
-	return nil, fmt.Errorf("VP9 encoder not yet implemented")
+	encoder := &VP9Encoder{
+		BaseEncoder: NewBaseEncoder(cfg),
+	}
+
+	if err := encoder.Initialize(cfg); err != nil {
+		return nil, fmt.Errorf("failed to initialize VP9 encoder: %w", err)
+	}
+
+	return encoder, nil
 }
 
 // EncoderSelector provides advanced encoder selection capabilities
@@ -936,6 +981,120 @@ type DetailedEncoderStats struct {
 	BitrateEfficiency float64 `json:"bitrate_efficiency"`
 	LatencyStdDev     float64 `json:"latency_std_dev"`
 	QualityStdDev     float64 `json:"quality_std_dev"`
+}
+
+// VP8Encoder implements VP8 encoding
+type VP8Encoder struct {
+	*BaseEncoder
+}
+
+// Initialize initializes the VP8 encoder
+func (e *VP8Encoder) Initialize(cfg config.EncoderConfig) error {
+	if err := config.ValidateEncoderConfig(&cfg); err != nil {
+		return fmt.Errorf("invalid encoder config: %w", err)
+	}
+
+	if cfg.Codec != config.CodecVP8 {
+		return fmt.Errorf("VP8 encoder only supports VP8 codec, got %s", cfg.Codec)
+	}
+
+	e.config = cfg
+	return nil
+}
+
+// GetElement returns the GStreamer element name and properties for VP8
+func (e *VP8Encoder) GetElement() (string, map[string]interface{}, error) {
+	properties := make(map[string]interface{})
+	properties["target-bitrate"] = e.config.Bitrate * 1000           // Convert kbps to bps
+	properties["keyframe-max-dist"] = e.config.KeyframeInterval * 30 // Convert seconds to frames
+
+	return "vp8enc", properties, nil
+}
+
+// IsHardwareAccelerated returns false since VP8 is software-based
+func (e *VP8Encoder) IsHardwareAccelerated() bool {
+	return false
+}
+
+// GetSupportedCodecs returns the codecs supported by VP8 encoder
+func (e *VP8Encoder) GetSupportedCodecs() []config.CodecType {
+	return []config.CodecType{config.CodecVP8}
+}
+
+// ForceKeyframe forces the encoder to generate a keyframe
+func (e *VP8Encoder) ForceKeyframe() error {
+	// Update statistics
+	e.mutex.Lock()
+	e.stats.KeyframesEncoded++
+	e.mutex.Unlock()
+	return nil
+}
+
+// Cleanup cleans up VP8 encoder resources
+func (e *VP8Encoder) Cleanup() error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	if e.element != nil {
+		e.element = nil
+	}
+	return nil
+}
+
+// VP9Encoder implements VP9 encoding
+type VP9Encoder struct {
+	*BaseEncoder
+}
+
+// Initialize initializes the VP9 encoder
+func (e *VP9Encoder) Initialize(cfg config.EncoderConfig) error {
+	if err := config.ValidateEncoderConfig(&cfg); err != nil {
+		return fmt.Errorf("invalid encoder config: %w", err)
+	}
+
+	if cfg.Codec != config.CodecVP9 {
+		return fmt.Errorf("VP9 encoder only supports VP9 codec, got %s", cfg.Codec)
+	}
+
+	e.config = cfg
+	return nil
+}
+
+// GetElement returns the GStreamer element name and properties for VP9
+func (e *VP9Encoder) GetElement() (string, map[string]interface{}, error) {
+	properties := make(map[string]interface{})
+	properties["target-bitrate"] = e.config.Bitrate * 1000           // Convert kbps to bps
+	properties["keyframe-max-dist"] = e.config.KeyframeInterval * 30 // Convert seconds to frames
+
+	return "vp9enc", properties, nil
+}
+
+// IsHardwareAccelerated returns false since VP9 is software-based
+func (e *VP9Encoder) IsHardwareAccelerated() bool {
+	return false
+}
+
+// GetSupportedCodecs returns the codecs supported by VP9 encoder
+func (e *VP9Encoder) GetSupportedCodecs() []config.CodecType {
+	return []config.CodecType{config.CodecVP9}
+}
+
+// ForceKeyframe forces the encoder to generate a keyframe
+func (e *VP9Encoder) ForceKeyframe() error {
+	// Update statistics
+	e.mutex.Lock()
+	e.stats.KeyframesEncoded++
+	e.mutex.Unlock()
+	return nil
+}
+
+// Cleanup cleans up VP9 encoder resources
+func (e *VP9Encoder) Cleanup() error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	if e.element != nil {
+		e.element = nil
+	}
+	return nil
 }
 
 // EncoderStatsSnapshot represents a point-in-time snapshot of encoder statistics

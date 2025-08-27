@@ -1,9 +1,10 @@
 package webserver
 
 import (
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // 中间件
@@ -23,9 +24,10 @@ func (ws *WebServer) corsMiddleware(next http.Handler) http.Handler {
 }
 
 func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
+	logger := config.GetLoggerWithPrefix("webserver-middleware")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		log.Printf("%s %s %v", r.Method, r.URL.Path, time.Since(start))
+		logger.Debugf("%s %s %v", r.Method, r.URL.Path, time.Since(start))
 	})
 }

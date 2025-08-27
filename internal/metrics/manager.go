@@ -3,12 +3,13 @@ package metrics
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
@@ -19,7 +20,7 @@ type Manager struct {
 	metrics         Metrics
 	systemMetrics   SystemMetrics
 	externalServer  *http.Server
-	logger          *log.Logger
+	logger          *logrus.Entry
 	internalRunning bool
 	externalRunning bool
 	startTime       time.Time
@@ -29,7 +30,7 @@ type Manager struct {
 }
 
 // NewManager 创建新的监控管理器
-func NewManager(ctx context.Context, cfg *config.MetricsConfig, logger *log.Logger) (*Manager, error) {
+func NewManager(ctx context.Context, cfg *config.MetricsConfig) (*Manager, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -43,10 +44,8 @@ func NewManager(ctx context.Context, cfg *config.MetricsConfig, logger *log.Logg
 		return nil, fmt.Errorf("invalid metrics config: %w", err)
 	}
 
-	// 创建日志器
-	if logger == nil {
-		logger = log.New(log.Writer(), "[METRICS] ", log.LstdFlags)
-	}
+	// 获取 logrus entry 用于结构化日志记录
+	logger := config.GetLoggerWithPrefix("metrics")
 
 	// 创建监控实例（内部监控始终创建）
 	legacyConfig := MetricsConfig{
@@ -89,7 +88,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("metrics manager already running")
 	}
 
-	m.logger.Println("Starting metrics manager...")
+	m.logger.Debug("Starting metrics manager...")
 
 	// 始终启动内部监控（为web页面提供数据）
 	if err := m.startInternalMetrics(); err != nil {
@@ -99,15 +98,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	// 根据配置决定是否启动外部metrics暴露
 	if m.config.External.Enabled {
 		if err := m.startExternalMetrics(); err != nil {
-			m.logger.Printf("Failed to start external metrics server: %v", err)
+			m.logger.Errorf("Failed to start external metrics server: %v", err)
 			// 外部metrics启动失败不影响内部监控
 		}
 	} else {
-		m.logger.Println("External metrics disabled, only internal metrics will be available")
+		m.logger.Debug("External metrics disabled, only internal metrics will be available")
 	}
 
 	m.startTime = time.Now()
-	m.logger.Println("Metrics manager started successfully")
+	m.logger.Debug("Metrics manager started successfully")
 	return nil
 }
 
@@ -119,7 +118,7 @@ func (m *Manager) startInternalMetrics() error {
 	}
 
 	m.internalRunning = true
-	m.logger.Println("Internal metrics started successfully")
+	m.logger.Debug("Internal metrics started successfully")
 	return nil
 }
 
@@ -143,9 +142,10 @@ func (m *Manager) startExternalMetrics() error {
 			fmt.Fprintf(w, "# TYPE bdwind_cpu_usage_percent gauge\n")
 			fmt.Fprintf(w, "bdwind_cpu_usage_percent %.2f\n", m.systemMetrics.GetCPUUsage())
 
+			memUsage := m.systemMetrics.GetMemoryUsage()
 			fmt.Fprintf(w, "# HELP bdwind_memory_usage_percent Memory usage percentage\n")
 			fmt.Fprintf(w, "# TYPE bdwind_memory_usage_percent gauge\n")
-			fmt.Fprintf(w, "bdwind_memory_usage_percent %.2f\n", m.systemMetrics.GetMemoryUsage())
+			fmt.Fprintf(w, "bdwind_memory_usage_percent %.2f\n", memUsage.Percent)
 		}
 	})
 
@@ -157,14 +157,14 @@ func (m *Manager) startExternalMetrics() error {
 
 	// 在goroutine中启动服务器
 	go func() {
-		m.logger.Printf("Starting external metrics server on %s", addr)
+		m.logger.Debugf("Starting external metrics server on %s", addr)
 		if err := m.externalServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			m.logger.Printf("External metrics server error: %v", err)
+			m.logger.Errorf("External metrics server error: %v", err)
 		}
 	}()
 
 	m.externalRunning = true
-	m.logger.Printf("External metrics server started on %s%s", addr, m.config.External.Path)
+	m.logger.Debugf("External metrics server started on %s%s", addr, m.config.External.Path)
 	return nil
 }
 
@@ -177,7 +177,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	m.logger.Println("Stopping metrics manager...")
+	m.logger.Debug("Stopping metrics manager...")
 
 	// 取消context以通知所有子组件停止
 	if m.cancel != nil {
@@ -194,7 +194,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		if err := m.externalServer.Shutdown(shutdownCtx); err != nil {
 			errors = append(errors, fmt.Errorf("failed to stop external metrics server: %w", err))
 		} else {
-			m.logger.Println("External metrics server stopped")
+			m.logger.Debug("External metrics server stopped")
 		}
 		m.externalRunning = false
 	}
@@ -211,12 +211,12 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if len(errors) > 0 {
 		// 返回第一个错误，但记录所有错误
 		for _, err := range errors[1:] {
-			m.logger.Printf("Additional stop error: %v", err)
+			m.logger.Errorf("Additional stop error: %v", err)
 		}
 		return errors[0]
 	}
 
-	m.logger.Println("Metrics manager stopped successfully")
+	m.logger.Info("Metrics manager stopped successfully")
 	return nil
 }
 
@@ -291,7 +291,7 @@ func (m *Manager) GetContext() context.Context {
 
 // SetupRoutes 设置监控相关的HTTP路由（内部web页面使用）
 func (m *Manager) SetupRoutes(router *mux.Router) error {
-	m.logger.Println("Setting up internal metrics routes...")
+	m.logger.Debug("Setting up internal metrics routes...")
 
 	// 创建系统监控处理器
 	handler := NewSystemHandler(m.systemMetrics)
@@ -309,7 +309,7 @@ func (m *Manager) SetupRoutes(router *mux.Router) error {
 	// 添加metrics状态路由
 	systemRouter.HandleFunc("/metrics-status", m.handleMetricsStatus).Methods("GET")
 
-	m.logger.Println("Internal metrics routes registered successfully")
+	m.logger.Debug("Internal metrics routes registered successfully")
 	return nil
 }
 
@@ -333,7 +333,7 @@ func (m *Manager) handleMetricsStatus(w http.ResponseWriter, r *http.Request) {
 		stats["external_enabled"].(bool),
 		stats["uptime"].(float64),
 		stats["cpu_usage"].(float64),
-		stats["memory_usage"].(float64),
+		stats["memory_usage"].(MemoryUsage).Percent,
 	)
 
 	w.Write([]byte(response))

@@ -1,7 +1,7 @@
 # BDWind-GStreamer Runtime Dockerfile (Debian 12 版本)
 # 专门用于运行应用程序的轻量级镜像
 
-FROM docker.io/debian:12
+FROM docker.io/debian:13
 
 LABEL maintainer="BDWind-GStreamer Team"
 LABEL description="Runtime image for BDWind-GStreamer application (Debian 12)"

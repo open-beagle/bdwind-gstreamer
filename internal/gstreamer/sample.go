@@ -108,6 +108,23 @@ func (s *Sample) Size() int {
 	return len(s.Data)
 }
 
+// IsKeyFrame returns true if this is a key frame (for video samples)
+func (s *Sample) IsKeyFrame() bool {
+	if s.Format.MediaType != MediaTypeVideo {
+		return false
+	}
+
+	// Check metadata for key frame information
+	if keyFrame, exists := s.Metadata["key_frame"]; exists {
+		if kf, ok := keyFrame.(bool); ok {
+			return kf
+		}
+	}
+
+	// Default to false if not specified
+	return false
+}
+
 // Clone creates a deep copy of the sample
 func (s *Sample) Clone() *Sample {
 	// Copy data

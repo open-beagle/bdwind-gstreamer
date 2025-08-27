@@ -3,7 +3,9 @@ package gstreamer
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +53,16 @@ type Manager struct {
 	encodedSampleCount int64
 	lastStatsLog       time.Time
 
+	// 媒体流订阅者
+	subscribers []MediaStreamSubscriber
+
+	// 日志配置管理
+	logConfigurator  GStreamerLogConfigurator
+	currentLogConfig *GStreamerLogConfig
+
+	// 配置变化监控
+	configChangeChannel chan *config.LoggingConfig
+
 	// 上下文控制
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -80,14 +92,19 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 	childCtx, cancel := context.WithCancel(ctx)
 
 	manager := &Manager{
-		config:             cfg.Config,
-		logger:             logger,
-		ctx:                childCtx,
-		cancel:             cancel,
-		rawSampleCount:     0,
-		encodedSampleCount: 0,
-		lastStatsLog:       time.Now(),
+		config:              cfg.Config,
+		logger:              logger,
+		ctx:                 childCtx,
+		cancel:              cancel,
+		rawSampleCount:      0,
+		encodedSampleCount:  0,
+		lastStatsLog:        time.Now(),
+		configChangeChannel: make(chan *config.LoggingConfig, 10), // 缓冲通道避免阻塞
 	}
+
+	// 初始化日志配置器
+	manager.logConfigurator = NewGStreamerLogConfigurator(logger)
+	logger.Debug("GStreamer log configurator initialized")
 
 	// Debug级别: 记录详细配置信息
 	logger.Debug("Creating manager with configuration:")
@@ -114,8 +131,8 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 	// Trace级别: 记录组件初始化完成
 	logger.Trace("Component initialization completed successfully")
 
-	// Info级别: 管理器创建成功
-	logger.Info("GStreamer manager created successfully")
+	// Debug级别: 管理器创建成功
+	logger.Debug("GStreamer manager created successfully")
 	return manager, nil
 }
 
@@ -354,8 +371,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("GStreamer manager already running")
 	}
 
-	// Info级别: 记录管理器启动开始
-	m.logger.Info("Starting GStreamer manager...")
+	// Debug级别: 记录管理器启动开始
+	m.logger.Debug("Starting GStreamer manager...")
 	// Trace级别: 记录启动时间
 	m.startTime = time.Now()
 	m.logger.Tracef("Manager start time: %v", m.startTime)
@@ -410,24 +427,27 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Trace("Setting manager running state to true")
 	m.running = true
 
-	// Info级别: 记录管理器启动成功
-	m.logger.Info("GStreamer manager started successfully")
+	// 启动配置监控
+	m.MonitorLoggingConfigChanges(m.configChangeChannel)
+
+	// Debug级别: 记录管理器启动成功 - 内部状态
+	uptime := time.Since(m.startTime)
+	m.logger.Debugf("GStreamer manager started successfully (startup time: %v)", uptime)
 
 	// Debug级别: 记录启动后的状态摘要
-	uptime := time.Since(m.startTime)
-	m.logger.Debugf("Manager startup completed in %v", uptime)
 	m.logger.Debug("Final component status:")
 	m.logger.Debugf("  Manager running: %v", m.running)
 	m.logger.Debugf("  Desktop capture active: %v", m.capture != nil)
 	m.logger.Debugf("  State manager active: %v", m.stateManager != nil)
+	m.logger.Debugf("  Config monitoring active: %v", m.configChangeChannel != nil)
 
 	return nil
 }
 
 // startDesktopCaptureWithContext 启动桌面捕获并处理外部进程
 func (m *Manager) startDesktopCaptureWithContext() error {
-	// Info级别: 记录样本回调链路建立开始
-	m.logger.Info("Starting desktop capture with sample callback chain")
+	// Debug级别: 记录样本回调链路建立开始
+	m.logger.Debug("Starting desktop capture with sample callback chain")
 
 	// 启动桌面捕获
 	if err := m.capture.Start(); err != nil {
@@ -446,9 +466,8 @@ func (m *Manager) startDesktopCaptureWithContext() error {
 		return fmt.Errorf("failed to set sample callback: %w", err)
 	}
 
-	// Info级别: 记录样本回调链路建立成功状态
-	m.logger.Info("Sample callback chain established successfully")
-	// Debug级别: 记录组件状态验证结果
+	// Debug级别: 记录样本回调链路建立成功状态
+	m.logger.Debug("Sample callback chain established successfully")
 	m.logger.Debug("Sample callback chain configuration:")
 	m.logger.Debug("  Raw sample callback: configured")
 	m.logger.Debug("  Target processor: GStreamer manager")
@@ -524,6 +543,12 @@ func (m *Manager) processEncodedSample(sample *Sample) error {
 		m.logger.Debugf("Encoded sample processing milestone: %d samples processed", currentCount)
 	}
 
+	// 转换为 WebRTC 兼容的流格式并发布给订阅者
+	if err := m.publishEncodedStreamToSubscribers(sample); err != nil {
+		m.logger.Warnf("Failed to publish encoded stream to subscribers: %v", err)
+	}
+
+	// 保持原有的回调机制用于向后兼容
 	if callback != nil {
 		if err := callback(sample); err != nil {
 			// Warn级别: 样本处理异常
@@ -532,9 +557,6 @@ func (m *Manager) processEncodedSample(sample *Sample) error {
 		}
 		// Trace级别: 记录编码样本成功处理
 		m.logger.Trace("Encoded sample successfully processed through callback")
-	} else {
-		// Warn级别: 样本处理异常 - 回调不可用
-		m.logger.Warn("Encoded sample processing warning: callback not set")
 	}
 
 	return nil
@@ -583,6 +605,13 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
+	// 关闭配置变化通道
+	if m.configChangeChannel != nil {
+		close(m.configChangeChannel)
+		m.configChangeChannel = nil
+		m.logger.Debug("Configuration change channel closed")
+	}
+
 	// 取消上下文
 	m.cancel()
 
@@ -613,6 +642,55 @@ func (m *Manager) SetEncodedSampleCallback(callback func(*Sample) error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	m.encodedSampleCallback = callback
+}
+
+// publishEncodedStreamToSubscribers 将编码后的样本转换为 WebRTC 兼容格式并发布给订阅者
+func (m *Manager) publishEncodedStreamToSubscribers(sample *Sample) error {
+	if sample == nil {
+		return fmt.Errorf("sample is nil")
+	}
+
+	// 根据样本类型发布不同的流
+	switch sample.Format.MediaType {
+	case MediaTypeVideo:
+		return m.publishVideoStreamToSubscribers(sample)
+	case MediaTypeAudio:
+		return m.publishAudioStreamToSubscribers(sample)
+	default:
+		m.logger.Debugf("Unknown media type: %v, skipping publication", sample.Format.MediaType)
+		return nil
+	}
+}
+
+// publishVideoStreamToSubscribers 发布视频流给订阅者
+func (m *Manager) publishVideoStreamToSubscribers(sample *Sample) error {
+	// 转换为 WebRTC 兼容的视频流格式
+	videoStream := &EncodedVideoStream{
+		Codec:     sample.Format.Codec,
+		Data:      sample.Data,
+		Timestamp: sample.Timestamp.UnixMilli(),
+		KeyFrame:  sample.IsKeyFrame(),
+		Width:     sample.Format.Width,
+		Height:    sample.Format.Height,
+		Bitrate:   m.config.Encoding.Bitrate,
+	}
+
+	return m.PublishVideoStream(videoStream)
+}
+
+// publishAudioStreamToSubscribers 发布音频流给订阅者
+func (m *Manager) publishAudioStreamToSubscribers(sample *Sample) error {
+	// 转换为 WebRTC 兼容的音频流格式
+	audioStream := &EncodedAudioStream{
+		Codec:      sample.Format.Codec,
+		Data:       sample.Data,
+		Timestamp:  sample.Timestamp.UnixMilli(),
+		SampleRate: sample.Format.SampleRate,
+		Channels:   sample.Format.Channels,
+		Bitrate:    m.config.Encoding.Bitrate, // 使用配置的比特率
+	}
+
+	return m.PublishAudioStream(audioStream)
 }
 
 // GetStats 获取GStreamer管理器统计信息
@@ -677,6 +755,17 @@ func (m *Manager) GetStats() map[string]interface{} {
 			"encoded_samples_processed": m.encodedSampleCount,
 			"last_stats_log":            m.lastStatsLog,
 		}
+
+		// 添加日志配置统计
+		if m.currentLogConfig != nil {
+			stats["logging_config"] = map[string]interface{}{
+				"enabled":     m.currentLogConfig.Enabled,
+				"level":       m.currentLogConfig.Level,
+				"output_file": m.currentLogConfig.OutputFile,
+				"colored":     m.currentLogConfig.Colored,
+				"categories":  len(m.currentLogConfig.Categories),
+			}
+		}
 	}
 
 	return stats
@@ -712,9 +801,10 @@ func (m *Manager) GetComponentStatus() map[string]bool {
 	defer m.mutex.RUnlock()
 
 	return map[string]bool{
-		"manager":  m.running,
-		"capture":  m.capture != nil,
-		"handlers": m.handlers != nil,
+		"manager":          m.running,
+		"capture":          m.capture != nil,
+		"handlers":         m.handlers != nil,
+		"log_configurator": m.logConfigurator != nil,
 	}
 }
 
@@ -781,5 +871,595 @@ func (m *Manager) SetupRoutes(router *mux.Router) error {
 	}
 
 	m.logger.Debug("GStreamer routes setup completed")
+	return nil
+}
+
+// ConfigureLogging 配置GStreamer日志
+func (m *Manager) ConfigureLogging(appConfig *config.LoggingConfig) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.logger.Debug("Starting GStreamer logging configuration")
+
+	if m.logConfigurator == nil {
+		m.logger.Error("Cannot configure GStreamer logging: log configurator not initialized")
+		return fmt.Errorf("log configurator not initialized")
+	}
+
+	if appConfig == nil {
+		m.logger.Error("Cannot configure GStreamer logging: application config is nil")
+		return fmt.Errorf("application config is nil")
+	}
+
+	// 创建配置副本并规范化路径
+	normalizedConfig := *appConfig
+	if normalizedConfig.File != "" {
+		normalizedConfig.File = config.NormalizeLogFilePath(normalizedConfig.File)
+		m.logger.Debugf("Normalized log file path: %s -> %s", appConfig.File, normalizedConfig.File)
+	}
+
+	m.logger.Debugf("Configuring GStreamer logging with app config: level=%s, output=%s, file=%s",
+		normalizedConfig.Level, normalizedConfig.Output, normalizedConfig.File)
+
+	// 验证应用程序配置
+	if err := m.validateAppLoggingConfig(&normalizedConfig); err != nil {
+		m.logger.Warnf("Application logging configuration validation failed: %v", err)
+		// 继续处理，但记录警告
+	}
+
+	// 使用日志配置器配置GStreamer日志
+	if err := m.logConfigurator.ConfigureFromAppLogging(&normalizedConfig); err != nil {
+		m.logger.Errorf("Failed to configure GStreamer logging: %v", err)
+
+		// 尝试应用安全的默认配置
+		m.logger.Info("Attempting to apply safe default GStreamer logging configuration")
+		if fallbackErr := m.applyFallbackLoggingConfig(); fallbackErr != nil {
+			m.logger.Errorf("Failed to apply fallback logging configuration: %v", fallbackErr)
+			// 不返回错误，允许继续运行但记录严重警告
+			m.logger.Warn("GStreamer logging configuration failed completely, continuing without GStreamer logging")
+			return nil
+		}
+
+		m.logger.Info("Successfully applied fallback GStreamer logging configuration")
+		return nil
+	}
+
+	// 更新当前配置缓存
+	m.currentLogConfig = m.logConfigurator.GetCurrentConfig()
+
+	m.logger.Tracef("GStreamer logging configured successfully: enabled=%t, level=%d (%s), output=%s",
+		m.currentLogConfig.Enabled, m.currentLogConfig.Level,
+		m.getLogLevelDescription(m.currentLogConfig.Level),
+		m.getOutputDescription(m.currentLogConfig.OutputFile))
+
+	return nil
+}
+
+// applyFallbackLoggingConfig 应用安全的默认日志配置
+func (m *Manager) applyFallbackLoggingConfig() error {
+	fallbackConfig := &GStreamerLogConfig{
+		Enabled:    false, // 安全默认：禁用日志
+		Level:      0,
+		OutputFile: "", // 控制台输出
+		Categories: make(map[string]int),
+		Colored:    true,
+	}
+
+	m.logger.Debug("Applying fallback GStreamer logging configuration")
+
+	if err := m.logConfigurator.UpdateConfig(fallbackConfig); err != nil {
+		return fmt.Errorf("failed to apply fallback config: %w", err)
+	}
+
+	m.currentLogConfig = fallbackConfig
+	m.logger.Debug("Successfully applied fallback GStreamer logging configuration")
+	return nil
+}
+
+// getLogLevelDescription 获取日志级别描述（管理器版本）
+func (m *Manager) getLogLevelDescription(level int) string {
+	switch level {
+	case 0:
+		return "NONE"
+	case 1:
+		return "ERROR"
+	case 2:
+		return "WARNING"
+	case 3:
+		return "FIXME"
+	case 4:
+		return "INFO"
+	case 5:
+		return "DEBUG"
+	case 6:
+		return "LOG"
+	case 7:
+		return "TRACE"
+	case 8:
+		return "MEMDUMP"
+	case 9:
+		return "COUNT"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", level)
+	}
+}
+
+// getOutputDescription 获取输出描述（管理器版本）
+func (m *Manager) getOutputDescription(outputFile string) string {
+	if outputFile == "" {
+		return "console"
+	}
+	return fmt.Sprintf("file(%s)", outputFile)
+}
+
+// UpdateLoggingConfig 动态更新GStreamer日志配置
+func (m *Manager) UpdateLoggingConfig(appConfig *config.LoggingConfig) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.logger.Debug("Starting dynamic update of GStreamer logging configuration")
+
+	if m.logConfigurator == nil {
+		m.logger.Error("Cannot update GStreamer logging: log configurator not initialized")
+		return fmt.Errorf("log configurator not initialized")
+	}
+
+	if appConfig == nil {
+		m.logger.Error("Cannot update GStreamer logging: application config is nil")
+		return fmt.Errorf("application config is nil")
+	}
+
+	// 创建配置副本并规范化路径
+	normalizedConfig := *appConfig
+	if normalizedConfig.File != "" {
+		normalizedConfig.File = config.NormalizeLogFilePath(normalizedConfig.File)
+		m.logger.Debugf("Normalized log file path: %s -> %s", appConfig.File, normalizedConfig.File)
+	}
+
+	m.logger.Debugf("Updating GStreamer logging with new app config: level=%s, output=%s, file=%s",
+		normalizedConfig.Level, normalizedConfig.Output, normalizedConfig.File)
+
+	// 保存当前配置以便回滚
+	oldConfig := m.currentLogConfig
+
+	// 验证应用程序日志配置
+	if err := m.validateAppLoggingConfig(&normalizedConfig); err != nil {
+		m.logger.Warnf("Application logging configuration validation failed: %v", err)
+		// 对于更新操作，我们更严格一些，但仍然尝试继续
+		m.logger.Info("Continuing with update despite validation warnings")
+	}
+
+	// 检查是否真的需要更新
+	if oldConfig != nil {
+		needsUpdate, changes := m.detectConfigChanges(&normalizedConfig, oldConfig)
+		if !needsUpdate {
+			m.logger.Debug("No changes detected in logging configuration, skipping update")
+			return nil
+		}
+		m.logger.Debugf("Detected configuration changes: %v", changes)
+	}
+
+	// 使用日志配置器更新配置
+	if err := m.logConfigurator.ConfigureFromAppLogging(&normalizedConfig); err != nil {
+		m.logger.Errorf("Failed to update GStreamer logging configuration: %v", err)
+
+		// 尝试恢复到之前的配置
+		if oldConfig != nil {
+			m.logger.Info("Attempting to restore previous GStreamer logging configuration")
+			if restoreErr := m.logConfigurator.UpdateConfig(oldConfig); restoreErr != nil {
+				m.logger.Errorf("Failed to restore previous configuration: %v", restoreErr)
+				// 尝试应用安全默认配置
+				if fallbackErr := m.applyFallbackLoggingConfig(); fallbackErr != nil {
+					m.logger.Errorf("Failed to apply fallback configuration: %v", fallbackErr)
+				}
+			} else {
+				m.logger.Info("Successfully restored previous GStreamer logging configuration")
+			}
+		}
+
+		// 不返回错误，保持现有配置
+		m.logger.Warn("GStreamer logging configuration update failed, maintaining current configuration")
+		return nil
+	}
+
+	// 更新当前配置缓存
+	m.currentLogConfig = m.logConfigurator.GetCurrentConfig()
+
+	// 记录配置变化
+	if oldConfig != nil {
+		m.logger.Infof("GStreamer logging configuration updated successfully:")
+		m.logger.Infof("  Enabled: %t -> %t", oldConfig.Enabled, m.currentLogConfig.Enabled)
+		m.logger.Infof("  Level: %d (%s) -> %d (%s)",
+			oldConfig.Level, m.getLogLevelDescription(oldConfig.Level),
+			m.currentLogConfig.Level, m.getLogLevelDescription(m.currentLogConfig.Level))
+		m.logger.Infof("  Output: %s -> %s",
+			m.getOutputDescription(oldConfig.OutputFile),
+			m.getOutputDescription(m.currentLogConfig.OutputFile))
+		m.logger.Infof("  Colored: %t -> %t", oldConfig.Colored, m.currentLogConfig.Colored)
+	} else {
+		m.logger.Infof("GStreamer logging configuration updated: enabled=%t, level=%d (%s), output=%s, colored=%t",
+			m.currentLogConfig.Enabled, m.currentLogConfig.Level,
+			m.getLogLevelDescription(m.currentLogConfig.Level),
+			m.getOutputDescription(m.currentLogConfig.OutputFile),
+			m.currentLogConfig.Colored)
+	}
+
+	return nil
+}
+
+// ValidateLoggingConfig 验证GStreamer日志配置
+func (m *Manager) ValidateLoggingConfig(gstConfig *GStreamerLogConfig) error {
+	if gstConfig == nil {
+		return fmt.Errorf("GStreamer log config is nil")
+	}
+
+	// 验证日志级别
+	if gstConfig.Level < 0 || gstConfig.Level > 9 {
+		return fmt.Errorf("invalid GStreamer log level: %d, must be between 0 and 9", gstConfig.Level)
+	}
+
+	// 验证日志文件路径
+	if gstConfig.OutputFile != "" {
+		if err := m.validateLogFilePath(gstConfig.OutputFile); err != nil {
+			return fmt.Errorf("invalid log file path: %w", err)
+		}
+	}
+
+	// 验证类别配置
+	for category, level := range gstConfig.Categories {
+		if level < 0 || level > 9 {
+			return fmt.Errorf("invalid log level %d for category %s, must be between 0 and 9", level, category)
+		}
+		if category == "" {
+			return fmt.Errorf("empty category name not allowed")
+		}
+	}
+
+	return nil
+}
+
+// SyncLoggingWithApp 同步GStreamer日志配置与应用程序日志配置
+func (m *Manager) SyncLoggingWithApp(appConfig *config.LoggingConfig) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.logConfigurator == nil {
+		return fmt.Errorf("log configurator not initialized")
+	}
+
+	m.logger.Debug("Synchronizing GStreamer logging with application configuration")
+
+	// 验证应用程序配置
+	if err := m.validateAppLoggingConfig(appConfig); err != nil {
+		return fmt.Errorf("invalid application logging configuration: %w", err)
+	}
+
+	// 获取当前GStreamer配置
+	currentConfig := m.logConfigurator.GetCurrentConfig()
+
+	// 检查是否需要更新
+	needsUpdate, changes := m.detectConfigChanges(appConfig, currentConfig)
+	if !needsUpdate {
+		m.logger.Debug("No changes detected in logging configuration, skipping update")
+		return nil
+	}
+
+	m.logger.Debugf("Detected logging configuration changes: %v", changes)
+
+	// 应用更新
+	if err := m.logConfigurator.ConfigureFromAppLogging(appConfig); err != nil {
+		m.logger.Errorf("Failed to sync GStreamer logging configuration: %v", err)
+		return fmt.Errorf("failed to sync logging configuration: %w", err)
+	}
+
+	// 更新缓存
+	m.currentLogConfig = m.logConfigurator.GetCurrentConfig()
+
+	m.logger.Infof("Successfully synchronized GStreamer logging configuration with application settings")
+	return nil
+}
+
+// MonitorLoggingConfigChanges 监控应用程序日志配置变化
+func (m *Manager) MonitorLoggingConfigChanges(configChannel <-chan *config.LoggingConfig) {
+	if configChannel == nil {
+		m.logger.Warn("Config channel is nil, cannot monitor logging configuration changes")
+		return
+	}
+
+	m.logger.Debug("Starting logging configuration change monitor")
+
+	go func() {
+		for {
+			select {
+			case newConfig := <-configChannel:
+				if newConfig == nil {
+					m.logger.Debug("Received nil config, ignoring")
+					continue
+				}
+
+				m.logger.Debug("Received logging configuration update")
+				if err := m.SyncLoggingWithApp(newConfig); err != nil {
+					m.logger.Errorf("Failed to sync logging configuration: %v", err)
+				}
+
+			case <-m.ctx.Done():
+				m.logger.Debug("Context cancelled, stopping logging configuration monitor")
+				return
+			}
+		}
+	}()
+}
+
+// validateAppLoggingConfig 验证应用程序日志配置
+func (m *Manager) validateAppLoggingConfig(appConfig *config.LoggingConfig) error {
+	if appConfig == nil {
+		m.logger.Error("Application logging config validation failed: config is nil")
+		return fmt.Errorf("application logging config is nil")
+	}
+
+	m.logger.Debugf("Validating application logging config: level=%s, output=%s, file=%s, colors=%t",
+		appConfig.Level, appConfig.Output, appConfig.File, appConfig.EnableColors)
+
+	var validationErrors []string
+
+	// 验证日志级别
+	validLevels := []string{"trace", "debug", "info", "warn", "error"}
+	levelValid := false
+	normalizedLevel := strings.ToLower(strings.TrimSpace(appConfig.Level))
+
+	for _, validLevel := range validLevels {
+		if normalizedLevel == validLevel {
+			levelValid = true
+			break
+		}
+	}
+
+	if !levelValid {
+		errorMsg := fmt.Sprintf("invalid log level: %s, must be one of %v", appConfig.Level, validLevels)
+		validationErrors = append(validationErrors, errorMsg)
+		m.logger.Warnf("Log level validation failed: %s", errorMsg)
+	} else {
+		m.logger.Debugf("Log level validation passed: %s", normalizedLevel)
+	}
+
+	// 验证输出类型
+	validOutputs := []string{"stdout", "stderr", "file"}
+	outputValid := false
+
+	for _, validOutput := range validOutputs {
+		if appConfig.Output == validOutput {
+			outputValid = true
+			break
+		}
+	}
+
+	if !outputValid {
+		errorMsg := fmt.Sprintf("invalid log output: %s, must be one of %v", appConfig.Output, validOutputs)
+		validationErrors = append(validationErrors, errorMsg)
+		m.logger.Warnf("Log output validation failed: %s", errorMsg)
+	} else {
+		m.logger.Debugf("Log output validation passed: %s", appConfig.Output)
+	}
+
+	// 如果输出到文件，验证文件路径
+	if appConfig.Output == "file" {
+		if appConfig.File == "" {
+			errorMsg := "log file path is required when output is 'file'"
+			validationErrors = append(validationErrors, errorMsg)
+			m.logger.Warnf("File path validation failed: %s", errorMsg)
+		} else {
+			m.logger.Debugf("Validating log file path: %s", appConfig.File)
+			if err := m.validateLogFilePath(appConfig.File); err != nil {
+				errorMsg := fmt.Sprintf("invalid log file path: %v", err)
+				validationErrors = append(validationErrors, errorMsg)
+				m.logger.Warnf("File path validation failed: %s", errorMsg)
+			} else {
+				m.logger.Debugf("File path validation passed: %s", appConfig.File)
+			}
+		}
+	}
+
+	// 检查文件路径与输出类型的一致性
+	if appConfig.Output != "file" && appConfig.File != "" {
+		warningMsg := fmt.Sprintf("file path specified (%s) but output is not 'file' (%s), file path will be ignored",
+			appConfig.File, appConfig.Output)
+		m.logger.Warnf("Configuration inconsistency: %s", warningMsg)
+		// 这不是错误，只是警告
+	}
+
+	if len(validationErrors) > 0 {
+		combinedError := fmt.Sprintf("application logging configuration validation failed: %s",
+			strings.Join(validationErrors, "; "))
+		m.logger.Errorf("Validation summary: %s", combinedError)
+		return fmt.Errorf("%s", combinedError)
+	}
+
+	m.logger.Debug("Application logging configuration validation passed")
+	return nil
+}
+
+// detectConfigChanges 检测配置变化
+func (m *Manager) detectConfigChanges(appConfig *config.LoggingConfig, currentGstConfig *GStreamerLogConfig) (bool, []string) {
+	if appConfig == nil || currentGstConfig == nil {
+		return true, []string{"config is nil"}
+	}
+
+	var changes []string
+
+	// 检查是否应该启用GStreamer日志
+	shouldEnable := strings.ToLower(appConfig.Level) == "debug" || strings.ToLower(appConfig.Level) == "trace"
+	if shouldEnable != currentGstConfig.Enabled {
+		changes = append(changes, fmt.Sprintf("enabled: %t -> %t", currentGstConfig.Enabled, shouldEnable))
+	}
+
+	// 检查日志级别变化
+	expectedLevel := m.mapAppLogLevelToGStreamerLevel(appConfig.Level)
+	if expectedLevel != currentGstConfig.Level {
+		changes = append(changes, fmt.Sprintf("level: %d -> %d", currentGstConfig.Level, expectedLevel))
+	}
+
+	// 检查输出文件变化
+	expectedFile := m.generateGStreamerLogFile(appConfig)
+	if expectedFile != currentGstConfig.OutputFile {
+		changes = append(changes, fmt.Sprintf("output: %s -> %s",
+			m.getOutputDescription(currentGstConfig.OutputFile),
+			m.getOutputDescription(expectedFile)))
+	}
+
+	// 检查颜色设置变化
+	expectedColored := appConfig.EnableColors && (appConfig.Output != "file")
+	if expectedColored != currentGstConfig.Colored {
+		changes = append(changes, fmt.Sprintf("colored: %t -> %t", currentGstConfig.Colored, expectedColored))
+	}
+
+	return len(changes) > 0, changes
+}
+
+// mapAppLogLevelToGStreamerLevel 映射应用程序日志级别到GStreamer级别（管理器版本）
+func (m *Manager) mapAppLogLevelToGStreamerLevel(appLogLevel string) int {
+	level := strings.ToLower(strings.TrimSpace(appLogLevel))
+
+	switch level {
+	case "trace":
+		return 9 // GST_LEVEL_LOG - 最详细的日志
+	case "debug":
+		return 4 // GST_LEVEL_INFO - 调试信息
+	case "info", "warn", "error":
+		return 0 // GST_LEVEL_NONE - 禁用GStreamer日志
+	default:
+		m.logger.Warnf("Unknown application log level: %s, defaulting to 0", appLogLevel)
+		return 0 // 默认禁用
+	}
+}
+
+// generateGStreamerLogFile 生成GStreamer日志文件路径（管理器版本）
+func (m *Manager) generateGStreamerLogFile(appConfig *config.LoggingConfig) string {
+	if appConfig.Output != "file" || appConfig.File == "" {
+		return "" // 控制台输出
+	}
+
+	// 在应用程序日志目录创建gstreamer.log
+	dir := filepath.Dir(appConfig.File)
+	return filepath.Join(dir, "gstreamer.log")
+}
+
+// validateLogFilePath 验证日志文件路径
+func (m *Manager) validateLogFilePath(filePath string) error {
+	if filePath == "" {
+		return nil // 空路径表示控制台输出，是有效的
+	}
+
+	// 检查路径是否为绝对路径
+	if !filepath.IsAbs(filePath) {
+		return fmt.Errorf("log file path must be absolute: %s", filePath)
+	}
+
+	// 检查目录是否存在或可创建
+	dir := filepath.Dir(filePath)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		// 尝试创建目录
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("cannot create log directory %s: %w", dir, err)
+		}
+	}
+
+	// 检查文件是否可写
+	if _, err := os.Stat(filePath); err == nil {
+		// 文件存在，检查写权限
+		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("cannot write to log file %s: %w", filePath, err)
+		}
+		file.Close()
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("cannot access log file %s: %w", filePath, err)
+	}
+
+	return nil
+}
+
+// NotifyLoggingConfigChange 通知日志配置变化
+func (m *Manager) NotifyLoggingConfigChange(newConfig *config.LoggingConfig) {
+	if m.configChangeChannel == nil {
+		m.logger.Warn("Configuration change channel is not initialized")
+		return
+	}
+
+	select {
+	case m.configChangeChannel <- newConfig:
+		m.logger.Debug("Logging configuration change notification sent")
+	default:
+		m.logger.Warn("Configuration change channel is full, dropping notification")
+	}
+}
+
+// GetConfigChangeChannel 获取配置变化通道（用于外部监控）
+func (m *Manager) GetConfigChangeChannel() chan<- *config.LoggingConfig {
+	return m.configChangeChannel
+}
+
+// GetLoggingConfig 获取当前GStreamer日志配置
+func (m *Manager) GetLoggingConfig() *GStreamerLogConfig {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	if m.logConfigurator == nil {
+		return nil
+	}
+
+	return m.logConfigurator.GetCurrentConfig()
+}
+
+// AdaptToNetworkCondition 根据网络状况调整编码参数
+func (m *Manager) AdaptToNetworkCondition(condition NetworkCondition) error {
+	m.logger.Debugf("Adapting to network condition: packet_loss=%.2f%%, rtt=%dms, bandwidth=%d kbps",
+		condition.PacketLoss*100, condition.RTT, condition.Bandwidth)
+
+	if condition.PacketLoss > 0.05 {
+		// 降低比特率 - 使用新的 SetBitrate 方法
+		newBitrate := int(float64(m.config.Encoding.Bitrate) * 0.8)
+		if newBitrate < m.config.Encoding.MinBitrate {
+			newBitrate = m.config.Encoding.MinBitrate
+		}
+
+		if m.encoder != nil {
+			// Use type assertion to ensure we have the correct interface
+			if encoder, ok := m.encoder.(interface{ SetBitrate(int) error }); ok {
+				if err := encoder.SetBitrate(newBitrate); err != nil {
+					m.logger.Warnf("Failed to set encoder bitrate: %v", err)
+					return err
+				}
+			} else {
+				m.logger.Warnf("Encoder does not support SetBitrate method")
+			}
+		}
+
+		m.config.Encoding.Bitrate = newBitrate
+		m.logger.Infof("Adapted to network condition: reduced bitrate to %d kbps", newBitrate)
+	}
+
+	if condition.RTT > 200 {
+		// 降低帧率 - 使用新的 SetFrameRate 方法
+		newFrameRate := m.config.Capture.FrameRate - 5
+		if newFrameRate < 15 {
+			newFrameRate = 15 // 最低帧率限制
+		}
+
+		if m.capture != nil {
+			// Use type assertion to ensure we have the correct interface
+			if capture, ok := m.capture.(interface{ SetFrameRate(int) error }); ok {
+				if err := capture.SetFrameRate(newFrameRate); err != nil {
+					m.logger.Warnf("Failed to set capture frame rate: %v", err)
+					return err
+				}
+			} else {
+				m.logger.Warnf("Capture does not support SetFrameRate method")
+			}
+		}
+
+		m.config.Capture.FrameRate = newFrameRate
+		m.logger.Infof("Adapted to network condition: reduced frame rate to %d fps", newFrameRate)
+	}
+
 	return nil
 }

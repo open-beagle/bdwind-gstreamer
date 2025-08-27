@@ -3,10 +3,12 @@ package webrtc
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 )
 
@@ -16,6 +18,7 @@ type ProtocolNegotiator struct {
 	config         *NegotiatorConfig
 	detectionRules []DetectionRule
 	fallbackChain  []protocol.ProtocolVersion
+	logger         *logrus.Entry
 }
 
 // NegotiatorConfig 协商器配置
@@ -49,15 +52,16 @@ type NegotiationResult struct {
 }
 
 // NewProtocolNegotiator 创建协议协商器
-func NewProtocolNegotiator(messageRouter *MessageRouter, config *NegotiatorConfig) *ProtocolNegotiator {
-	if config == nil {
-		config = DefaultNegotiatorConfig()
+func NewProtocolNegotiator(messageRouter *MessageRouter, cfg *NegotiatorConfig) *ProtocolNegotiator {
+	if cfg == nil {
+		cfg = DefaultNegotiatorConfig()
 	}
 
 	negotiator := &ProtocolNegotiator{
 		messageRouter: messageRouter,
-		config:        config,
-		fallbackChain: config.FallbackProtocols,
+		config:        cfg,
+		fallbackChain: cfg.FallbackProtocols,
+		logger:        config.GetLoggerWithPrefix("protocol-negotiator"),
 	}
 
 	negotiator.initDetectionRules()
@@ -186,7 +190,7 @@ func (pn *ProtocolNegotiator) SwitchProtocol(currentProtocol, targetProtocol pro
 		return nil, fmt.Errorf("failed to convert protocol from %s to %s: %w", currentProtocol, targetProtocol, err)
 	}
 
-	log.Printf("🔄 Protocol switched: %s -> %s, size: %d -> %d bytes",
+	pn.logger.Infof("🔄 Protocol switched: %s -> %s, size: %d -> %d bytes",
 		currentProtocol, targetProtocol, len(data), len(convertedData))
 
 	return convertedData, nil

@@ -247,24 +247,21 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("WebRTC manager already running")
 	}
 
-	m.logger.Info("Starting WebRTC manager")
+	m.logger.Debug("Starting WebRTC manager")
 	m.startTime = time.Now()
 
 	// 验证组件状态
 	m.logger.Trace("Verifying component availability before startup")
 	if m.mediaStream == nil {
 		m.logger.Error("MediaStream is nil, cannot start WebRTC manager")
-		m.logger.Info("WebRTC manager startup failed - MediaStream not initialized")
 		return fmt.Errorf("MediaStream not initialized")
 	}
 	if m.bridge == nil {
 		m.logger.Error("GStreamer bridge is nil, cannot start WebRTC manager")
-		m.logger.Info("WebRTC manager startup failed - GStreamer bridge not initialized")
 		return fmt.Errorf("GStreamer bridge not initialized")
 	}
 	if m.signaling == nil {
 		m.logger.Error("Signaling server is nil, cannot start WebRTC manager")
-		m.logger.Info("WebRTC manager startup failed - Signaling server not initialized")
 		return fmt.Errorf("Signaling server not initialized")
 	}
 
@@ -272,7 +269,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Debug("Starting GStreamer bridge")
 	if err := m.bridge.Start(); err != nil {
 		m.logger.Errorf("Failed to start GStreamer bridge: %v", err)
-		m.logger.Info("WebRTC manager startup failed - GStreamer bridge initialization error")
 		return fmt.Errorf("failed to start GStreamer bridge: %w", err)
 	}
 	m.logger.Debug("GStreamer bridge started successfully")
@@ -300,7 +296,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.running = true
 	uptime := time.Since(m.startTime)
-	m.logger.Infof("WebRTC manager started successfully (startup time: %v)", uptime)
+	m.logger.Debugf("WebRTC manager started successfully (startup time: %v)", uptime)
 
 	return nil
 }

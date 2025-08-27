@@ -2,9 +2,11 @@ package webrtc
 
 import (
 	"fmt"
-	"log"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 )
 
@@ -13,6 +15,7 @@ type MessageRouter struct {
 	protocolManager *protocol.ProtocolManager
 	validator       *protocol.MessageValidator
 	config          *MessageRouterConfig
+	logger          *logrus.Entry
 }
 
 // MessageRouterConfig 消息路由器配置
@@ -34,14 +37,15 @@ type RouteResult struct {
 }
 
 // NewMessageRouter 创建消息路由器
-func NewMessageRouter(protocolManager *protocol.ProtocolManager, config *MessageRouterConfig) *MessageRouter {
-	if config == nil {
-		config = DefaultMessageRouterConfig()
+func NewMessageRouter(protocolManager *protocol.ProtocolManager, cfg *MessageRouterConfig) *MessageRouter {
+	if cfg == nil {
+		cfg = DefaultMessageRouterConfig()
 	}
 
 	return &MessageRouter{
 		protocolManager: protocolManager,
-		config:          config,
+		config:          cfg,
+		logger:          config.GetLoggerWithPrefix("webrtc-message-router"),
 	}
 }
 
@@ -62,9 +66,7 @@ func (mr *MessageRouter) RouteMessage(data []byte, clientID string) (*RouteResul
 		Warnings: make([]string, 0),
 	}
 
-	if mr.config.EnableLogging {
-		log.Printf("📨 Routing message for client %s (size: %d bytes)", clientID, len(data))
-	}
+	mr.logger.Debugf("📨 Routing message for client %s (size: %d bytes)", clientID, len(data))
 
 	// 使用协议管理器解析消息
 	parseResult, err := mr.protocolManager.ParseMessage(data)
@@ -97,10 +99,8 @@ func (mr *MessageRouter) RouteMessage(data []byte, clientID string) (*RouteResul
 		result.Message.ID = generateMessageID()
 	}
 
-	if mr.config.EnableLogging {
-		log.Printf("✅ Message routed successfully: type=%s, protocol=%s, client=%s",
-			result.Message.Type, result.OriginalProtocol, clientID)
-	}
+	mr.logger.Debugf("✅ Message routed successfully: type=%s, protocol=%s, client=%s",
+		result.Message.Type, result.OriginalProtocol, clientID)
 
 	return result, nil
 }
@@ -117,9 +117,7 @@ func (mr *MessageRouter) FormatResponse(message *protocol.StandardMessage, targe
 		return nil, fmt.Errorf("failed to format message: %w", err)
 	}
 
-	if mr.config.EnableLogging {
-		log.Printf("📤 Response formatted: type=%s, size=%d bytes", message.Type, len(data))
-	}
+	mr.logger.Debugf("📤 Response formatted: type=%s, size=%d bytes", message.Type, len(data))
 
 	return data, nil
 }
@@ -131,10 +129,8 @@ func (mr *MessageRouter) ConvertMessage(data []byte, fromProtocol, toProtocol pr
 		return nil, fmt.Errorf("failed to convert message: %w", err)
 	}
 
-	if mr.config.EnableLogging {
-		log.Printf("🔄 Message converted: %s -> %s, size: %d -> %d bytes",
-			fromProtocol, toProtocol, len(data), len(convertedData))
-	}
+	mr.logger.Debugf("🔄 Message converted: %s -> %s, size: %d -> %d bytes",
+		fromProtocol, toProtocol, len(data), len(convertedData))
 
 	return convertedData, nil
 }

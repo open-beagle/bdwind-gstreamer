@@ -82,6 +82,11 @@ func LoadConfigFromFile(filename string) (*Config, error) {
 		config = convertLegacyConfig(legacyConfig)
 	}
 
+	// 规范化日志文件路径
+	if config.Logging != nil && config.Logging.File != "" {
+		config.Logging.File = NormalizeLogFilePath(config.Logging.File)
+	}
+
 	// 验证配置
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %v", err)

@@ -2,15 +2,16 @@ package webserver
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 
 	"github.com/gorilla/mux"
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 func (ws *WebServer) setupRoutes() {
-	log.Println("Setting up webserver routes...")
+	logger := config.GetLoggerWithPrefix("webserver-routes")
+	logger.Debug("Setting up webserver routes...")
 	ws.router = mux.NewRouter()
 
 	// 只有在server存在时才设置Handler
@@ -18,7 +19,7 @@ func (ws *WebServer) setupRoutes() {
 		ws.server.Handler = ws.router
 	}
 
-	log.Println("Setting up middleware...")
+	logger.Debug("Setting up middleware...")
 	if ws.config.EnableCORS {
 		ws.router.Use(ws.corsMiddleware)
 	}
@@ -29,21 +30,21 @@ func (ws *WebServer) setupRoutes() {
 	}
 
 	// 设置高优先级路由（API、认证、健康检查等）
-	log.Println("Setting up basic routes...")
+	logger.Debug("Setting up basic routes...")
 	ws.setupBasicRoutes()
-	log.Println("Setting up auth routes...")
+	logger.Debug("Setting up auth routes...")
 	ws.setupAuthRoutes()
 
 	// Setup component routes
-	log.Println("Setting up component routes...")
+	logger.Debug("Setting up component routes...")
 	if err := ws.setupComponentRoutes(); err != nil {
-		log.Printf("Component routes setup failed: %v", err)
+		logger.Errorf("Component routes setup failed: %v", err)
 		// Log error but don't fail - this allows the server to start even if some components fail
 		ws.router.HandleFunc("/api/component-routes-error", func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Component routes setup failed: %v", err), http.StatusInternalServerError)
 		}).Methods("GET")
 	} else {
-		log.Println("Component routes setup completed successfully")
+		logger.Info("Component routes setup completed successfully")
 	}
 
 	// 设置测试路由
@@ -51,7 +52,7 @@ func (ws *WebServer) setupRoutes() {
 	ws.router.HandleFunc("/test/simple", ws.handleSimpleTest).Methods("GET")
 
 	// 最后设置静态文件路由（最低优先级）
-	log.Println("Setting up static routes...")
+	logger.Debug("Setting up static routes...")
 	ws.setupStaticRoutes()
 }
 
@@ -97,7 +98,8 @@ func (ws *WebServer) createStaticFileHandler(staticRouter *StaticFileRouter, pri
 		if !priorityManager.ShouldServeAsStatic(path) {
 			// 这是保留路径（API、认证等），应该已经被其他处理器处理
 			// 如果到达这里，说明没有找到对应的处理器，返回404
-			log.Printf("Reserved path accessed but no handler found: %s", path)
+			logger := config.GetLoggerWithPrefix("webserver-static")
+			logger.Warnf("Reserved path accessed but no handler found: %s", path)
 			http.NotFound(w, r)
 			return
 		}
@@ -113,11 +115,12 @@ func (ws *WebServer) createStaticFileHandler(staticRouter *StaticFileRouter, pri
 
 // handleStaticFileError 处理静态文件服务错误
 func (ws *WebServer) handleStaticFileError(w http.ResponseWriter, r *http.Request, err error, staticRouter *StaticFileRouter, priorityManager *RoutePriorityManager) {
+	logger := config.GetLoggerWithPrefix("webserver-static")
 	path := r.URL.Path
 
 	// 检查错误类型
 	if staticErr, ok := err.(*StaticFileError); ok {
-		log.Printf("Static file error: %v", staticErr)
+		logger.Errorf("Static file error: %v", staticErr)
 
 		switch staticErr.Type {
 		case ErrorTypeFileNotFound:
@@ -126,34 +129,34 @@ func (ws *WebServer) handleStaticFileError(w http.ResponseWriter, r *http.Reques
 			return
 
 		case ErrorTypePermissionDenied:
-			log.Printf("Permission denied for file: %s", staticErr.Path)
+			logger.Errorf("Permission denied for file: %s", staticErr.Path)
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 
 		case ErrorTypeReadError:
-			log.Printf("Read error for file: %s - %v", staticErr.Path, staticErr.Err)
+			logger.Errorf("Read error for file: %s - %v", staticErr.Path, staticErr.Err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 
 		case ErrorTypeInvalidPath:
-			log.Printf("Invalid path rejected: %s", staticErr.Path)
+			logger.Errorf("Invalid path rejected: %s", staticErr.Path)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 
 		case ErrorTypeStatError:
-			log.Printf("Stat error for file: %s - %v", staticErr.Path, staticErr.Err)
+			logger.Errorf("Stat error for file: %s - %v", staticErr.Path, staticErr.Err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 
 		default:
-			log.Printf("Unknown static file error type: %s for path: %s", staticErr.Type, staticErr.Path)
+			logger.Errorf("Unknown static file error type: %s for path: %s", staticErr.Type, staticErr.Path)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 	}
 
 	// 未知错误类型，记录并尝试SPA回退
-	log.Printf("Unknown error serving static file %s: %v", path, err)
+	logger.Errorf("Unknown error serving static file %s: %v", path, err)
 	ws.handleSPAFallback(w, r, staticRouter, priorityManager)
 }
 
@@ -164,13 +167,14 @@ func (ws *WebServer) handleStaticFileError(w http.ResponseWriter, r *http.Reques
 // - Requirement 4.2: 非API路径回退到主页
 // - Requirement 4.3: API路径返回正确的404错误，而非回退到主页
 func (ws *WebServer) handleSPAFallback(w http.ResponseWriter, r *http.Request, staticRouter *StaticFileRouter, priorityManager *RoutePriorityManager) {
+	logger := config.GetLoggerWithPrefix("webserver-spa")
 	path := r.URL.Path
 
-	log.Printf("Attempting SPA fallback for path: %s", path)
+	logger.Debugf("Attempting SPA fallback for path: %s", path)
 
 	// Requirement 4.3: 如果是API路径，返回404而不是回退到index.html
 	if priorityManager.IsAPIPath(path) {
-		log.Printf("API path not found, returning 404: %s", path)
+		logger.Debugf("API path not found, returning 404: %s", path)
 		http.NotFound(w, r)
 		return
 	}
@@ -182,16 +186,16 @@ func (ws *WebServer) handleSPAFallback(w http.ResponseWriter, r *http.Request, s
 	}
 	defaultFileRequest.URL.Path = "/" + staticRouter.GetDefaultFile()
 
-	log.Printf("Serving default file for SPA fallback: %s", defaultFileRequest.URL.Path)
+	logger.Debugf("Serving default file for SPA fallback: %s", defaultFileRequest.URL.Path)
 
 	// 尝试提供默认文件
 	err := staticRouter.ServeStaticFile(w, defaultFileRequest)
 	if err != nil {
 		// 如果连默认文件都不存在，返回404
-		log.Printf("Default file not found for SPA fallback, returning 404: %v", err)
+		logger.Errorf("Default file not found for SPA fallback, returning 404: %v", err)
 		http.NotFound(w, r)
 		return
 	}
 
-	log.Printf("SPA fallback successful for path: %s", path)
+	logger.Debugf("SPA fallback successful for path: %s", path)
 }

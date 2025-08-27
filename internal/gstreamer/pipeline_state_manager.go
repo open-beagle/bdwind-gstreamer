@@ -127,7 +127,7 @@ func (psm *PipelineStateManager) Start() error {
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
 
-	psm.logger.Info("Starting pipeline state manager...")
+	psm.logger.Debug("Starting pipeline state manager...")
 
 	// Get initial pipeline state
 	initialState, err := psm.pipeline.GetState()
@@ -157,7 +157,7 @@ func (psm *PipelineStateManager) Stop() error {
 	psm.mu.Lock()
 	defer psm.mu.Unlock()
 
-	psm.logger.Info("Stopping pipeline state manager...")
+	psm.logger.Debug("Stopping pipeline state manager...")
 
 	// Stop health checker
 	if err := psm.healthChecker.Stop(); err != nil {
@@ -183,7 +183,7 @@ func (psm *PipelineStateManager) SetState(targetState PipelineState) error {
 		return nil
 	}
 
-	psm.logger.Infof("Initiating state transition: %v -> %v", currentState, targetState)
+	psm.logger.Debugf("Initiating state transition: %v -> %v", currentState, targetState)
 
 	transition := StateTransition{
 		FromState: currentState,
@@ -408,7 +408,7 @@ func (psm *PipelineStateManager) SetErrorCallback(callback func(error, string)) 
 
 // RestartPipeline attempts to restart the pipeline
 func (psm *PipelineStateManager) RestartPipeline() error {
-	psm.logger.Info("Attempting to restart pipeline...")
+	psm.logger.Debug("Attempting to restart pipeline...")
 
 	// Stop pipeline first
 	if err := psm.SetState(StateNull); err != nil {

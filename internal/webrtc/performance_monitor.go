@@ -3,11 +3,14 @@ package webrtc
 import (
 	"context"
 	"fmt"
-	"log"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
 // PerformanceMonitor 性能监控器
@@ -32,6 +35,9 @@ type PerformanceMonitor struct {
 
 	// 事件回调
 	alertCallbacks []func(alert *PerformanceAlert)
+
+	// 日志记录器
+	logger *logrus.Entry
 }
 
 // PerformanceMonitorConfig 性能监控配置
@@ -254,9 +260,9 @@ func DefaultPerformanceMonitorConfig() *PerformanceMonitorConfig {
 }
 
 // NewPerformanceMonitor 创建性能监控器
-func NewPerformanceMonitor(config *PerformanceMonitorConfig) *PerformanceMonitor {
-	if config == nil {
-		config = DefaultPerformanceMonitorConfig()
+func NewPerformanceMonitor(cfg *PerformanceMonitorConfig) *PerformanceMonitor {
+	if cfg == nil {
+		cfg = DefaultPerformanceMonitorConfig()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -280,13 +286,16 @@ func NewPerformanceMonitor(config *PerformanceMonitorConfig) *PerformanceMonitor
 		routingStats: &MessageRoutingStats{
 			ProtocolStats: make(map[string]*ProtocolRoutingStats),
 		},
-		config:         config,
+		config:         cfg,
 		ctx:            ctx,
 		cancel:         cancel,
-		reportInterval: config.ReportInterval,
+		reportInterval: cfg.ReportInterval,
 		lastReportTime: time.Now(),
 		alertCallbacks: make([]func(alert *PerformanceAlert), 0),
 	}
+
+	// Initialize logger separately to avoid naming conflicts
+	pm.logger = config.GetLoggerWithPrefix("webrtc-performance-monitor")
 
 	// 初始化延迟桶
 	pm.initializeLatencyBuckets()
@@ -311,7 +320,7 @@ func (pm *PerformanceMonitor) initializeLatencyBuckets() {
 
 // Start 启动性能监控
 func (pm *PerformanceMonitor) Start() {
-	log.Printf("🚀 Starting performance monitor with interval %v", pm.config.MonitorInterval)
+	pm.logger.Debugf("🚀 Starting performance monitor with interval %v", pm.config.MonitorInterval)
 
 	// 启动监控协程
 	go pm.monitorLoop()
@@ -319,14 +328,14 @@ func (pm *PerformanceMonitor) Start() {
 	// 启动报告协程
 	go pm.reportLoop()
 
-	log.Printf("✅ Performance monitor started")
+	pm.logger.Debug("✅ Performance monitor started")
 }
 
 // Stop 停止性能监控
 func (pm *PerformanceMonitor) Stop() {
-	log.Printf("🛑 Stopping performance monitor...")
+	pm.logger.Trace("🛑 Stopping performance monitor...")
 	pm.cancel()
-	log.Printf("✅ Performance monitor stopped")
+	pm.logger.Trace("✅ Performance monitor stopped")
 }
 
 // monitorLoop 监控循环
@@ -465,7 +474,7 @@ func (pm *PerformanceMonitor) recordSlowMessage(clientID, messageType string, pr
 	}
 	pm.messageStats.SlowMessageDetails = append(pm.messageStats.SlowMessageDetails, record)
 
-	log.Printf("⚠️ Slow message detected: client=%s, type=%s, time=%v", clientID, messageType, processingTime)
+	pm.logger.Warnf("⚠️ Slow message detected: client=%s, type=%s, time=%v", clientID, messageType, processingTime)
 }
 
 // updateTimeWindowStats 更新时间窗口统计
@@ -645,7 +654,7 @@ func (pm *PerformanceMonitor) checkAlerts() {
 
 // triggerAlert 触发警报
 func (pm *PerformanceMonitor) triggerAlert(alert *PerformanceAlert) {
-	log.Printf("🚨 Performance Alert: %s - %s (Current: %v, Threshold: %v)",
+	pm.logger.Errorf("🚨 Performance Alert: %s - %s (Current: %v, Threshold: %v)",
 		alert.Type, alert.Message, alert.CurrentValue, alert.Threshold)
 
 	// 调用警报回调
@@ -666,61 +675,61 @@ func (pm *PerformanceMonitor) generatePerformanceReport() {
 	now := time.Now()
 	duration := now.Sub(pm.lastReportTime)
 
-	log.Printf("📊 === Performance Report (Period: %v) ===", duration)
+	pm.logger.Tracef("📊 === Performance Report (Period: %v) ===", duration)
 
 	// 消息处理统计
 	pm.messageStats.mutex.RLock()
-	log.Printf("📨 Message Processing:")
-	log.Printf("  Total Messages: %d", pm.messageStats.TotalMessages)
-	log.Printf("  Success Rate: %.2f%%", float64(pm.messageStats.SuccessfulMessages)/float64(pm.messageStats.TotalMessages)*100)
-	log.Printf("  Average Latency: %v", pm.messageStats.AverageLatency)
-	log.Printf("  Slow Messages: %d", pm.messageStats.SlowMessages)
+	pm.logger.Trace("📨 Message Processing:")
+	pm.logger.Tracef("  Total Messages: %d", pm.messageStats.TotalMessages)
+	pm.logger.Tracef("  Success Rate: %.2f%%", float64(pm.messageStats.SuccessfulMessages)/float64(pm.messageStats.TotalMessages)*100)
+	pm.logger.Tracef("  Average Latency: %v", pm.messageStats.AverageLatency)
+	pm.logger.Tracef("  Slow Messages: %d", pm.messageStats.SlowMessages)
 
 	// 按消息类型统计
-	log.Printf("📋 Message Types:")
+	pm.logger.Trace("📋 Message Types:")
 	for msgType, stats := range pm.messageStats.MessageTypeStats {
 		successRate := float64(stats.SuccessCount) / float64(stats.Count) * 100
-		log.Printf("  %s: %d messages, %.2f%% success, avg latency: %v",
+		pm.logger.Tracef("  %s: %d messages, %.2f%% success, avg latency: %v",
 			msgType, stats.Count, successRate, stats.AverageLatency)
 	}
 	pm.messageStats.mutex.RUnlock()
 
 	// 连接统计
 	pm.connectionStats.mutex.RLock()
-	log.Printf("🔗 Connections:")
-	log.Printf("  Active: %d, Total: %d, Peak: %d",
+	pm.logger.Trace("🔗 Connections:")
+	pm.logger.Tracef("  Active: %d, Total: %d, Peak: %d",
 		pm.connectionStats.ActiveConnections,
 		pm.connectionStats.TotalConnections,
 		pm.connectionStats.PeakConnections)
 
 	// 按应用统计
-	log.Printf("📱 Applications:")
+	pm.logger.Trace("📱 Applications:")
 	for appName, stats := range pm.connectionStats.AppConnectionStats {
-		log.Printf("  %s: %d active, %d total", appName, stats.ActiveConnections, stats.TotalConnections)
+		pm.logger.Tracef("  %s: %d active, %d total", appName, stats.ActiveConnections, stats.TotalConnections)
 	}
 	pm.connectionStats.mutex.RUnlock()
 
 	// 系统统计
 	pm.systemStats.mutex.RLock()
-	log.Printf("💻 System:")
-	log.Printf("  Memory: %.2f%% (%.2f MB allocated)",
+	pm.logger.Trace("💻 System:")
+	pm.logger.Tracef("  Memory: %.2f%% (%.2f MB allocated)",
 		pm.systemStats.MemoryUsage.UsagePercentage,
 		float64(pm.systemStats.MemoryUsage.AllocatedBytes)/1024/1024)
-	log.Printf("  Goroutines: %d", pm.systemStats.GoroutineCount)
-	log.Printf("  GC: %d collections, %.2f%% CPU",
+	pm.logger.Tracef("  Goroutines: %d", pm.systemStats.GoroutineCount)
+	pm.logger.Tracef("  GC: %d collections, %.2f%% CPU",
 		pm.systemStats.GCStats.NumGC,
 		pm.systemStats.GCStats.GCCPUFraction*100)
 	pm.systemStats.mutex.RUnlock()
 
 	// 路由统计
 	pm.routingStats.mutex.RLock()
-	log.Printf("🚦 Message Routing:")
-	log.Printf("  Total Routed: %d", pm.routingStats.TotalRoutedMessages)
-	log.Printf("  Routing Errors: %d", pm.routingStats.RoutingErrors)
-	log.Printf("  Average Routing Time: %v", pm.routingStats.AverageRoutingTime)
+	pm.logger.Trace("🚦 Message Routing:")
+	pm.logger.Tracef("  Total Routed: %d", pm.routingStats.TotalRoutedMessages)
+	pm.logger.Tracef("  Routing Errors: %d", pm.routingStats.RoutingErrors)
+	pm.logger.Tracef("  Average Routing Time: %v", pm.routingStats.AverageRoutingTime)
 	pm.routingStats.mutex.RUnlock()
 
-	log.Printf("📊 === End Performance Report ===")
+	pm.logger.Trace("📊 === End Performance Report ===")
 
 	pm.lastReportTime = now
 }
@@ -773,7 +782,7 @@ func (pm *PerformanceMonitor) ResetStats() {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
-	log.Printf("🔄 Resetting performance statistics")
+	pm.logger.Trace("🔄 Resetting performance statistics")
 
 	// 重置消息统计
 	pm.messageStats.mutex.Lock()
@@ -793,5 +802,5 @@ func (pm *PerformanceMonitor) ResetStats() {
 	pm.routingStats.ProtocolStats = make(map[string]*ProtocolRoutingStats)
 	pm.routingStats.mutex.Unlock()
 
-	log.Printf("✅ Performance statistics reset completed")
+	pm.logger.Trace("✅ Performance statistics reset completed")
 }

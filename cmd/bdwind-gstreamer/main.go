@@ -4,12 +4,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
@@ -20,7 +21,7 @@ const (
 )
 
 // checkPortAvailability 检查配置中的端口是否可用
-func checkPortAvailability(cfg *config.Config) error {
+func checkPortAvailability(cfg *config.Config, logger *logrus.Entry) error {
 	portsToCheck := make(map[int]string)
 
 	// 添加 WebServer 端口
@@ -38,7 +39,7 @@ func checkPortAvailability(cfg *config.Config) error {
 		if err := checkPortInUse(port); err != nil {
 			return fmt.Errorf("%s port %d is already in use: %v", service, port, err)
 		}
-		log.Printf("  ✅ Port %d (%s) is available", port, service)
+		logger.Tracef("Port %d (%s) is available", port, service)
 	}
 
 	return nil
@@ -83,23 +84,16 @@ func main() {
 	)
 	flag.Parse()
 
-	if *version {
-		fmt.Printf("%s v%s\n", AppName, AppVersion)
-		fmt.Println("High-performance WebRTC desktop streaming server")
-		return
-	}
-
 	// 加载配置
 	var cfg *config.Config
 	var err error
 
 	if *configFile != "" {
-		log.Printf("Loading configuration from: %s", *configFile)
 		cfg, err = config.LoadConfigFromFile(*configFile)
 		if err != nil {
-			log.Fatalf("Failed to load configuration: %v", err)
+			fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+			os.Exit(1)
 		}
-		log.Printf("Configuration loaded successfully")
 	} else {
 		cfg = config.DefaultConfig()
 	}
@@ -128,14 +122,14 @@ func main() {
 		if level, err := config.ParseLogLevel(*logLevel); err == nil {
 			cfg.Logging.Level = level
 		} else {
-			log.Printf("Invalid log level '%s': %v", *logLevel, err)
+			fmt.Fprintf(os.Stderr, "Invalid log level '%s': %v\n", *logLevel, err)
 		}
 	}
 	if *logOutput != "" {
 		cfg.Logging.Output = *logOutput
 	}
 	if *logFile != "" {
-		cfg.Logging.File = *logFile
+		cfg.Logging.File = config.NormalizeLogFilePath(*logFile)
 		if cfg.Logging.Output == "" {
 			cfg.Logging.Output = "file"
 		}
@@ -143,28 +137,50 @@ func main() {
 
 	// 验证配置
 	if err := cfg.Validate(); err != nil {
-		log.Fatalf("Invalid configuration: %v", err)
+		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 验证日志配置
+	if err := config.ValidateLoggingSetup(cfg.Logging); err != nil {
+		fmt.Fprintf(os.Stderr, "Logging configuration validation failed: %v\n", err)
+		os.Exit(1)
 	}
 
 	// 初始化日志系统
 	if err := config.SetupLogger(cfg.Logging); err != nil {
-		log.Fatalf("Failed to setup logger: %v", err)
-	}
-
-	// 检查端口占用
-	log.Printf("Checking port availability...")
-	if err := checkPortAvailability(cfg); err != nil {
-		log.Printf("❌ Port availability check failed: %v", err)
-		log.Printf("💡 Please ensure the required ports are not in use by other applications")
-		log.Printf("💡 You can check port usage with: netstat -tlnp | grep :<port>")
+		fmt.Fprintf(os.Stderr, "Failed to setup logger: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("✅ All required ports are available")
+
+	// 日志系统初始化完成，现在开始输出日志
+	logger := config.GetLoggerWithPrefix("app")
+
+	// 处理 version 请求
+	if *version {
+		logger.Infof("%s v%s", AppName, AppVersion)
+		logger.Info("High-performance WebRTC desktop streaming server")
+		return
+	}
+
+	// 输出详细的日志配置信息
+	config.PrintLoggingInfo(cfg.Logging)
+	logger.Trace("✅ Logging system initialized successfully")
+
+	// 检查端口占用
+	logger.Trace("Checking port availability...")
+	if err := checkPortAvailability(cfg, logger); err != nil {
+		logger.Errorf("❌ Port availability check failed: %v", err)
+		logger.Info("💡 Please ensure the required ports are not in use by other applications")
+		logger.Info("💡 You can check port usage with: netstat -tlnp | grep :<port>")
+		os.Exit(1)
+	}
+	logger.Trace("✅ All required ports are available")
 
 	// 创建应用
 	app, err := NewBDWindApp(cfg, nil)
 	if err != nil {
-		log.Fatalf("Failed to create application: %v", err)
+		logger.Fatalf("Failed to create application: %v", err)
 	}
 
 	// 设置信号处理
@@ -174,7 +190,7 @@ func main() {
 	// 启动应用
 	go func() {
 		if err := app.Start(); err != nil {
-			log.Fatalf("Application failed to start: %v", err)
+			logger.Fatalf("Application failed to start: %v", err)
 		}
 	}()
 
@@ -184,15 +200,14 @@ func main() {
 		protocol = "https"
 	}
 
-	fmt.Printf("\n🚀 %s v%s started successfully!\n", AppName, AppVersion)
-	fmt.Printf("📱 Web Interface: %s://%s:%d\n", protocol, cfg.WebServer.Host, cfg.WebServer.Port)
+	logger.Infof("%s v%s started successfully!", AppName, AppVersion)
+	logger.Infof("Web Interface: %s://%s:%d", protocol, cfg.WebServer.Host, cfg.WebServer.Port)
 	if cfg.Metrics.External.Enabled {
-		fmt.Printf("📊 Metrics: http://%s:%d/metrics\n", cfg.WebServer.Host, cfg.Metrics.External.Port)
+		logger.Infof("Metrics: http://%s:%d/metrics", cfg.WebServer.Host, cfg.Metrics.External.Port)
 	}
-	fmt.Printf("🖥️  Display: %s\n", cfg.GStreamer.Capture.DisplayID)
-	fmt.Printf("🔐 Authentication: %v\n", cfg.WebServer.Auth.Enabled)
-	fmt.Printf("🎬 Codec: %s\n", cfg.GStreamer.Encoding.Codec)
-	fmt.Println("\nPress Ctrl+C to stop")
+	logger.Infof("Display: %s", cfg.GStreamer.Capture.DisplayID)
+	logger.Infof("Authentication: %v", cfg.WebServer.Auth.Enabled)
+	logger.Infof("Codec: %s", cfg.GStreamer.Encoding.Codec)
 
 	// 等待信号
 	<-sigChan
@@ -202,8 +217,8 @@ func main() {
 	defer cancel()
 
 	if err := app.Stop(ctx); err != nil {
-		log.Printf("Application shutdown error: %v", err)
+		logger.Errorf("Application shutdown error: %v", err)
 	} else {
-		log.Println("Application stopped gracefully")
+		logger.Info("Application stopped gracefully")
 	}
 }
