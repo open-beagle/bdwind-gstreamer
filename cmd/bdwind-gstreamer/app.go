@@ -349,14 +349,27 @@ func (app *BDWindApp) Start() error {
 	return nil
 }
 
+// ComponentStats 组件关闭统计信息
+type ComponentStats struct {
+	StartTime time.Time
+	Duration  time.Duration
+	Success   bool
+	Error     error
+}
+
 // Stop 停止应用
 func (app *BDWindApp) Stop(ctx context.Context) error {
-	app.logger.Info("Stopping BDWind-GStreamer application...")
+	applicationShutdownStart := time.Now()
+	app.logger.Info("BDWind-GStreamer Application Shutdown Started")
+	app.logger.Tracef("Application shutdown initiated at: %s", applicationShutdownStart.Format("15:04:05.000"))
+	app.logger.Tracef("Application uptime: %v", time.Since(app.startTime))
 
 	// Cancel the root context to signal all components to stop
+	app.logger.Debugf("Cancelling root context to signal all components")
 	app.cancelFunc()
 
 	// Wait for signal handler to complete
+	app.logger.Debugf("Waiting for signal handler to complete")
 	app.wg.Wait()
 
 	// Use lifecycle configuration for shutdown timeout if no context timeout is set
@@ -364,9 +377,16 @@ func (app *BDWindApp) Stop(ctx context.Context) error {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(context.Background(), app.config.Lifecycle.ShutdownTimeout)
 		defer cancel()
+		app.logger.Tracef("Using configured shutdown timeout: %v", app.config.Lifecycle.ShutdownTimeout)
+	} else {
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			app.logger.Tracef("Using provided context timeout, remaining: %v", remaining)
+		}
 	}
 
-	// Define component shutdown order: webserver → webrtc → gstreamer → metrics (reverse of startup)
+	// Define component shutdown order: metrics → webserver → webrtc → gstreamer
+	// Changed order to ensure metrics (important for data collection) stops first
 	type managerInfo struct {
 		name    string
 		manager interface {
@@ -375,34 +395,284 @@ func (app *BDWindApp) Stop(ctx context.Context) error {
 	}
 
 	managers := []managerInfo{
+		{"metrics", app.metricsMgr}, // First to stop - ensure data collection completes
 		{"webserver", app.webserverMgr},
 		{"webrtc", app.webrtcMgr},
-		{"gstreamer", app.gstreamerMgr},
-		{"metrics", app.metricsMgr},
+		{"gstreamer", app.gstreamerMgr}, // Last to stop - may block
 	}
 
 	// Collect all errors but continue stopping other components
 	var errors []error
+	shutdownStats := make(map[string]ComponentStats)
 
-	// Stop components in reverse order
-	for _, mgr := range managers {
-		app.logger.Infof("Stopping %s manager...", mgr.name)
+	// Stop components in the new order with detailed timing statistics
+	app.logger.Tracef("=== Component Shutdown Sequence Started ===")
+	overallShutdownStart := time.Now()
 
-		if err := mgr.manager.Stop(ctx); err != nil {
+	for i, mgr := range managers {
+		startTime := time.Now()
+		app.logger.Tracef("=== Stopping %s Manager (%d/%d) ===", mgr.name, i+1, len(managers))
+		app.logger.Tracef("%s shutdown start time: %s", mgr.name, startTime.Format("15:04:05.000"))
+
+		// Log component state before shutdown
+		if statusProvider, ok := mgr.manager.(interface{ IsRunning() bool }); ok {
+			app.logger.Tracef("%s manager state before shutdown: running=%v",
+				mgr.name, statusProvider.IsRunning())
+		}
+
+		var err error
+		if mgr.name == "gstreamer" {
+			// GStreamer uses special timeout handling
+			app.logger.Tracef("Using special timeout handling for GStreamer component")
+			err = app.stopGStreamerWithTimeout(ctx)
+		} else {
+			app.logger.Tracef("Using standard stop procedure for %s component", mgr.name)
+			err = mgr.manager.Stop(ctx)
+		}
+
+		endTime := time.Now()
+		duration := endTime.Sub(startTime)
+
+		// Record component shutdown statistics
+		shutdownStats[mgr.name] = ComponentStats{
+			StartTime: startTime,
+			Duration:  duration,
+			Success:   err == nil,
+			Error:     err,
+		}
+
+		// Log detailed completion information
+		app.logger.Tracef("%s shutdown end time: %s", mgr.name, endTime.Format("15:04:05.000"))
+
+		if err != nil {
 			app.logger.Errorf("Failed to stop %s manager: %v", mgr.name, err)
+			app.logger.Tracef("=== %s Manager Shutdown FAILED ===", mgr.name)
+			app.logger.Tracef("Failure duration: %v", duration)
+			app.logger.Tracef("Error details: %v", err)
 			errors = append(errors, fmt.Errorf("failed to stop %s: %w", mgr.name, err))
 		} else {
-			app.logger.Infof("%s manager stopped successfully", mgr.name)
+			app.logger.Infof("%s Manager stopped successfully", mgr.name)
+			app.logger.Tracef("=== %s Manager Shutdown SUCCESS ===", mgr.name)
+			app.logger.Tracef("Success duration: %v", duration)
+
+			// Log final component state after successful shutdown
+			if statusProvider, ok := mgr.manager.(interface{ IsRunning() bool }); ok {
+				app.logger.Tracef("%s manager state after shutdown: running=%v",
+					mgr.name, statusProvider.IsRunning())
+			}
+		}
+
+		// Log progress through shutdown sequence
+		remainingComponents := len(managers) - i - 1
+		if remainingComponents > 0 {
+			app.logger.Tracef("Shutdown progress: %d/%d completed, %d remaining",
+				i+1, len(managers), remainingComponents)
 		}
 	}
 
-	// Report final status
+	overallShutdownDuration := time.Since(overallShutdownStart)
+	app.logger.Tracef("=== Component Shutdown Sequence Completed ===")
+	app.logger.Tracef("Overall shutdown sequence duration: %v", overallShutdownDuration)
+
+	// Log shutdown statistics summary
+	app.logShutdownStats(shutdownStats)
+
+	// Report final status with comprehensive timing
+	applicationShutdownEnd := time.Now()
+	totalApplicationShutdownDuration := applicationShutdownEnd.Sub(applicationShutdownStart)
+
+	app.logger.Tracef("=== BDWind-GStreamer Application Shutdown Completed ===")
+	app.logger.Tracef("Application shutdown completed at: %s", applicationShutdownEnd.Format("15:04:05.000"))
+	app.logger.Tracef("Total application shutdown duration: %v", totalApplicationShutdownDuration)
+
 	if len(errors) > 0 {
 		app.logger.Errorf("BDWind-GStreamer application stopped with %d errors", len(errors))
+		app.logger.Tracef("=== Application Shutdown FAILED ===")
+		app.logger.Tracef("Application stopped with %d errors after %v", len(errors), totalApplicationShutdownDuration)
+		app.logger.Tracef("Shutdown errors: %v", errors)
 		return fmt.Errorf("errors during shutdown: %v", errors)
 	}
 
 	app.logger.Info("BDWind-GStreamer application stopped successfully")
+	app.logger.Tracef("=== Application Shutdown SUCCESS ===")
+	app.logger.Tracef("BDWind-GStreamer application stopped successfully in %v", totalApplicationShutdownDuration)
+	return nil
+}
+
+// logShutdownStats logs shutdown statistics at trace level for detailed information
+func (app *BDWindApp) logShutdownStats(stats map[string]ComponentStats) {
+	app.logger.Tracef("=== Shutdown Statistics ===")
+
+	var totalDuration time.Duration
+	successCount := 0
+
+	for name, stat := range stats {
+		status := "SUCCESS"
+		if !stat.Success {
+			status = "FAILED"
+		} else {
+			successCount++
+		}
+
+		app.logger.Tracef("  %s: %s (took %v)", name, status, stat.Duration)
+		totalDuration += stat.Duration
+
+		if stat.Error != nil {
+			app.logger.Tracef("    Error: %v", stat.Error)
+		}
+	}
+
+	app.logger.Tracef("Total shutdown time: %v, Success rate: %d/%d",
+		totalDuration, successCount, len(stats))
+}
+
+// stopGStreamerWithTimeout stops GStreamer with a 3-second timeout and force stop mechanism
+func (app *BDWindApp) stopGStreamerWithTimeout(ctx context.Context) error {
+	// GStreamer 3-second timeout - hardcoded as per design requirements
+	const gstreamerTimeout = 3 * time.Second
+
+	startTime := time.Now()
+	app.logger.Tracef("=== GStreamer Shutdown Process Started ===")
+	app.logger.Tracef("Shutdown start time: %s", startTime.Format("15:04:05.000"))
+	app.logger.Tracef("Configured timeout: %v", gstreamerTimeout)
+
+	// Log current GStreamer state before shutdown
+	if app.gstreamerMgr != nil {
+		app.logger.Tracef("GStreamer manager state: running=%v, enabled=%v",
+			app.gstreamerMgr.IsRunning(), app.gstreamerMgr.IsEnabled())
+
+		// Log GStreamer statistics if available
+		stats := app.gstreamerMgr.GetStats()
+		if stats != nil {
+			app.logger.Tracef("GStreamer stats before shutdown: %+v", stats)
+		}
+	}
+
+	// Create timeout context for GStreamer
+	gstreamerCtx, cancel := context.WithTimeout(ctx, gstreamerTimeout)
+	defer cancel()
+
+	// Channel to receive the stop result
+	done := make(chan error, 1)
+
+	// Start GStreamer stop in a goroutine
+	go func() {
+		app.logger.Tracef("Initiating normal GStreamer stop procedure at %s",
+			time.Now().Format("15:04:05.000"))
+		done <- app.gstreamerMgr.Stop(gstreamerCtx)
+	}()
+
+	// Wait for either completion or timeout
+	select {
+	case err := <-done:
+		duration := time.Since(startTime)
+		if err != nil {
+			app.logger.Warnf("GStreamer stopped with error after %v: %v", duration, err)
+			app.logger.Tracef("GStreamer shutdown completed at: %s", time.Now().Format("15:04:05.000"))
+		} else {
+			app.logger.Tracef("GStreamer stopped normally within timeout")
+			app.logger.Tracef("Normal shutdown duration: %v", duration)
+			app.logger.Tracef("GStreamer shutdown completed at: %s", time.Now().Format("15:04:05.000"))
+		}
+		app.logger.Tracef("=== GStreamer Shutdown Process Completed ===")
+		return err
+
+	case <-gstreamerCtx.Done():
+		timeoutDuration := time.Since(startTime)
+		app.logger.Warnf("GStreamer stop timeout after %v, attempting force stop", gstreamerTimeout)
+		app.logger.Tracef("=== GStreamer Timeout Detected ===")
+		app.logger.Tracef("Timeout occurred after: %v (expected: %v)", timeoutDuration, gstreamerTimeout)
+		app.logger.Tracef("Timeout detected at: %s", time.Now().Format("15:04:05.000"))
+
+		// Log detailed timeout information
+		app.logger.Tracef("GStreamer normal stop procedure failed to complete within %v", gstreamerTimeout)
+		app.logger.Tracef("Possible causes: pipeline state transition blocked, resource cleanup hanging")
+
+		// Log current state during timeout
+		if app.gstreamerMgr != nil {
+			app.logger.Tracef("GStreamer manager state during timeout: running=%v",
+				app.gstreamerMgr.IsRunning())
+		}
+
+		// Attempt force stop with detailed logging
+		app.logger.Tracef("Initiating force stop procedure at: %s", time.Now().Format("15:04:05.000"))
+		forceStopStart := time.Now()
+
+		if forceErr := app.forceStopGStreamer(); forceErr != nil {
+			forceStopDuration := time.Since(forceStopStart)
+			app.logger.Errorf("Force stop failed after %v: %v", forceStopDuration, forceErr)
+			app.logger.Tracef("=== Force Stop Failed ===")
+			app.logger.Tracef("Force stop duration: %v", forceStopDuration)
+			app.logger.Tracef("Force stop error: %v", forceErr)
+			app.logger.Tracef("Total GStreamer shutdown attempt duration: %v", time.Since(startTime))
+			return fmt.Errorf("GStreamer stop timeout and force stop failed: %w", forceErr)
+		}
+
+		forceStopDuration := time.Since(forceStopStart)
+		totalDuration := time.Since(startTime)
+
+		app.logger.Tracef("=== Force Stop Completed Successfully ===")
+		app.logger.Tracef("Force stop duration: %v", forceStopDuration)
+		app.logger.Tracef("Total shutdown duration: %v (timeout: %v + force stop: %v)",
+			totalDuration, gstreamerTimeout, forceStopDuration)
+		app.logger.Tracef("Force stop completed at: %s", time.Now().Format("15:04:05.000"))
+		app.logger.Tracef("=== GStreamer Shutdown Process Completed (Force Stop) ===")
+
+		return fmt.Errorf("GStreamer stop timeout after %v, force stopped successfully in %v",
+			gstreamerTimeout, forceStopDuration)
+	}
+}
+
+// forceStopGStreamer performs force stop of GStreamer manager
+func (app *BDWindApp) forceStopGStreamer() error {
+	app.logger.Warnf("Force stopping GStreamer manager")
+	app.logger.Tracef("=== Force Stop GStreamer Manager ===")
+	app.logger.Tracef("Force stop initiated at: %s", time.Now().Format("15:04:05.000"))
+
+	if app.gstreamerMgr == nil {
+		app.logger.Tracef("GStreamer manager is nil, nothing to force stop")
+		app.logger.Tracef("Force stop completed (no-op) at: %s", time.Now().Format("15:04:05.000"))
+		return nil
+	}
+
+	// Log current manager state before force stop
+	app.logger.Tracef("GStreamer manager state before force stop: running=%v, enabled=%v",
+		app.gstreamerMgr.IsRunning(), app.gstreamerMgr.IsEnabled())
+
+	// Check if GStreamer manager implements ForceStop method
+	if forceStoppable, ok := interface{}(app.gstreamerMgr).(interface{ ForceStop() error }); ok {
+		app.logger.Tracef("GStreamer manager supports ForceStop method, executing force stop")
+		app.logger.Tracef("Force stop method available: calling ForceStop() on manager")
+
+		forceStopStart := time.Now()
+		err := forceStoppable.ForceStop()
+		forceStopDuration := time.Since(forceStopStart)
+
+		if err != nil {
+			app.logger.Errorf("ForceStop method failed after %v: %v", forceStopDuration, err)
+			return fmt.Errorf("ForceStop method failed: %w", err)
+		}
+
+		app.logger.Tracef("ForceStop method completed successfully in %v", forceStopDuration)
+		app.logger.Tracef("Force stop completed at: %s", time.Now().Format("15:04:05.000"))
+
+		// Log final state after force stop
+		app.logger.Tracef("GStreamer manager state after force stop: running=%v",
+			app.gstreamerMgr.IsRunning())
+
+		return nil
+	}
+
+	// Fallback: rely on context cancellation (already done via app.cancelFunc)
+	app.logger.Warnf("GStreamer manager does not support ForceStop method, relying on context cancellation")
+	app.logger.Tracef("Fallback strategy: relying on context cancellation")
+	app.logger.Tracef("Context cancellation should have been triggered via app.cancelFunc")
+	app.logger.Tracef("Note: This fallback may not guarantee complete resource cleanup")
+
+	// Log that we're using the fallback approach
+	app.logger.Tracef("Force stop fallback completed at: %s", time.Now().Format("15:04:05.000"))
+	app.logger.Tracef("=== Force Stop Completed (Fallback Method) ===")
+
 	return nil
 }
 
@@ -437,7 +707,7 @@ func (app *BDWindApp) handleSignals() {
 
 	select {
 	case sig := <-app.sigChan:
-		app.logger.Infof("Received signal: %v, initiating graceful shutdown", sig)
+		app.logger.Tracef("Received signal: %v, initiating graceful shutdown", sig)
 		app.cancelFunc()
 	case <-app.rootCtx.Done():
 		// Context was cancelled from elsewhere
@@ -563,17 +833,17 @@ func (app *BDWindApp) ForceShutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), app.config.Lifecycle.ForceShutdownTimeout)
 	defer cancel()
 
-	// Force stop all components in reverse order (same as normal shutdown)
+	// Force stop all components using the same order as normal shutdown: metrics → webserver → webrtc → gstreamer
 	managers := []struct {
 		name    string
 		manager interface {
 			Stop(ctx context.Context) error
 		}
 	}{
+		{"metrics", app.metricsMgr}, // First to stop - ensure data collection completes
 		{"webserver", app.webserverMgr},
 		{"webrtc", app.webrtcMgr},
-		{"gstreamer", app.gstreamerMgr},
-		{"metrics", app.metricsMgr},
+		{"gstreamer", app.gstreamerMgr}, // Last to stop - may block
 	}
 
 	// Stop all components, log errors but don't fail

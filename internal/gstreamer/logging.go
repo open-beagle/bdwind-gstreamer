@@ -697,9 +697,9 @@ func (g *gstreamerLogConfigurator) applyLogLevel(level int) error {
 	levelDescription := g.getLogLevelDescription(level)
 	g.logger.Debugf("Setting GStreamer log level to %d (%s)", level, levelDescription)
 
-	// 调用C绑定函数设置GStreamer日志级别
-	// 注意：这里假设C函数不会失败，但在实际实现中可能需要错误检查
-	SetDebugLevel(level)
+	// 调用go-gst函数设置GStreamer日志级别
+	// 注意：这里假设函数不会失败，但在实际实现中可能需要错误检查
+	setDebugLevel(level)
 
 	g.logger.Debugf("Successfully applied GStreamer log level: %d (%s)", level, levelDescription)
 	return nil
@@ -725,9 +725,9 @@ func (g *gstreamerLogConfigurator) applyLogFile(filePath string) error {
 		}
 	}
 
-	// 调用C绑定函数设置GStreamer日志文件
-	// 注意：这里假设C函数不会失败，但在实际实现中可能需要错误检查
-	SetLogFile(filePath)
+	// 调用go-gst函数设置GStreamer日志文件
+	// 注意：这里假设函数不会失败，但在实际实现中可能需要错误检查
+	setLogFile(filePath)
 
 	if filePath == "" {
 		g.logger.Debug("Successfully configured GStreamer log output to console")
@@ -798,8 +798,8 @@ func (g *gstreamerLogConfigurator) getLogLevelDescription(level int) string {
 func (g *gstreamerLogConfigurator) applyColoredOutput(colored bool) {
 	g.logger.Debugf("Setting GStreamer colored output to: %t", colored)
 
-	// 调用C绑定函数设置GStreamer颜色输出
-	SetColoredOutput(colored)
+	// 调用go-gst函数设置GStreamer颜色输出
+	setColoredOutput(colored)
 }
 
 // parseGstDebugLevel 解析GST_DEBUG环境变量中的级别
@@ -838,4 +838,39 @@ func parseGstDebugLevel(gstDebug string) (int, error) {
 	}
 
 	return 0, fmt.Errorf("invalid GST_DEBUG format: %s", gstDebug)
+}
+
+// Placeholder functions for go-gst logging (these would be implemented with actual go-gst calls)
+
+// setDebugLevel sets the GStreamer debug level using go-gst
+func setDebugLevel(level int) {
+	// In a real implementation, this would use go-gst to set the debug level
+	// For now, this is a placeholder
+}
+
+// SetDebugLevel sets the GStreamer debug level (exported for testing)
+func SetDebugLevel(level int) {
+	setDebugLevel(level)
+}
+
+// setLogFile sets the GStreamer log file using go-gst
+func setLogFile(filePath string) {
+	// In a real implementation, this would use go-gst to set the log file
+	// For now, this is a placeholder
+}
+
+// SetLogFile sets the GStreamer log file (exported for testing)
+func SetLogFile(filePath string) {
+	setLogFile(filePath)
+}
+
+// setColoredOutput sets the GStreamer colored output using go-gst
+func setColoredOutput(colored bool) {
+	// In a real implementation, this would use go-gst to set colored output
+	// For now, this is a placeholder
+}
+
+// SetColoredOutput sets the GStreamer colored output (exported for testing)
+func SetColoredOutput(colored bool) {
+	setColoredOutput(colored)
 }

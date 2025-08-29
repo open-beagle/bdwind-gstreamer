@@ -312,7 +312,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.running = false
 	m.mutex.Unlock()
 
-	m.logger.Info("Stopping WebRTC manager...")
+	m.logger.Trace("Stopping WebRTC manager...")
 	stopStartTime := time.Now()
 
 	// 停止信令服务器
@@ -349,7 +349,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	stopDuration := time.Since(stopStartTime)
 	totalUptime := time.Since(m.startTime)
-	m.logger.Infof("WebRTC manager stopped successfully (shutdown time: %v, total uptime: %v)",
+	m.logger.Tracef("WebRTC manager stopped successfully (shutdown time: %v, total uptime: %v)",
 		stopDuration, totalUptime)
 	return nil
 }

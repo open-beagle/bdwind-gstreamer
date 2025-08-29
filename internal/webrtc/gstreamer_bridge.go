@@ -188,7 +188,7 @@ func (gb *gstreamerBridgeImpl) Start() error {
 	}
 
 	// Info级别: 记录样本回调链路建立成功状态
-	gb.logger.Info("Starting GStreamer bridge for sample processing")
+	gb.logger.Trace("Starting GStreamer bridge for sample processing")
 
 	gb.running = true
 	gb.startTime = time.Now()
@@ -231,7 +231,7 @@ func (gb *gstreamerBridgeImpl) Stop() error {
 	gb.mutex.Unlock()
 
 	// Info级别: 记录样本回调链路停止开始
-	gb.logger.Info("Stopping GStreamer bridge")
+	gb.logger.Trace("Stopping GStreamer bridge")
 
 	// 取消上下文
 	gb.cancel()
@@ -252,11 +252,11 @@ func (gb *gstreamerBridgeImpl) Stop() error {
 	stats := gb.stats
 	gb.mutex.RUnlock()
 
-	gb.logger.Infof("Bridge stopped - Final statistics:")
-	gb.logger.Infof("  Video samples processed: %d", stats.VideoSamplesProcessed)
-	gb.logger.Infof("  Audio samples processed: %d", stats.AudioSamplesProcessed)
-	gb.logger.Infof("  Video samples dropped: %d", stats.VideoSamplesDropped)
-	gb.logger.Infof("  Audio samples dropped: %d", stats.AudioSamplesDropped)
+	gb.logger.Trace("Bridge stopped - Final statistics:")
+	gb.logger.Tracef("  Video samples processed: %d", stats.VideoSamplesProcessed)
+	gb.logger.Tracef("  Audio samples processed: %d", stats.AudioSamplesProcessed)
+	gb.logger.Tracef("  Video samples dropped: %d", stats.VideoSamplesDropped)
+	gb.logger.Tracef("  Audio samples dropped: %d", stats.AudioSamplesDropped)
 
 	return nil
 }

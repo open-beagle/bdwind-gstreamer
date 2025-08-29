@@ -1,7 +1,7 @@
 # BDWind-GStreamer Build Dockerfile
 # 专门用于编译应用程序的镜像
 
-FROM docker.io/golang:1.21-bullseye
+FROM docker.io/golang:1.24
 
 LABEL maintainer="BDWind-GStreamer Team"
 LABEL description="Build image for BDWind-GStreamer application"
@@ -9,11 +9,15 @@ LABEL description="Build image for BDWind-GStreamer application"
 # 设置工作目录
 WORKDIR /app
 
-# 安装编译依赖
+# 安装编译依赖 (支持 go-gst)
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-good1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
+    libglib2.0-dev \
+    libgobject-introspection-dev \
     libx11-dev \
     libxext-dev \
     libxfixes-dev \

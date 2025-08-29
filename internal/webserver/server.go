@@ -319,7 +319,7 @@ func (ws *WebServer) setupComponentRoutes() error {
 		ws.logger.Debugf("Routes for component %s setup successfully", name)
 	}
 
-	ws.logger.Info("All component routes setup completed")
+	ws.logger.Trace("All component routes setup completed")
 	return nil
 }
 

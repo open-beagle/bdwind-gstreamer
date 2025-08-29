@@ -282,7 +282,7 @@ func (cmr *ConcurrentMessageRouter) Stop() error {
 		return fmt.Errorf("concurrent router is not running")
 	}
 
-	cmr.logger.Info("🛑 Stopping concurrent message router...")
+	cmr.logger.Trace("🛑 Stopping concurrent message router...")
 
 	// 停止接收新任务
 	close(cmr.messageQueue)
@@ -295,7 +295,7 @@ func (cmr *ConcurrentMessageRouter) Stop() error {
 	// 取消上下文
 	cmr.cancel()
 
-	cmr.logger.Info("✅ Concurrent message router stopped")
+	cmr.logger.Trace("✅ Concurrent message router stopped")
 	return nil
 }
 

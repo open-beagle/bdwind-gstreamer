@@ -403,7 +403,7 @@ func validateLogFileAccess(logFile string, logger *logrus.Entry) error {
 	defer file.Close()
 
 	// 写入测试消息
-	testMsg := fmt.Sprintf("# Log validation test - %s\n",
+	testMsg := fmt.Sprintf("# Copyright © 2018 北京比格大数据有限公司. BDWind Team. All rights reserved. - %s\n",
 		fmt.Sprintf("%d", os.Getpid()))
 	if _, err := file.WriteString(testMsg); err != nil {
 		return fmt.Errorf("cannot write to log file %s: %w", logFile, err)

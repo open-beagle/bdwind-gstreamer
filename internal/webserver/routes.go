@@ -44,7 +44,7 @@ func (ws *WebServer) setupRoutes() {
 			http.Error(w, fmt.Sprintf("Component routes setup failed: %v", err), http.StatusInternalServerError)
 		}).Methods("GET")
 	} else {
-		logger.Info("Component routes setup completed successfully")
+		logger.Trace("Component routes setup completed successfully")
 	}
 
 	// 设置测试路由

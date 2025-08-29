@@ -161,7 +161,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 
 	m.running = false
-	m.logger.Info("Webserver manager stopped successfully")
+	m.logger.Trace("Webserver manager stopped successfully")
 	return nil
 }
 

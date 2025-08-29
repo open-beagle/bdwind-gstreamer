@@ -342,7 +342,7 @@ func (s *SignalingServer) Start() {
 			s.broadcastMessage(message)
 
 		case <-s.ctx.Done():
-			s.logger.Infof("🛑 Signaling server received shutdown signal")
+			s.logger.Trace("🛑 Signaling server received shutdown signal")
 			s.Stop()
 			return
 		}
@@ -351,14 +351,19 @@ func (s *SignalingServer) Start() {
 
 // Stop 停止信令服务器
 func (s *SignalingServer) Stop() {
-	s.logger.Infof("🛑 Stopping signaling server...")
+	s.logger.Trace("🛑 Stopping signaling server...")
 	s.running = false
 	s.cancel()
 
 	// 停止并发消息路由器
 	if s.concurrentRouter != nil {
 		if err := s.concurrentRouter.Stop(); err != nil {
-			s.logger.Infof("❌ Error stopping concurrent router: %v", err)
+			// 如果concurrent router没有运行，这是正常状态，不应该作为错误记录
+			if err.Error() == "concurrent router is not running" {
+				s.logger.Tracef("Concurrent router was not running, no action needed")
+			} else {
+				s.logger.Warnf("Error stopping concurrent router: %v", err)
+			}
 		} else {
 			s.logger.Tracef("✅ Concurrent message router stopped")
 		}
@@ -717,7 +722,7 @@ func (s *SignalingServer) cleanupRoutine() {
 		case <-ticker.C:
 			s.cleanupExpiredClients()
 		case <-s.ctx.Done():
-			s.logger.Infof("Signaling server cleanup routine shutting down")
+			s.logger.Trace("Signaling server cleanup routine shutting down")
 			return
 		}
 	}

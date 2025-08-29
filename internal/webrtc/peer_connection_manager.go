@@ -272,7 +272,7 @@ func (pcm *PeerConnectionManager) startCleanupRoutine() {
 				pcm.performHealthCheck()
 				pcm.cleanupUnhealthyConnections()
 			case <-pcm.ctx.Done():
-				pcm.logger.Info("PeerConnection manager cleanup routine shutting down")
+				pcm.logger.Trace("PeerConnection manager cleanup routine shutting down")
 				return
 			}
 		}
@@ -989,10 +989,10 @@ func (pcm *PeerConnectionManager) Close() error {
 
 	for clientID, info := range pcm.connections {
 		info.PC.Close()
-		pcm.logger.Infof("Closed peer connection for client %s", clientID)
+		pcm.logger.Tracef("Closed peer connection for client %s", clientID)
 	}
 
 	pcm.connections = make(map[string]*PeerConnectionInfo)
-	pcm.logger.Info("PeerConnection manager closed")
+	pcm.logger.Trace("PeerConnection manager closed")
 	return nil
 }

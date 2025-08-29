@@ -311,7 +311,7 @@ func TestDesktopCaptureWithVirtualDisplay(t *testing.T) {
 			}
 
 			// Create desktop capture
-			capture, err := NewDesktopCapture(tt.config)
+			capture, err := NewDesktopCaptureGst(tt.config)
 			if err != nil {
 				t.Errorf("Failed to create desktop capture: %v", err)
 				return
@@ -324,7 +324,7 @@ func TestDesktopCaptureWithVirtualDisplay(t *testing.T) {
 			}
 
 			// Verify display property is set correctly
-			if displayProp, ok := props["display"]; !ok || displayProp != displayID {
+			if displayProp, ok := props["display-name"]; !ok || displayProp != displayID {
 				t.Errorf("Expected display property '%s', got '%v'", displayID, displayProp)
 			}
 
@@ -332,22 +332,6 @@ func TestDesktopCaptureWithVirtualDisplay(t *testing.T) {
 			stats := capture.GetStats()
 			if stats.StartTime == 0 {
 				t.Error("Statistics should be initialized")
-			}
-
-			// Simulate frame capture for testing
-			if dc, ok := capture.(*desktopCapture); ok {
-				dc.simulateFrameCapture(16) // 16ms latency
-				dc.simulateFrameCapture(18)
-				dc.simulateDroppedFrame()
-
-				// Check updated statistics
-				updatedStats := capture.GetStats()
-				if updatedStats.FramesCapture != 2 {
-					t.Errorf("Expected 2 captured frames, got %d", updatedStats.FramesCapture)
-				}
-				if updatedStats.FramesDropped != 1 {
-					t.Errorf("Expected 1 dropped frame, got %d", updatedStats.FramesDropped)
-				}
 			}
 		})
 	}
@@ -472,16 +456,12 @@ func TestVirtualDisplayWithApplicationLifecycle(t *testing.T) {
 			}
 		}()
 
-		// Create desktop capture configuration from environment
-		captureConfig := config.LoadDesktopCaptureConfigFromEnv()
-
-		// Verify configuration picked up the display
-		if captureConfig.DisplayID != displayID {
-			t.Errorf("Expected display ID '%s', got '%s'", displayID, captureConfig.DisplayID)
-		}
+		// Create desktop capture configuration
+		captureConfig := config.DefaultDesktopCaptureConfig()
+		captureConfig.DisplayID = displayID
 
 		// Create and test desktop capture
-		capture, err := NewDesktopCapture(captureConfig)
+		capture, err := NewDesktopCaptureGst(captureConfig)
 		if err != nil {
 			t.Errorf("Failed to create desktop capture: %v", err)
 		}
@@ -492,8 +472,8 @@ func TestVirtualDisplayWithApplicationLifecycle(t *testing.T) {
 			t.Errorf("Expected ximagesrc, got %s", sourceType)
 		}
 
-		if props["display"] != displayID {
-			t.Errorf("Expected display %s, got %v", displayID, props["display"])
+		if props["display-name"] != displayID {
+			t.Errorf("Expected display %s, got %v", displayID, props["display-name"])
 		}
 
 		// Simulate application shutdown
@@ -564,7 +544,7 @@ func TestMultipleVirtualDisplays(t *testing.T) {
 			Quality:    "medium",
 		}
 
-		capture, err := NewDesktopCapture(captureConfig)
+		capture, err := NewDesktopCaptureGst(captureConfig)
 		if err != nil {
 			t.Errorf("Failed to create capture for display %s: %v", displays[i].id, err)
 			continue

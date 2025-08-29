@@ -177,7 +177,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	m.logger.Debug("Stopping metrics manager...")
+	m.logger.Trace("Stopping metrics manager...")
 
 	// 取消context以通知所有子组件停止
 	if m.cancel != nil {
@@ -216,7 +216,6 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return errors[0]
 	}
 
-	m.logger.Info("Metrics manager stopped successfully")
 	return nil
 }
 

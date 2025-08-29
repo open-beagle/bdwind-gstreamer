@@ -1,341 +1,503 @@
 package gstreamer
 
-/*
-#cgo pkg-config: gstreamer-1.0
-#include <gst/gst.h>
-#include <glib.h>
-#include <stdlib.h>
-
-// Helper function to get element factory metadata
-static const gchar* element_factory_get_metadata(GstElementFactory *factory, const gchar *key) {
-    return gst_element_factory_get_metadata(factory, key);
-}
-
-// Helper function to get element factory klass
-static const gchar* element_factory_get_klass(GstElementFactory *factory) {
-    return gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_KLASS);
-}
-
-// Helper function to get element factory description
-static const gchar* element_factory_get_description(GstElementFactory *factory) {
-    return gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_DESCRIPTION);
-}
-
-// Helper function to get element factory author
-static const gchar* element_factory_get_author(GstElementFactory *factory) {
-    return gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_AUTHOR);
-}
-
-// Helper function to get element factory long name
-static const gchar* element_factory_get_longname(GstElementFactory *factory) {
-    return gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_LONGNAME);
-}
-
-// Helper function to get plugin feature name
-static const gchar* plugin_feature_get_name(GstPluginFeature *feature) {
-    return gst_plugin_feature_get_name(feature);
-}
-
-// Helper function to get plugin feature rank
-static guint plugin_feature_get_rank(GstPluginFeature *feature) {
-    return gst_plugin_feature_get_rank(feature);
-}
-
-// Helper function to get element state
-static GstStateChangeReturn element_get_state(GstElement *element, GstState *state, GstState *pending, GstClockTime timeout) {
-    return gst_element_get_state(element, state, pending, timeout);
-}
-
-// Helper function to send event to element
-static gboolean element_send_event(GstElement *element, GstEvent *event) {
-    return gst_element_send_event(element, event);
-}
-
-// Helper function to query element
-static gboolean element_query(GstElement *element, GstQuery *query) {
-    return gst_element_query(element, query);
-}
-
-// Helper function to get element factory
-static GstElementFactory* element_get_factory(GstElement *element) {
-    return gst_element_get_factory(element);
-}
-
-// Helper function to create element from factory
-static GstElement* element_factory_create(GstElementFactory *factory, const gchar *name) {
-    return gst_element_factory_create(factory, name);
-}
-
-// Helper function to find element factory
-static GstElementFactory* element_factory_find(const gchar *name) {
-    return gst_element_factory_find(name);
-}
-
-// Helper function to list element factories
-static GList* registry_get_element_factories() {
-    GstRegistry *registry = gst_registry_get();
-    return gst_registry_get_feature_list(registry, GST_TYPE_ELEMENT_FACTORY);
-}
-*/
-import "C"
 import (
-	"errors"
 	"fmt"
-	"strings"
-	"unsafe"
+	"reflect"
+	"time"
+
+	"github.com/go-gst/go-gst/gst"
+	"github.com/sirupsen/logrus"
 )
 
-// ElementInfo contains information about a GStreamer element
-type ElementInfo struct {
-	Name        string
-	LongName    string
-	ClassName   string
-	Description string
-	Author      string
-	Rank        int
+// Element interface provides a common interface for GStreamer elements
+type Element interface {
+	SetProperty(name string, value interface{}) error
+	GetProperty(name string) (interface{}, error)
+	Link(sink Element) error
+	GetStaticPad(name string) (Pad, error)
 }
 
-// ElementFactory represents a GStreamer element factory
-type ElementFactory interface {
-	// GetName gets the factory name
+// Pad interface provides a common interface for GStreamer pads
+type Pad interface {
 	GetName() string
-
-	// GetLongName gets the factory long name
-	GetLongName() string
-
-	// GetClassName gets the factory class name
-	GetClassName() string
-
-	// GetDescription gets the factory description
-	GetDescription() string
-
-	// GetAuthor gets the factory author
-	GetAuthor() string
-
-	// GetRank gets the factory rank
-	GetRank() int
-
-	// CreateElement creates an element from the factory
-	CreateElement(name string) (Element, error)
+	GetDirection() string
 }
 
-// Implementation of the ElementFactory interface
-type elementFactory struct {
-	factory *C.GstElementFactory
+// CaptureStats holds statistics for desktop capture
+type CaptureStats struct {
+	FramesTotal    int64
+	FramesCapture  int64
+	FramesDropped  int64
+	CurrentFPS     float64
+	AverageFPS     float64
+	CaptureLatency int64
+	MinLatency     int64
+	MaxLatency     int64
+	AvgLatency     int64
+	LastFrameTime  int64
+	StartTime      int64
+	BytesProcessed int64
+	ErrorCount     int64
+	UptimeSeconds  float64
 }
 
-// GetName gets the factory name
-func (f *elementFactory) GetName() string {
-	if f.factory == nil {
-		return ""
-	}
-
-	return C.GoString(C.plugin_feature_get_name((*C.GstPluginFeature)(unsafe.Pointer(f.factory))))
+// EncoderStats holds statistics for encoder
+type EncoderStats struct {
+	FramesEncoded    int64
+	KeyframesEncoded int64
+	FramesDropped    int64
+	DropFrames       int64
+	BytesEncoded     int64
+	EncodingLatency  int64
+	CurrentBitrate   int64
+	TargetBitrate    int64
+	AverageBitrate   int64
+	EncodingFPS      float64
+	ErrorCount       int64
+	StartTime        int64
+	LastUpdate       int64
 }
 
-// GetLongName gets the factory long name
-func (f *elementFactory) GetLongName() string {
-	if f.factory == nil {
-		return ""
-	}
-
-	return C.GoString(C.element_factory_get_longname(f.factory))
-}
-
-// GetClassName gets the factory class name
-func (f *elementFactory) GetClassName() string {
-	if f.factory == nil {
-		return ""
-	}
-
-	return C.GoString(C.element_factory_get_klass(f.factory))
-}
-
-// GetDescription gets the factory description
-func (f *elementFactory) GetDescription() string {
-	if f.factory == nil {
-		return ""
-	}
-
-	return C.GoString(C.element_factory_get_description(f.factory))
-}
-
-// GetAuthor gets the factory author
-func (f *elementFactory) GetAuthor() string {
-	if f.factory == nil {
-		return ""
-	}
-
-	return C.GoString(C.element_factory_get_author(f.factory))
-}
-
-// GetRank gets the factory rank
-func (f *elementFactory) GetRank() int {
-	if f.factory == nil {
-		return 0
-	}
-
-	return int(C.plugin_feature_get_rank((*C.GstPluginFeature)(unsafe.Pointer(f.factory))))
-}
-
-// CreateElement creates an element from the factory
-func (f *elementFactory) CreateElement(name string) (Element, error) {
-	if f.factory == nil {
-		return nil, ErrElementFactoryNotAvailable
-	}
-
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
-
-	elem := C.element_factory_create(f.factory, cName)
-	if elem == nil {
-		return nil, fmt.Errorf("%w: %s", ErrElementNotFound, name)
-	}
-
-	return &element{elem: elem}, nil
-}
-
-// FindElementFactory finds an element factory by name
-func FindElementFactory(name string) (ElementFactory, error) {
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
-
-	factory := C.element_factory_find(cName)
-	if factory == nil {
-		return nil, fmt.Errorf("%w: %s", ErrElementFactoryNotAvailable, name)
-	}
-
-	return &elementFactory{factory: factory}, nil
-}
-
-// ListElementFactories lists all available element factories
-func ListElementFactories() []ElementInfo {
-	factories := C.registry_get_element_factories()
-	if factories == nil {
-		return nil
-	}
-	defer C.g_list_free(factories)
-
-	var result []ElementInfo
-	for item := factories; item != nil; item = item.next {
-		factory := (*C.GstElementFactory)(unsafe.Pointer(item.data))
-		if factory == nil {
-			continue
-		}
-
-		info := ElementInfo{
-			Name:        C.GoString(C.plugin_feature_get_name((*C.GstPluginFeature)(unsafe.Pointer(factory)))),
-			LongName:    C.GoString(C.element_factory_get_longname(factory)),
-			ClassName:   C.GoString(C.element_factory_get_klass(factory)),
-			Description: C.GoString(C.element_factory_get_description(factory)),
-			Author:      C.GoString(C.element_factory_get_author(factory)),
-			Rank:        int(C.plugin_feature_get_rank((*C.GstPluginFeature)(unsafe.Pointer(factory)))),
-		}
-
-		result = append(result, info)
-	}
-
-	return result
-}
-
-// FindElementFactoriesByClass finds element factories by class
-func FindElementFactoriesByClass(className string) []ElementInfo {
-	factories := ListElementFactories()
-	var result []ElementInfo
-
-	for _, factory := range factories {
-		if strings.Contains(strings.ToLower(factory.ClassName), strings.ToLower(className)) {
-			result = append(result, factory)
-		}
-	}
-
-	return result
-}
-
-// ElementState represents the state of a GStreamer element
-type ElementState int
+// PipelineState represents the state of a GStreamer pipeline
+type PipelineState int
 
 const (
-	ElementStateVoidPending ElementState = -1
-	ElementStateNull        ElementState = 0
-	ElementStateReady       ElementState = 1
-	ElementStatePaused      ElementState = 2
-	ElementStatePlaying     ElementState = 3
+	PipelineStateNull PipelineState = iota
+	PipelineStateReady
+	PipelineStatePaused
+	PipelineStatePlaying
+	StateNull = PipelineStateNull // Alias for compatibility
 )
 
-// GetElementState gets the state of an element
-func GetElementState(e Element) (ElementState, error) {
-	elem, ok := e.(*element)
-	if !ok {
-		return ElementStateNull, errors.New("invalid element type")
-	}
-
-	if elem.elem == nil {
-		return ElementStateNull, ErrElementNotFound
-	}
-
-	var state, pending C.GstState
-	var timeout C.GstClockTime = 0 // Immediate query
-
-	ret := C.element_get_state(elem.elem, &state, &pending, timeout)
-	if ret == C.GST_STATE_CHANGE_FAILURE {
-		return ElementStateNull, ErrInvalidState
-	}
-
-	return ElementState(state), nil
+// StateTransition represents a pipeline state transition
+type StateTransition struct {
+	From     PipelineState
+	To       PipelineState
+	Duration time.Duration
+	Success  bool
+	Error    error
 }
 
-// SendEvent sends an event to an element
-func SendEvent(e Element, eventType string) error {
-	elem, ok := e.(*element)
-	if !ok {
-		return errors.New("invalid element type")
-	}
+// ErrorType represents different types of errors
+type ErrorType int
 
-	if elem.elem == nil {
-		return ErrElementNotFound
-	}
+const (
+	ErrorTypeGeneral ErrorType = iota
+	ErrorTypePipeline
+	ErrorTypeElement
+	ErrorTypeResource
+	ErrorStateChange
+	ErrorElementFailure
+	ErrorResourceUnavailable
+	ErrorFormatNegotiation
+	ErrorTimeout
+	ErrorPermission
+	ErrorMemoryExhaustion
+	ErrorNetwork
+	ErrorHardware
+	ErrorUnknown
+)
 
-	var event *C.GstEvent
+// HealthStatusLevel represents the health status level
+type HealthStatusLevel int
 
-	switch eventType {
-	case "eos":
-		event = C.gst_event_new_eos()
-	case "flush-start":
-		event = C.gst_event_new_flush_start()
-	case "flush-stop":
-		event = C.gst_event_new_flush_stop(1) // Reset time
+const (
+	HealthStatusHealthy HealthStatusLevel = iota
+	HealthStatusWarning
+	HealthStatusError
+	HealthStatusCritical
+)
+
+// String returns the string representation of HealthStatusLevel
+func (hsl HealthStatusLevel) String() string {
+	switch hsl {
+	case HealthStatusHealthy:
+		return "Healthy"
+	case HealthStatusWarning:
+		return "Warning"
+	case HealthStatusError:
+		return "Error"
+	case HealthStatusCritical:
+		return "Critical"
 	default:
-		return fmt.Errorf("unsupported event type: %s", eventType)
+		return "Unknown"
+	}
+}
+
+// HealthStatus represents the health status of a component
+type HealthStatus struct {
+	Overall   HealthStatusLevel
+	LastCheck int64
+	Uptime    int64
+	Issues    []string
+	Checks    map[string]interface{}
+}
+
+// DesktopCapture interface for desktop capture functionality
+type DesktopCapture interface {
+	Start() error
+	Stop() error
+	IsRunning() bool
+	GetStats() CaptureStats
+	SetSampleCallback(callback func(*Sample) error) error
+	GetSampleChannel() <-chan *Sample
+	GetErrorChannel() <-chan error
+	GetSource() (string, map[string]interface{})
+	GetAppsink() Element
+	SetFrameRate(frameRate int) error
+}
+
+// PadAddedCallback is a callback function for pad-added signals
+type PadAddedCallback func(element *gst.Element, pad *gst.Pad)
+
+// ErrorEvent represents an error event
+type ErrorEvent struct {
+	Type      ErrorType
+	Message   string
+	Timestamp int64
+	Component string
+}
+
+// MediaFormat represents media format information
+type MediaFormat struct {
+	MediaType string
+	Width     int
+	Height    int
+	FrameRate float64
+}
+
+// C is a placeholder for CGO functionality (not used in go-gst implementation)
+var C struct{}
+
+// ElementFactory provides a high-level interface for creating and configuring GStreamer elements
+type ElementFactory struct {
+	logger *logrus.Entry
+}
+
+// NewElementFactory creates a new element factory
+func NewElementFactory() *ElementFactory {
+	return &ElementFactory{
+		logger: logrus.WithField("component", "element-factory"),
+	}
+}
+
+// ElementConfig holds configuration for an element
+type ElementConfig struct {
+	Name       string
+	Factory    string
+	Properties map[string]interface{}
+}
+
+// CreateElement creates a new GStreamer element with the specified factory name
+func (ef *ElementFactory) CreateElement(factory string) (*gst.Element, error) {
+	element, err := gst.NewElement(factory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create element with factory '%s': %w", factory, err)
 	}
 
-	if event == nil {
-		return fmt.Errorf("failed to create event: %s", eventType)
+	ef.logger.Debugf("Created element with factory '%s'", factory)
+	return element, nil
+}
+
+// CreateElementWithName creates a new GStreamer element with factory and name
+func (ef *ElementFactory) CreateElementWithName(factory, name string) (*gst.Element, error) {
+	element, err := ef.CreateElement(factory)
+	if err != nil {
+		return nil, err
 	}
 
-	ret := C.element_send_event(elem.elem, event)
-	if ret == 0 {
-		return fmt.Errorf("failed to send event: %s", eventType)
+	err = element.SetProperty("name", name)
+	if err != nil {
+		element.Unref()
+		return nil, fmt.Errorf("failed to set name '%s' on element: %w", name, err)
+	}
+	ef.logger.Debugf("Created element '%s' with factory '%s'", name, factory)
+	return element, nil
+}
+
+// CreateConfiguredElement creates and configures an element based on ElementConfig
+func (ef *ElementFactory) CreateConfiguredElement(config ElementConfig) (*gst.Element, error) {
+	element, err := ef.CreateElementWithName(config.Factory, config.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ef.ConfigureElement(element, config.Properties); err != nil {
+		element.Unref()
+		return nil, fmt.Errorf("failed to configure element '%s': %w", config.Name, err)
+	}
+
+	return element, nil
+}
+
+// ConfigureElement sets properties on an element
+func (ef *ElementFactory) ConfigureElement(element *gst.Element, properties map[string]interface{}) error {
+	if properties == nil {
+		return nil
+	}
+
+	for key, value := range properties {
+		if err := ef.SetElementProperty(element, key, value); err != nil {
+			return fmt.Errorf("failed to set property '%s': %w", key, err)
+		}
 	}
 
 	return nil
 }
 
-// GetElementFactory gets the factory of an element
-func GetElementFactory(e Element) (ElementFactory, error) {
-	elem, ok := e.(*element)
-	if !ok {
-		return nil, errors.New("invalid element type")
+// SetElementProperty sets a single property on an element with type safety
+func (ef *ElementFactory) SetElementProperty(element *gst.Element, name string, value interface{}) error {
+	// Convert Go types to GStreamer-compatible types
+	gstValue, err := ef.convertToGstValue(value)
+	if err != nil {
+		return fmt.Errorf("failed to convert value for property '%s': %w", name, err)
 	}
 
-	if elem.elem == nil {
-		return nil, ErrElementNotFound
+	err = element.SetProperty(name, gstValue)
+	if err != nil {
+		return fmt.Errorf("failed to set property '%s' on element '%s': %w", name, element.GetName(), err)
+	}
+	ef.logger.Debugf("Set property '%s' = %v on element '%s'", name, value, element.GetName())
+	return nil
+}
+
+// GetElementProperty gets a property value from an element
+func (ef *ElementFactory) GetElementProperty(element *gst.Element, name string) (interface{}, error) {
+	value, err := element.GetProperty(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get property '%s' from element '%s': %w", name, element.GetName(), err)
 	}
 
-	factory := C.element_get_factory(elem.elem)
-	if factory == nil {
-		return nil, ErrElementFactoryNotAvailable
+	ef.logger.Debugf("Got property '%s' = %v from element '%s'", name, value, element.GetName())
+	return value, nil
+}
+
+// convertToGstValue converts Go types to GStreamer-compatible values
+func (ef *ElementFactory) convertToGstValue(value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
 	}
 
-	return &elementFactory{factory: factory}, nil
+	switch v := value.(type) {
+	case string, int, int32, int64, uint, uint32, uint64, float32, float64, bool:
+		return v, nil
+	default:
+		// Try to handle other types through reflection
+		rv := reflect.ValueOf(value)
+		switch rv.Kind() {
+		case reflect.String:
+			return rv.String(), nil
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return rv.Int(), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return rv.Uint(), nil
+		case reflect.Float32, reflect.Float64:
+			return rv.Float(), nil
+		case reflect.Bool:
+			return rv.Bool(), nil
+		default:
+			return nil, fmt.Errorf("unsupported property type: %T", value)
+		}
+	}
+}
+
+// IsElementAvailable checks if an element factory is available
+func (ef *ElementFactory) IsElementAvailable(factory string) bool {
+	elementFactory := gst.Find(factory)
+	available := elementFactory != nil
+
+	ef.logger.Debugf("Element factory '%s' availability: %t", factory, available)
+	return available
+}
+
+// GetElementFactoryInfo returns information about an element factory
+func (ef *ElementFactory) GetElementFactoryInfo(factory string) (*ElementFactoryInfo, error) {
+	elementFactory := gst.Find(factory)
+	if elementFactory == nil {
+		return nil, fmt.Errorf("element factory '%s' not found", factory)
+	}
+
+	info := &ElementFactoryInfo{
+		Name:        elementFactory.GetName(),
+		LongName:    elementFactory.GetMetadata("long-name"),
+		Description: elementFactory.GetMetadata("description"),
+		Author:      elementFactory.GetMetadata("author"),
+		Rank:        0, // Rank is not easily accessible in go-gst
+	}
+
+	return info, nil
+}
+
+// ElementFactoryInfo contains information about an element factory
+type ElementFactoryInfo struct {
+	Name        string
+	LongName    string
+	Description string
+	Author      string
+	Rank        uint
+}
+
+// CreateVideoSource creates a video source element based on the source type
+func (ef *ElementFactory) CreateVideoSource(sourceType VideoSourceType, config map[string]interface{}) (*gst.Element, error) {
+	var factory string
+
+	switch sourceType {
+	case VideoSourceX11:
+		factory = "ximagesrc"
+	case VideoSourceWayland:
+		factory = "waylandsink"
+	case VideoSourceTest:
+		factory = "videotestsrc"
+	case VideoSourceV4L2:
+		factory = "v4l2src"
+	default:
+		return nil, fmt.Errorf("unsupported video source type: %v", sourceType)
+	}
+
+	if !ef.IsElementAvailable(factory) {
+		return nil, fmt.Errorf("video source factory '%s' is not available", factory)
+	}
+
+	element, err := ef.CreateElement(factory)
+	if err != nil {
+		return nil, err
+	}
+
+	if config != nil {
+		if err := ef.ConfigureElement(element, config); err != nil {
+			element.Unref()
+			return nil, err
+		}
+	}
+
+	return element, nil
+}
+
+// CreateVideoEncoder creates a video encoder element with fallback support
+func (ef *ElementFactory) CreateVideoEncoder(codec VideoCodec, useHardware bool) (*gst.Element, error) {
+	factories := ef.getEncoderFactories(codec, useHardware)
+
+	for _, factory := range factories {
+		if ef.IsElementAvailable(factory) {
+			element, err := ef.CreateElement(factory)
+			if err != nil {
+				ef.logger.Warnf("Failed to create encoder '%s': %v", factory, err)
+				continue
+			}
+
+			ef.logger.Infof("Created video encoder: %s", factory)
+			return element, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no suitable video encoder found for codec %v (hardware: %t)", codec, useHardware)
+}
+
+// getEncoderFactories returns a prioritized list of encoder factories
+func (ef *ElementFactory) getEncoderFactories(codec VideoCodec, useHardware bool) []string {
+	var factories []string
+
+	switch codec {
+	case VideoCodecH264:
+		if useHardware {
+			factories = append(factories, "nvh264enc", "vaapih264enc", "qsvh264enc")
+		}
+		factories = append(factories, "x264enc", "openh264enc")
+	case VideoCodecH265:
+		if useHardware {
+			factories = append(factories, "nvh265enc", "vaapih265enc", "qsvh265enc")
+		}
+		factories = append(factories, "x265enc")
+	case VideoCodecVP8:
+		if useHardware {
+			factories = append(factories, "vaapivp8enc")
+		}
+		factories = append(factories, "vp8enc")
+	case VideoCodecVP9:
+		if useHardware {
+			factories = append(factories, "vaapivp9enc")
+		}
+		factories = append(factories, "vp9enc")
+	}
+
+	return factories
+}
+
+// VideoSourceType represents different video source types
+type VideoSourceType int
+
+const (
+	VideoSourceX11 VideoSourceType = iota
+	VideoSourceWayland
+	VideoSourceTest
+	VideoSourceV4L2
+)
+
+// VideoCodec represents different video codecs
+type VideoCodec int
+
+const (
+	VideoCodecH264 VideoCodec = iota
+	VideoCodecH265
+	VideoCodecVP8
+	VideoCodecVP9
+)
+
+// CreateAppSink creates an appsink element with common configuration
+func (ef *ElementFactory) CreateAppSink(config map[string]interface{}) (*gst.Element, error) {
+	element, err := ef.CreateElement("appsink")
+	if err != nil {
+		return nil, err
+	}
+
+	// Set default appsink properties
+	defaultConfig := map[string]interface{}{
+		"emit-signals": true,
+		"sync":         false,
+		"max-buffers":  1,
+		"drop":         true,
+	}
+
+	// Merge with user config
+	if config != nil {
+		for k, v := range config {
+			defaultConfig[k] = v
+		}
+	}
+
+	if err := ef.ConfigureElement(element, defaultConfig); err != nil {
+		element.Unref()
+		return nil, err
+	}
+
+	return element, nil
+}
+
+// CreateAppSrc creates an appsrc element with common configuration
+func (ef *ElementFactory) CreateAppSrc(config map[string]interface{}) (*gst.Element, error) {
+	element, err := ef.CreateElement("appsrc")
+	if err != nil {
+		return nil, err
+	}
+
+	// Set default appsrc properties
+	defaultConfig := map[string]interface{}{
+		"is-live":      true,
+		"format":       gst.FormatTime,
+		"do-timestamp": true,
+	}
+
+	// Merge with user config
+	if config != nil {
+		for k, v := range config {
+			defaultConfig[k] = v
+		}
+	}
+
+	if err := ef.ConfigureElement(element, defaultConfig); err != nil {
+		element.Unref()
+		return nil, err
+	}
+
+	return element, nil
 }
