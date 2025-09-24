@@ -1,0 +1,514 @@
+package gstreamer
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"runtime"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestLongRunningStability24Hours 24小时长时间运行稳定性测试
+func TestLongRunningStability24Hours(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping long-running stability test in short mode")
+	}
+
+	// 检查环境变量，允许自定义测试时长
+	duration := 24 * time.Hour
+	if durationStr := os.Getenv("STABILITY_TEST_DURATION"); durationStr != "" {
+		if customDuration, err := time.ParseDuration(durationStr); err == nil {
+			duration = customDuration
+		}
+	}
+
+	config := &StabilityTestConfig{
+		Duration:             duration,
+		MemoryCheckInterval:  5 * time.Minute,
+		LoadTestInterval:     30 * time.Minute,
+		ErrorInjectionRate:   0.01, // 1% 错误率
+		MaxMemoryGrowthMB:    100,  // 最大100MB内存增长
+		MaxGoroutines:        1000, // 最大1000个协程
+		HighLoadDuration:     10 * time.Minute,
+		RecoveryTestInterval: 1 * time.Hour,
+	}
+
+	stabilityTest := NewLongRunningStabilityTest(config)
+
+	// 启动稳定性测试
+	err := stabilityTest.Start(t)
+	require.NoError(t, err, "Stability test should complete without errors")
+
+	// 验证测试结果
+	metrics := stabilityTest.metrics
+
+	// 验证内存稳定性
+	assert.LessOrEqual(t, metrics.MemoryLeaks, int64(5),
+		"Memory leaks should be minimal (≤5)")
+	assert.LessOrEqual(t, metrics.MaxMemoryUsageMB-metrics.MinMemoryUsageMB, int64(200),
+		"Memory usage variation should be reasonable (≤200MB)")
+
+	// 验证协程稳定性
+	assert.LessOrEqual(t, metrics.GoroutineLeaks, int64(10),
+		"Goroutine leaks should be minimal (≤10)")
+
+	// 验证错误恢复
+	if metrics.ErrorsInjected > 0 {
+		recoveryRate := float64(metrics.ErrorsRecovered) / float64(metrics.ErrorsInjected)
+		assert.GreaterOrEqual(t, recoveryRate, 0.95,
+			"Error recovery rate should be ≥95%")
+	}
+
+	// 验证高负载处理
+	if metrics.HighLoadCycles > 0 {
+		successRate := float64(metrics.SuccessfulCycles) / float64(metrics.HighLoadCycles)
+		assert.GreaterOrEqual(t, successRate, 0.90,
+			"High load success rate should be ≥90%")
+	}
+
+	// 验证系统稳定性
+	assert.LessOrEqual(t, metrics.CrashCount, int64(0),
+		"System should not crash during stability test")
+	assert.LessOrEqual(t, metrics.RestartCount, int64(5),
+		"Restart count should be minimal (≤5)")
+
+	t.Logf("Stability test completed successfully:\n%s", metrics.GetSummary())
+}
+
+// TestHighLoadStability 高负载稳定性测试
+func TestHighLoadStability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping high load stability test in short mode")
+	}
+
+	config := &StabilityTestConfig{
+		Duration:             2 * time.Hour, // 2小时高负载测试
+		MemoryCheckInterval:  1 * time.Minute,
+		LoadTestInterval:     5 * time.Minute,  // 更频繁的负载测试
+		ErrorInjectionRate:   0.05,             // 5% 错误率，更高压力
+		MaxMemoryGrowthMB:    150,              // 允许更多内存增长
+		MaxGoroutines:        2000,             // 允许更多协程
+		HighLoadDuration:     15 * time.Minute, // 更长的高负载持续时间
+		RecoveryTestInterval: 30 * time.Minute,
+	}
+
+	stabilityTest := NewLongRunningStabilityTest(config)
+
+	// 启动高负载稳定性测试
+	err := stabilityTest.Start(t)
+	require.NoError(t, err, "High load stability test should complete without errors")
+
+	// 验证高负载下的性能
+	metrics := stabilityTest.metrics
+
+	// 在高负载下，允许更多的内存使用和协程
+	assert.LessOrEqual(t, metrics.MemoryLeaks, int64(10),
+		"Memory leaks under high load should be controlled (≤10)")
+	assert.LessOrEqual(t, metrics.GoroutineLeaks, int64(20),
+		"Goroutine leaks under high load should be controlled (≤20)")
+
+	// 验证高负载处理能力
+	assert.Greater(t, metrics.HighLoadCycles, int64(10),
+		"Should complete multiple high load cycles")
+
+	if metrics.HighLoadCycles > 0 {
+		successRate := float64(metrics.SuccessfulCycles) / float64(metrics.HighLoadCycles)
+		assert.GreaterOrEqual(t, successRate, 0.80,
+			"High load success rate should be ≥80% under stress")
+	}
+
+	t.Logf("High load stability test completed:\n%s", metrics.GetSummary())
+}
+
+// TestMemoryStabilityUnderPressure 内存压力下的稳定性测试
+func TestMemoryStabilityUnderPressure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping memory pressure stability test in short mode")
+	}
+
+	// 创建内存管理器进行测试
+	memManager := NewMemoryManager(nil, nil)
+	require.NotNil(t, memManager, "Memory manager should be created")
+
+	// 记录初始内存状态
+	var initialStats runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&initialStats)
+
+	initialMemoryMB := int64(initialStats.Alloc / 1024 / 1024)
+
+	t.Logf("Initial memory usage: %d MB", initialMemoryMB)
+
+	// 运行内存压力测试
+	const testDuration = 30 * time.Minute
+	const memoryCheckInterval = 30 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
+	defer cancel()
+
+	memoryLeaks := 0
+	maxMemoryGrowth := int64(0)
+
+	ticker := time.NewTicker(memoryCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Logf("Memory pressure test completed after %v", testDuration)
+			goto TestComplete
+		case <-ticker.C:
+			// 创建内存压力
+			err := createMemoryPressure(memManager)
+			require.NoError(t, err, "Memory pressure creation should not fail")
+
+			// 检查内存使用
+			var currentStats runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&currentStats)
+
+			currentMemoryMB := int64(currentStats.Alloc / 1024 / 1024)
+			memoryGrowth := currentMemoryMB - initialMemoryMB
+
+			if memoryGrowth > maxMemoryGrowth {
+				maxMemoryGrowth = memoryGrowth
+			}
+
+			// 检查内存泄漏
+			if memoryGrowth > 200 { // 200MB 阈值
+				memoryLeaks++
+				t.Logf("Memory leak detected: growth = %d MB", memoryGrowth)
+
+				// 强制清理
+				runtime.GC()
+				runtime.GC() // 双重GC确保清理
+			}
+
+			t.Logf("Memory check: current = %d MB, growth = %d MB, max_growth = %d MB",
+				currentMemoryMB, memoryGrowth, maxMemoryGrowth)
+		}
+	}
+
+TestComplete:
+	// 验证内存稳定性
+	assert.LessOrEqual(t, memoryLeaks, 5,
+		"Memory leaks should be minimal under pressure (≤5)")
+	assert.LessOrEqual(t, maxMemoryGrowth, int64(300),
+		"Maximum memory growth should be controlled (≤300MB)")
+
+	// 最终内存检查
+	var finalStats runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&finalStats)
+
+	finalMemoryMB := int64(finalStats.Alloc / 1024 / 1024)
+	finalGrowth := finalMemoryMB - initialMemoryMB
+
+	t.Logf("Final memory usage: %d MB (growth: %d MB)", finalMemoryMB, finalGrowth)
+
+	assert.LessOrEqual(t, finalGrowth, int64(100),
+		"Final memory growth should be reasonable (≤100MB)")
+}
+
+// createMemoryPressure 创建内存压力
+func createMemoryPressure(memManager *MemoryManager) error {
+	// 创建大量对象引用
+	const numObjects = 1000
+	objects := make([]interface{}, numObjects)
+
+	for i := 0; i < numObjects; i++ {
+		// 创建不同大小的对象
+		size := 1024 * (i%100 + 1) // 1KB to 100KB
+		data := make([]byte, size)
+
+		// 填充数据
+		for j := range data {
+			data[j] = byte(i % 256)
+		}
+
+		objects[i] = data
+
+		// 注册到内存管理器
+		if memManager != nil {
+			memManager.RegisterObject(data)
+		}
+	}
+
+	// 模拟处理延迟
+	time.Sleep(time.Millisecond * 100)
+
+	// 清理一半对象
+	for i := 0; i < numObjects/2; i++ {
+		objects[i] = nil
+	}
+
+	// 触发GC
+	runtime.GC()
+
+	return nil
+}
+
+// TestErrorRecoveryMechanisms 错误恢复机制测试
+func TestErrorRecoveryMechanisms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping error recovery test in short mode")
+	}
+
+	// 创建错误管理器
+	errorManager := NewErrorManager(nil, nil)
+	require.NotNil(t, errorManager, "Error manager should be created")
+
+	// 创建状态管理器
+	stateManager := NewStateManager(nil, nil)
+	require.NotNil(t, stateManager, "State manager should be created")
+
+	// 测试各种错误恢复场景
+	errorScenarios := []struct {
+		name          string
+		errorType     GStreamerErrorType
+		shouldRecover bool
+		maxAttempts   int
+	}{
+		{"encoding_error", ErrorTypeEncoding, true, 3},
+		{"network_error", ErrorTypeNetwork, true, 5},
+		{"resource_error", ErrorTypeResourceAccess, true, 2},
+		{"memory_error", ErrorTypeMemoryAllocation, true, 1},
+		{"configuration_error", ErrorTypeConfiguration, false, 1},
+		{"system_error", ErrorTypeSystem, false, 1},
+	}
+
+	for _, scenario := range errorScenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			// 测试错误恢复
+			recovered := false
+			attempts := 0
+
+			for attempts < scenario.maxAttempts {
+				attempts++
+
+				// 尝试恢复
+				if err := simulateErrorRecovery(scenario.errorType, attempts); err == nil {
+					recovered = true
+					break
+				}
+
+				time.Sleep(time.Millisecond * 100) // 恢复延迟
+			}
+
+			if scenario.shouldRecover {
+				assert.True(t, recovered,
+					"Error type %s should be recoverable", scenario.name)
+				assert.LessOrEqual(t, attempts, scenario.maxAttempts,
+					"Recovery should succeed within max attempts")
+			}
+
+			t.Logf("Error recovery test for %s: recovered=%v, attempts=%d",
+				scenario.name, recovered, attempts)
+		})
+	}
+}
+
+// simulateErrorRecovery 模拟错误恢复
+func simulateErrorRecovery(errorType GStreamerErrorType, attempt int) error {
+	// 模拟不同类型错误的恢复逻辑
+	switch errorType {
+	case ErrorTypeEncoding:
+		// 编码错误通常在第2次尝试后恢复
+		if attempt >= 2 {
+			return nil
+		}
+		return fmt.Errorf("encoding recovery attempt %d failed", attempt)
+
+	case ErrorTypeNetwork:
+		// 网络错误通常在第3次尝试后恢复
+		if attempt >= 3 {
+			return nil
+		}
+		return fmt.Errorf("network recovery attempt %d failed", attempt)
+
+	case ErrorTypeResourceAccess:
+		// 资源错误通常在第1次尝试后恢复
+		if attempt >= 1 {
+			return nil
+		}
+		return fmt.Errorf("resource recovery attempt %d failed", attempt)
+
+	case ErrorTypeMemoryAllocation:
+		// 内存错误通常立即恢复（通过GC）
+		runtime.GC()
+		return nil
+
+	case ErrorTypeConfiguration:
+		// 配置错误通常不能自动恢复
+		return fmt.Errorf("configuration error cannot be auto-recovered")
+
+	case ErrorTypeSystem:
+		// 系统错误通常不能自动恢复
+		return fmt.Errorf("system error cannot be auto-recovered")
+
+	default:
+		return fmt.Errorf("unknown error type")
+	}
+}
+
+// TestConcurrentStabilityUnderLoad 并发负载下的稳定性测试
+func TestConcurrentStabilityUnderLoad(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping concurrent stability test in short mode")
+	}
+
+	const (
+		testDuration = 1 * time.Hour
+		numWorkers   = 20
+		workInterval = 100 * time.Millisecond
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
+	defer cancel()
+
+	// 创建工作协程
+	workerErrors := make(chan error, numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			defer func() {
+				if r := recover(); r != nil {
+					workerErrors <- fmt.Errorf("worker %d panicked: %v", workerID, r)
+				}
+			}()
+
+			ticker := time.NewTicker(workInterval)
+			defer ticker.Stop()
+
+			workCount := 0
+			for {
+				select {
+				case <-ctx.Done():
+					t.Logf("Worker %d completed %d work units", workerID, workCount)
+					return
+				case <-ticker.C:
+					// 模拟工作负载
+					if err := simulateWork(workerID, workCount); err != nil {
+						workerErrors <- fmt.Errorf("worker %d work failed: %v", workerID, err)
+						return
+					}
+					workCount++
+				}
+			}
+		}(i)
+	}
+
+	// 监控工作协程
+	errorCount := 0
+	timeout := time.After(testDuration)
+
+MonitorLoop:
+	for {
+		select {
+		case err := <-workerErrors:
+			errorCount++
+			t.Logf("Worker error: %v", err)
+
+			// 如果错误太多，提前结束测试
+			if errorCount > numWorkers/2 {
+				t.Errorf("Too many worker errors: %d", errorCount)
+				break MonitorLoop
+			}
+
+		case <-timeout:
+			t.Logf("Concurrent stability test completed")
+			break MonitorLoop
+		}
+	}
+
+	// 验证并发稳定性
+	assert.LessOrEqual(t, errorCount, numWorkers/4,
+		"Worker error rate should be low (≤25%)")
+
+	// 检查最终系统状态
+	var finalStats runtime.MemStats
+	runtime.ReadMemStats(&finalStats)
+
+	assert.Less(t, runtime.NumGoroutine(), numWorkers*2,
+		"Goroutine count should be reasonable after test")
+}
+
+// simulateWork 模拟工作负载
+func simulateWork(workerID, workCount int) error {
+	// 模拟不同类型的工作
+	workType := workCount % 4
+
+	switch workType {
+	case 0:
+		// CPU密集型工作
+		sum := 0
+		for i := 0; i < 10000; i++ {
+			sum += i
+		}
+
+	case 1:
+		// 内存分配工作
+		data := make([]byte, 1024*10) // 10KB
+		for i := range data {
+			data[i] = byte(workCount % 256)
+		}
+
+	case 2:
+		// 并发安全工作
+		time.Sleep(time.Microsecond * 50)
+
+	case 3:
+		// 错误模拟工作
+		if workCount%1000 == 0 { // 0.1% 错误率
+			return fmt.Errorf("simulated work error at count %d", workCount)
+		}
+	}
+
+	return nil
+}
+
+// BenchmarkStabilityOverhead 稳定性测试开销基准测试
+func BenchmarkStabilityOverhead(b *testing.B) {
+	// 测试稳定性监控的性能开销
+	memManager := NewMemoryManager(nil, nil)
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		// 模拟对象注册和清理
+		obj := make([]byte, 1024)
+		ref := memManager.RegisterObject(obj)
+		memManager.UnregisterObject(ref)
+	}
+}
+
+// getTestDuration 获取测试持续时间
+func getTestDuration(defaultDuration time.Duration) time.Duration {
+	if durationStr := os.Getenv("STABILITY_TEST_DURATION"); durationStr != "" {
+		if duration, err := time.ParseDuration(durationStr); err == nil {
+			return duration
+		}
+	}
+
+	// 在CI环境中使用较短的测试时间
+	if os.Getenv("CI") != "" {
+		return defaultDuration / 24 // 1小时而不是24小时
+	}
+
+	return defaultDuration
+}
+
+// isLongRunningTestEnabled 检查是否启用长时间测试
+func isLongRunningTestEnabled() bool {
+	if enabled := os.Getenv("ENABLE_LONG_RUNNING_TESTS"); enabled != "" {
+		if val, err := strconv.ParseBool(enabled); err == nil {
+			return val
+		}
+	}
+	return false
+}

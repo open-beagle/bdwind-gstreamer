@@ -1,0 +1,758 @@
+package gstreamer
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-gst/go-gst/gst"
+	"github.com/sirupsen/logrus"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+)
+
+// SafeDesktopCaptureGst 使用安全对象管理的桌面捕获实现
+// 这是对原始DesktopCaptureGst的安全重构，修复了go-gst回调中的段错误问题
+type SafeDesktopCaptureGst struct {
+	// Configuration
+	config config.DesktopCaptureConfig
+	logger *logrus.Entry
+
+	// 安全的GStreamer对象
+	pipeline *SafeGstElement
+	source   *SafeGstElement
+	sink     *SafeGstElement
+	bus      *SafeGstObject
+
+	// 回调管理
+	callbackManager *CallbackManager
+
+	// Sample output channel
+	sampleChan chan *Sample
+
+	// State management
+	state  int32 // 原子操作：0=stopped, 1=running, 2=stopping
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	// Error handling
+	errorChan chan error
+
+	// Statistics tracking
+	stats *captureStatistics
+
+	// Sample callback for compatibility
+	sampleCallback func(*Sample) error
+
+	// Memory management
+	memoryManager *MemoryManager
+}
+
+// 状态常量
+const (
+	StateStopped = iota
+	StateRunning
+	StateStopping
+)
+
+// NewSafeDesktopCaptureGst 创建新的安全桌面捕获实例
+func NewSafeDesktopCaptureGst(cfg config.DesktopCaptureConfig) (*SafeDesktopCaptureGst, error) {
+	// 初始化GStreamer
+	gst.Init(nil)
+
+	logger := logrus.WithFields(logrus.Fields{
+		"component": "safe-desktop-capture",
+	})
+
+	// 创建内存管理器
+	memoryManager, err := NewMemoryManager(MemoryManagerConfig{
+		BufferPoolSize:    cfg.BufferPoolSize,
+		BufferPoolTimeout: time.Duration(cfg.BufferPoolTimeoutMs) * time.Millisecond,
+		MaxBufferSize:     cfg.MaxBufferSize,
+		EnableMetrics:     true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create memory manager: %w", err)
+	}
+
+	// 创建回调管理器
+	callbackManager := NewCallbackManager()
+
+	sdc := &SafeDesktopCaptureGst{
+		config:          cfg,
+		logger:          logger,
+		callbackManager: callbackManager,
+		sampleChan:      make(chan *Sample, 10),
+		errorChan:       make(chan error, 10),
+		memoryManager:   memoryManager,
+		stats:           &captureStatistics{},
+		state:           StateStopped,
+	}
+
+	// 初始化pipeline
+	if err := sdc.initializePipeline(); err != nil {
+		sdc.cleanup()
+		return nil, fmt.Errorf("failed to initialize pipeline: %w", err)
+	}
+
+	logger.Info("Safe desktop capture initialized successfully")
+	return sdc, nil
+}
+
+// initializePipeline 创建和配置安全的GStreamer pipeline
+func (sdc *SafeDesktopCaptureGst) initializePipeline() error {
+	// 创建pipeline
+	gstPipeline, err := gst.NewPipeline("safe-desktop-capture")
+	if err != nil {
+		return fmt.Errorf("failed to create pipeline: %w", err)
+	}
+
+	sdc.pipeline = NewSafeGstElement(gstPipeline.Element, "Pipeline")
+	if sdc.pipeline == nil {
+		return fmt.Errorf("failed to create safe pipeline wrapper")
+	}
+
+	// 注册到全局注册表
+	globalRegistry.RegisterObject(sdc.pipeline.SafeGstObject)
+
+	// 获取bus
+	var gstBus *gst.Bus
+	err = sdc.pipeline.WithElement(func(element *gst.Element) error {
+		pipeline := &gst.Pipeline{Element: element}
+		gstBus = pipeline.GetPipelineBus()
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get pipeline bus: %w", err)
+	}
+
+	if gstBus != nil {
+		sdc.bus = NewSafeGstObject(gstBus.Object, "Bus")
+		if sdc.bus != nil {
+			globalRegistry.RegisterObject(sdc.bus)
+		}
+	}
+
+	// 创建source元素
+	if err := sdc.createSourceElement(); err != nil {
+		return fmt.Errorf("failed to create source element: %w", err)
+	}
+
+	// 创建sink元素
+	if err := sdc.createSinkElement(); err != nil {
+		return fmt.Errorf("failed to create sink element: %w", err)
+	}
+
+	// 链接元素
+	if err := sdc.linkElements(); err != nil {
+		return fmt.Errorf("failed to link elements: %w", err)
+	}
+
+	sdc.logger.Info("Safe pipeline initialized successfully")
+	return nil
+}
+
+// createSourceElement 创建安全的source元素
+func (sdc *SafeDesktopCaptureGst) createSourceElement() error {
+	var elementName string
+
+	// 选择source类型
+	if sdc.config.UseWayland {
+		elementName = "waylandsrc"
+	} else {
+		elementName = "ximagesrc"
+	}
+
+	// 创建元素
+	gstSource, err := gst.NewElement(elementName)
+	if err != nil {
+		return fmt.Errorf("failed to create %s element: %w", elementName, err)
+	}
+
+	sdc.source = NewSafeGstElement(gstSource, elementName)
+	if sdc.source == nil {
+		return fmt.Errorf("failed to create safe source wrapper")
+	}
+
+	// 注册到全局注册表
+	globalRegistry.RegisterObject(sdc.source.SafeGstObject)
+
+	// 配置source属性
+	if err := sdc.configureSourceProperties(); err != nil {
+		return fmt.Errorf("failed to configure source properties: %w", err)
+	}
+
+	// 添加到pipeline
+	err = sdc.pipeline.WithElement(func(pipelineElement *gst.Element) error {
+		return sdc.source.WithElement(func(sourceElement *gst.Element) error {
+			pipeline := &gst.Pipeline{Element: pipelineElement}
+			return pipeline.Add(sourceElement)
+		})
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to add source to pipeline: %w", err)
+	}
+
+	sdc.logger.Debugf("Created safe %s source element", elementName)
+	return nil
+}
+
+// configureSourceProperties 配置source元素属性
+func (sdc *SafeDesktopCaptureGst) configureSourceProperties() error {
+	if sdc.config.UseWayland {
+		return sdc.configureWaylandSource()
+	}
+	return sdc.configureX11Source()
+}
+
+// configureX11Source 配置X11 source
+func (sdc *SafeDesktopCaptureGst) configureX11Source() error {
+	properties := map[string]interface{}{
+		"display-name": sdc.config.DisplayID,
+		"use-damage":   false, // 禁用以提高稳定性
+		"show-pointer": sdc.config.ShowPointer,
+		"remote":       false,
+	}
+
+	for name, value := range properties {
+		if err := sdc.source.SetProperty(name, value); err != nil {
+			sdc.logger.WithFields(logrus.Fields{
+				"property": name,
+				"value":    value,
+				"error":    err.Error(),
+			}).Warn("Failed to set source property")
+			// 继续执行，某些属性可能不支持
+		}
+	}
+
+	// 配置捕获区域
+	if sdc.config.CaptureRegion != nil {
+		region := sdc.config.CaptureRegion
+		regionProperties := map[string]interface{}{
+			"startx": uint(region.X),
+			"starty": uint(region.Y),
+			"endx":   uint(region.X + region.Width - 1),
+			"endy":   uint(region.Y + region.Height - 1),
+		}
+
+		for name, value := range regionProperties {
+			if err := sdc.source.SetProperty(name, value); err != nil {
+				sdc.logger.WithFields(logrus.Fields{
+					"property": name,
+					"value":    value,
+					"error":    err.Error(),
+				}).Warn("Failed to set region property")
+			}
+		}
+	}
+
+	sdc.logger.Debug("Configured X11 source properties")
+	return nil
+}
+
+// configureWaylandSource 配置Wayland source
+func (sdc *SafeDesktopCaptureGst) configureWaylandSource() error {
+	// Wayland source配置相对简单
+	properties := map[string]interface{}{
+		"show-pointer": sdc.config.ShowPointer,
+	}
+
+	for name, value := range properties {
+		if err := sdc.source.SetProperty(name, value); err != nil {
+			sdc.logger.WithFields(logrus.Fields{
+				"property": name,
+				"value":    value,
+				"error":    err.Error(),
+			}).Warn("Failed to set Wayland source property")
+		}
+	}
+
+	sdc.logger.Debug("Configured Wayland source properties")
+	return nil
+}
+
+// createSinkElement 创建安全的sink元素
+func (sdc *SafeDesktopCaptureGst) createSinkElement() error {
+	// 创建appsink
+	gstSink, err := gst.NewElement("appsink")
+	if err != nil {
+		return fmt.Errorf("failed to create appsink: %w", err)
+	}
+
+	sdc.sink = NewSafeGstElement(gstSink, "appsink")
+	if sdc.sink == nil {
+		return fmt.Errorf("failed to create safe sink wrapper")
+	}
+
+	// 注册到全局注册表
+	globalRegistry.RegisterObject(sdc.sink.SafeGstObject)
+
+	// 配置appsink属性
+	properties := map[string]interface{}{
+		"emit-signals": true,
+		"sync":         false,
+		"max-buffers":  uint(1),
+		"drop":         true,
+	}
+
+	for name, value := range properties {
+		if err := sdc.sink.SetProperty(name, value); err != nil {
+			return fmt.Errorf("failed to set sink property %s: %w", name, err)
+		}
+	}
+
+	// 添加到pipeline
+	err = sdc.pipeline.WithElement(func(pipelineElement *gst.Element) error {
+		return sdc.sink.WithElement(func(sinkElement *gst.Element) error {
+			pipeline := &gst.Pipeline{Element: pipelineElement}
+			return pipeline.Add(sinkElement)
+		})
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to add sink to pipeline: %w", err)
+	}
+
+	sdc.logger.Debug("Created safe appsink element")
+	return nil
+}
+
+// linkElements 链接pipeline元素
+func (sdc *SafeDesktopCaptureGst) linkElements() error {
+	// 创建处理元素
+	videoConvert, err := gst.NewElement("videoconvert")
+	if err != nil {
+		return fmt.Errorf("failed to create videoconvert: %w", err)
+	}
+
+	videoScale, err := gst.NewElement("videoscale")
+	if err != nil {
+		return fmt.Errorf("failed to create videoscale: %w", err)
+	}
+
+	capsFilter, err := gst.NewElement("capsfilter")
+	if err != nil {
+		return fmt.Errorf("failed to create capsfilter: %w", err)
+	}
+
+	// 包装为安全元素
+	safeVideoConvert := NewSafeGstElement(videoConvert, "videoconvert")
+	safeVideoScale := NewSafeGstElement(videoScale, "videoscale")
+	safeCapsFilter := NewSafeGstElement(capsFilter, "capsfilter")
+
+	if safeVideoConvert == nil || safeVideoScale == nil || safeCapsFilter == nil {
+		return fmt.Errorf("failed to create safe element wrappers")
+	}
+
+	// 注册到全局注册表
+	globalRegistry.RegisterObject(safeVideoConvert.SafeGstObject)
+	globalRegistry.RegisterObject(safeVideoScale.SafeGstObject)
+	globalRegistry.RegisterObject(safeCapsFilter.SafeGstObject)
+
+	// 添加到pipeline
+	err = sdc.pipeline.WithElement(func(pipelineElement *gst.Element) error {
+		pipeline := &gst.Pipeline{Element: pipelineElement}
+		return pipeline.AddMany(videoConvert, videoScale, capsFilter)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to add processing elements to pipeline: %w", err)
+	}
+
+	// 配置caps
+	caps, err := gst.NewCapsFromString(fmt.Sprintf(
+		"video/x-raw,format=RGB,width=%d,height=%d,framerate=%d/1",
+		sdc.config.Width, sdc.config.Height, sdc.config.Framerate,
+	))
+	if err != nil {
+		return fmt.Errorf("failed to create caps: %w", err)
+	}
+
+	err = safeCapsFilter.SetProperty("caps", caps)
+	if err != nil {
+		return fmt.Errorf("failed to set caps on filter: %w", err)
+	}
+
+	// 链接元素
+	if err := sdc.source.Link(safeVideoConvert); err != nil {
+		return fmt.Errorf("failed to link source to videoconvert: %w", err)
+	}
+
+	if err := safeVideoConvert.Link(safeVideoScale); err != nil {
+		return fmt.Errorf("failed to link videoconvert to videoscale: %w", err)
+	}
+
+	if err := safeVideoScale.Link(safeCapsFilter); err != nil {
+		return fmt.Errorf("failed to link videoscale to capsfilter: %w", err)
+	}
+
+	if err := safeCapsFilter.Link(sdc.sink); err != nil {
+		return fmt.Errorf("failed to link capsfilter to sink: %w", err)
+	}
+
+	sdc.logger.Debug("Successfully linked all pipeline elements")
+	return nil
+}
+
+// Start 启动安全的桌面捕获
+func (sdc *SafeDesktopCaptureGst) Start() error {
+	if !atomic.CompareAndSwapInt32(&sdc.state, StateStopped, StateRunning) {
+		return fmt.Errorf("desktop capture is not in stopped state")
+	}
+
+	// 创建上下文
+	sdc.ctx, sdc.cancel = context.WithCancel(context.Background())
+
+	// 连接new-sample信号 - 这是关键的修复点
+	err := sdc.callbackManager.ConnectSignal(sdc.sink, "new-sample", sdc.onNewSample)
+	if err != nil {
+		atomic.StoreInt32(&sdc.state, StateStopped)
+		return fmt.Errorf("failed to connect new-sample signal: %w", err)
+	}
+
+	// 启动pipeline
+	err = sdc.pipeline.SetState(gst.StatePlaying)
+	if err != nil {
+		atomic.StoreInt32(&sdc.state, StateStopped)
+		return fmt.Errorf("failed to start pipeline: %w", err)
+	}
+
+	// 启动监控goroutines
+	sdc.wg.Add(2)
+	go sdc.monitorBusMessages()
+	go sdc.processSamples()
+
+	sdc.logger.Info("Safe desktop capture started successfully")
+	return nil
+}
+
+// onNewSample 安全的new-sample回调处理器
+func (sdc *SafeDesktopCaptureGst) onNewSample(sink *gst.Element) gst.FlowReturn {
+	// 检查状态
+	if atomic.LoadInt32(&sdc.state) != StateRunning {
+		return gst.FlowFlushing
+	}
+
+	// 增加统计计数
+	atomic.AddInt64(&sdc.stats.samplesReceived, 1)
+
+	// 安全地拉取样本
+	sample, err := sink.Emit("pull-sample")
+	if err != nil {
+		sdc.logger.WithError(err).Warn("Failed to pull sample from sink")
+		atomic.AddInt64(&sdc.stats.sampleErrors, 1)
+		return gst.FlowError
+	}
+
+	if sample == nil {
+		sdc.logger.Debug("Received nil sample from sink")
+		return gst.FlowOK
+	}
+
+	// 类型断言
+	gstSample, ok := sample.(*gst.Sample)
+	if !ok {
+		sdc.logger.WithFields(logrus.Fields{
+			"expected_type": "*gst.Sample",
+			"actual_type":   fmt.Sprintf("%T", sample),
+		}).Error("Sample type assertion failed")
+		atomic.AddInt64(&sdc.stats.sampleErrors, 1)
+		return gst.FlowError
+	}
+
+	// 转换样本
+	internalSample, err := sdc.convertGstSample(gstSample)
+	if err != nil {
+		sdc.logger.WithError(err).Warn("Failed to convert sample")
+		atomic.AddInt64(&sdc.stats.conversionErrors, 1)
+		return gst.FlowError
+	}
+
+	// 发送样本到channel
+	select {
+	case sdc.sampleChan <- internalSample:
+		atomic.AddInt64(&sdc.stats.samplesProcessed, 1)
+	default:
+		// Channel满了，丢弃样本
+		atomic.AddInt64(&sdc.stats.samplesDropped, 1)
+	}
+
+	return gst.FlowOK
+}
+
+// convertGstSample 转换GStreamer样本为内部格式
+func (sdc *SafeDesktopCaptureGst) convertGstSample(gstSample *gst.Sample) (*Sample, error) {
+	if gstSample == nil {
+		return nil, fmt.Errorf("gst sample is nil")
+	}
+
+	// 获取buffer
+	buffer := gstSample.GetBuffer()
+	if buffer == nil {
+		return nil, fmt.Errorf("sample buffer is nil")
+	}
+
+	// 映射buffer
+	mapInfo := buffer.Map(gst.MapRead)
+	if mapInfo == nil {
+		return nil, fmt.Errorf("failed to map buffer")
+	}
+	defer buffer.Unmap(mapInfo)
+
+	// 获取数据
+	data := mapInfo.Data()
+	if len(data) == 0 {
+		return nil, fmt.Errorf("buffer data is empty")
+	}
+
+	// 安全复制数据
+	safeCopy, err := sdc.memoryManager.SafeCopyBuffer(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to safely copy buffer: %w", err)
+	}
+
+	// 获取caps信息
+	caps := gstSample.GetCaps()
+	var width, height int
+	if caps != nil {
+		structure := caps.GetStructureAt(0)
+		if structure != nil {
+			if w, ok := structure.GetValue("width"); ok {
+				if wInt, ok := w.(int); ok {
+					width = wInt
+				}
+			}
+			if h, ok := structure.GetValue("height"); ok {
+				if hInt, ok := h.(int); ok {
+					height = hInt
+				}
+			}
+		}
+	}
+
+	// 创建内部样本
+	sample := &Sample{
+		Data:      safeCopy,
+		Width:     width,
+		Height:    height,
+		Format:    "RGB",
+		Timestamp: time.Now(),
+	}
+
+	return sample, nil
+}
+
+// monitorBusMessages 监控bus消息
+func (sdc *SafeDesktopCaptureGst) monitorBusMessages() {
+	defer sdc.wg.Done()
+
+	if sdc.bus == nil {
+		sdc.logger.Warn("Bus is nil, cannot monitor messages")
+		return
+	}
+
+	for {
+		select {
+		case <-sdc.ctx.Done():
+			return
+		default:
+			// 安全地访问bus
+			err := sdc.bus.WithObject(func(busObj *gst.Object) error {
+				bus := &gst.Bus{Object: busObj}
+
+				// 使用短超时避免阻塞
+				msg := bus.TimedPop(100 * time.Millisecond)
+				if msg != nil {
+					sdc.handleBusMessage(msg)
+				}
+				return nil
+			})
+
+			if err != nil {
+				sdc.logger.WithError(err).Warn("Failed to access bus")
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+}
+
+// handleBusMessage 处理bus消息
+func (sdc *SafeDesktopCaptureGst) handleBusMessage(msg *gst.Message) {
+	switch msg.Type() {
+	case gst.MessageError:
+		err, debug := msg.ParseError()
+		sdc.logger.WithFields(logrus.Fields{
+			"error": err.Error(),
+			"debug": debug,
+		}).Error("Pipeline error")
+
+		select {
+		case sdc.errorChan <- fmt.Errorf("pipeline error: %s", err.Error()):
+		default:
+		}
+
+	case gst.MessageWarning:
+		err, debug := msg.ParseWarning()
+		sdc.logger.WithFields(logrus.Fields{
+			"warning": err.Error(),
+			"debug":   debug,
+		}).Warn("Pipeline warning")
+
+	case gst.MessageEOS:
+		sdc.logger.Info("End of stream received")
+
+	case gst.MessageStateChanged:
+		if msg.Source() == sdc.pipeline.GetElement() {
+			old, new, pending := msg.ParseStateChanged()
+			sdc.logger.WithFields(logrus.Fields{
+				"old_state":     old,
+				"new_state":     new,
+				"pending_state": pending,
+			}).Debug("Pipeline state changed")
+		}
+	}
+}
+
+// processSamples 处理样本
+func (sdc *SafeDesktopCaptureGst) processSamples() {
+	defer sdc.wg.Done()
+
+	for {
+		select {
+		case <-sdc.ctx.Done():
+			return
+		case sample := <-sdc.sampleChan:
+			if sdc.sampleCallback != nil {
+				if err := sdc.sampleCallback(sample); err != nil {
+					sdc.logger.WithError(err).Warn("Sample callback failed")
+				}
+			}
+		}
+	}
+}
+
+// Stop 停止安全的桌面捕获
+func (sdc *SafeDesktopCaptureGst) Stop() error {
+	if !atomic.CompareAndSwapInt32(&sdc.state, StateRunning, StateStopping) {
+		return fmt.Errorf("desktop capture is not running")
+	}
+
+	// 取消上下文
+	if sdc.cancel != nil {
+		sdc.cancel()
+	}
+
+	// 断开所有回调
+	if sdc.callbackManager != nil {
+		if err := sdc.callbackManager.DisconnectAll(); err != nil {
+			sdc.logger.WithError(err).Warn("Failed to disconnect callbacks")
+		}
+	}
+
+	// 停止pipeline
+	if sdc.pipeline != nil {
+		if err := sdc.pipeline.SetState(gst.StateNull); err != nil {
+			sdc.logger.WithError(err).Warn("Failed to stop pipeline")
+		}
+	}
+
+	// 等待goroutines完成
+	sdc.wg.Wait()
+
+	// 清理资源
+	sdc.cleanup()
+
+	atomic.StoreInt32(&sdc.state, StateStopped)
+	sdc.logger.Info("Safe desktop capture stopped successfully")
+	return nil
+}
+
+// cleanup 清理资源
+func (sdc *SafeDesktopCaptureGst) cleanup() {
+	// 关闭channels
+	if sdc.sampleChan != nil {
+		close(sdc.sampleChan)
+		sdc.sampleChan = nil
+	}
+	if sdc.errorChan != nil {
+		close(sdc.errorChan)
+		sdc.errorChan = nil
+	}
+
+	// 关闭回调管理器
+	if sdc.callbackManager != nil {
+		sdc.callbackManager.Close()
+	}
+
+	// 关闭内存管理器
+	if sdc.memoryManager != nil {
+		sdc.memoryManager.Close()
+	}
+
+	// 使所有对象无效
+	if sdc.pipeline != nil {
+		sdc.pipeline.Invalidate()
+		globalRegistry.UnregisterObject(sdc.pipeline.SafeGstObject)
+	}
+	if sdc.source != nil {
+		sdc.source.Invalidate()
+		globalRegistry.UnregisterObject(sdc.source.SafeGstObject)
+	}
+	if sdc.sink != nil {
+		sdc.sink.Invalidate()
+		globalRegistry.UnregisterObject(sdc.sink.SafeGstObject)
+	}
+	if sdc.bus != nil {
+		sdc.bus.Invalidate()
+		globalRegistry.UnregisterObject(sdc.bus)
+	}
+
+	sdc.logger.Debug("Cleanup completed")
+}
+
+// IsRunning 检查是否正在运行
+func (sdc *SafeDesktopCaptureGst) IsRunning() bool {
+	return atomic.LoadInt32(&sdc.state) == StateRunning
+}
+
+// SetSampleCallback 设置样本回调
+func (sdc *SafeDesktopCaptureGst) SetSampleCallback(callback func(*Sample) error) {
+	sdc.sampleCallback = callback
+}
+
+// GetStats 获取统计信息
+func (sdc *SafeDesktopCaptureGst) GetStats() map[string]interface{} {
+	stats := map[string]interface{}{
+		"samples_received":  atomic.LoadInt64(&sdc.stats.samplesReceived),
+		"samples_processed": atomic.LoadInt64(&sdc.stats.samplesProcessed),
+		"samples_dropped":   atomic.LoadInt64(&sdc.stats.samplesDropped),
+		"sample_errors":     atomic.LoadInt64(&sdc.stats.sampleErrors),
+		"conversion_errors": atomic.LoadInt64(&sdc.stats.conversionErrors),
+		"state":             atomic.LoadInt32(&sdc.state),
+	}
+
+	if sdc.callbackManager != nil {
+		callbackStats := sdc.callbackManager.GetStats()
+		stats["callback_stats"] = callbackStats
+	}
+
+	if sdc.memoryManager != nil {
+		memoryStats := sdc.memoryManager.GetStats()
+		stats["memory_stats"] = memoryStats
+	}
+
+	return stats
+}
+
+// GetErrorChannel 获取错误channel
+func (sdc *SafeDesktopCaptureGst) GetErrorChannel() <-chan error {
+	return sdc.errorChan
+}
+
+// GetSampleChannel 获取样本channel
+func (sdc *SafeDesktopCaptureGst) GetSampleChannel() <-chan *Sample {
+	return sdc.sampleChan
+}

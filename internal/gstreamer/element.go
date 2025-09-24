@@ -98,6 +98,42 @@ const (
 	ErrorUnknown
 )
 
+// String returns the string representation of ErrorType
+func (et ErrorType) String() string {
+	switch et {
+	case ErrorTypeGeneral:
+		return "General"
+	case ErrorTypePipeline:
+		return "Pipeline"
+	case ErrorTypeElement:
+		return "Element"
+	case ErrorTypeResource:
+		return "Resource"
+	case ErrorStateChange:
+		return "StateChange"
+	case ErrorElementFailure:
+		return "ElementFailure"
+	case ErrorResourceUnavailable:
+		return "ResourceUnavailable"
+	case ErrorFormatNegotiation:
+		return "FormatNegotiation"
+	case ErrorTimeout:
+		return "Timeout"
+	case ErrorPermission:
+		return "Permission"
+	case ErrorMemoryExhaustion:
+		return "MemoryExhaustion"
+	case ErrorNetwork:
+		return "Network"
+	case ErrorHardware:
+		return "Hardware"
+	case ErrorUnknown:
+		return "Unknown"
+	default:
+		return "Unknown"
+	}
+}
+
 // HealthStatusLevel represents the health status level
 type HealthStatusLevel int
 
@@ -150,8 +186,8 @@ type DesktopCapture interface {
 // PadAddedCallback is a callback function for pad-added signals
 type PadAddedCallback func(element *gst.Element, pad *gst.Pad)
 
-// ErrorEvent represents an error event
-type ErrorEvent struct {
+// ElementErrorEvent represents an error event
+type ElementErrorEvent struct {
 	Type      ErrorType
 	Message   string
 	Timestamp int64

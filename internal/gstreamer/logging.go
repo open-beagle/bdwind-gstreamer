@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -792,6 +793,81 @@ func (g *gstreamerLogConfigurator) getLogLevelDescription(level int) string {
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", level)
 	}
+}
+
+// ConfigureEnhancedLogging configures enhanced logging with debug-friendly output
+func (g *gstreamerLogConfigurator) ConfigureEnhancedLogging(appConfig *config.LoggingConfig, enableDebugContext bool) error {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+
+	g.logger.Debug("Configuring enhanced GStreamer logging with debug context support")
+
+	// First configure basic logging
+	if err := g.ConfigureFromAppLogging(appConfig); err != nil {
+		return fmt.Errorf("failed to configure basic logging: %w", err)
+	}
+
+	// Enable enhanced debugging features if requested
+	if enableDebugContext {
+		g.logger.Info("Enabling enhanced debug context logging")
+
+		// Set additional debug categories for enhanced logging
+		enhancedCategories := map[string]int{
+			"GST_ELEMENT_FACTORY": 4,
+			"GST_PIPELINE":        5,
+			"GST_PADS":            4,
+			"GST_BUFFER":          3,
+			"GST_CAPS":            4,
+			"GST_STATES":          4,
+			"GST_ERROR":           5,
+			"GST_WARNING":         4,
+			"GST_INFO":            3,
+			"GST_DEBUG":           2,
+		}
+
+		for category, level := range enhancedCategories {
+			if err := g.EnableCategory(category, level); err != nil {
+				g.logger.Warnf("Failed to enable enhanced category %s: %v", category, err)
+			}
+		}
+
+		g.logger.Info("Enhanced debug context logging configured successfully")
+	}
+
+	return nil
+}
+
+// FormatDebugMessage formats a debug message with enhanced context
+func FormatDebugMessage(component, operation, message string, context map[string]interface{}) string {
+	var builder strings.Builder
+
+	// Base message format
+	builder.WriteString(fmt.Sprintf("[%s:%s] %s", component, operation, message))
+
+	// Add context information if available
+	if context != nil && len(context) > 0 {
+		builder.WriteString(" {")
+		first := true
+		for key, value := range context {
+			if !first {
+				builder.WriteString(", ")
+			}
+			builder.WriteString(fmt.Sprintf("%s=%v", key, value))
+			first = false
+		}
+		builder.WriteString("}")
+	}
+
+	return builder.String()
+}
+
+// CreateDebugLogger creates a logger with enhanced debug formatting
+func CreateDebugLogger(baseLogger *logrus.Entry, component string) *logrus.Entry {
+	return baseLogger.WithFields(logrus.Fields{
+		"component":     component,
+		"debug_enabled": true,
+		"timestamp":     time.Now().Format(time.RFC3339Nano),
+	})
 }
 
 // applyColoredOutput 应用颜色输出设置到GStreamer

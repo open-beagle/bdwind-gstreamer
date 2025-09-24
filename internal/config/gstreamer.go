@@ -8,6 +8,7 @@ import (
 type GStreamerConfig struct {
 	Capture  DesktopCaptureConfig `yaml:"capture" json:"capture"`
 	Encoding EncoderConfig        `yaml:"encoding" json:"encoding"`
+	Audio    AudioConfig          `yaml:"audio" json:"audio"`
 }
 
 // DefaultGStreamerConfig 返回默认的GStreamer配置
@@ -15,6 +16,7 @@ func DefaultGStreamerConfig() *GStreamerConfig {
 	return &GStreamerConfig{
 		Capture:  DefaultDesktopCaptureConfig(),
 		Encoding: DefaultEncoderConfig(),
+		Audio:    DefaultAudioConfig(),
 	}
 }
 
@@ -30,6 +32,11 @@ func (c *GStreamerConfig) Validate() error {
 		return fmt.Errorf("invalid encoding config: %w", err)
 	}
 
+	// 验证音频配置
+	if err := ValidateAudioConfig(&c.Audio); err != nil {
+		return fmt.Errorf("invalid audio config: %w", err)
+	}
+
 	return nil
 }
 
@@ -37,6 +44,7 @@ func (c *GStreamerConfig) Validate() error {
 func (c *GStreamerConfig) SetDefaults() {
 	c.Capture = DefaultDesktopCaptureConfig()
 	c.Encoding = DefaultEncoderConfig()
+	c.Audio = DefaultAudioConfig()
 }
 
 // Merge merges another ConfigModule into this one.

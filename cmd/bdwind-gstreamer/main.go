@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -221,4 +222,15 @@ func main() {
 	} else {
 		logger.Info("Application stopped gracefully")
 	}
+
+	// Force garbage collection and wait for finalizers to complete
+	// This prevents segfaults during GObject cleanup
+	logger.Debug("Forcing garbage collection to prevent segfaults...")
+	runtime.GC()
+	runtime.GC() // Run twice to ensure all finalizers are processed
+
+	// Give finalizers time to complete
+	time.Sleep(100 * time.Millisecond)
+
+	logger.Debug("Garbage collection completed, application exiting safely")
 }

@@ -17,8 +17,9 @@ type MediaConfig struct {
 type NetworkCondition struct {
 	PacketLoss float64 // 丢包率
 	RTT        int64   // 往返时延(毫秒)
-	Bandwidth  int     // 可用带宽
+	Bandwidth  int64   // 可用带宽 (changed to int64 for consistency)
 	Jitter     int64   // 抖动(毫秒)
+	Congestion bool    // 网络拥塞状态
 }
 
 // MediaStreamSubscriber 媒体流订阅者接口
@@ -26,6 +27,29 @@ type MediaStreamSubscriber interface {
 	OnVideoStream(stream *EncodedVideoStream) error
 	OnAudioStream(stream *EncodedAudioStream) error
 	OnStreamError(err error) error
+	OnVideoFrame(frame *EncodedVideoFrame) error
+	OnAudioFrame(frame *EncodedAudioFrame) error
+	OnVideoError(err error) error
+	OnAudioError(err error) error
+	OnStreamStart() error
+	OnStreamStop() error
+	GetSubscriberID() uint64
+	IsActive() bool
+}
+
+// MediaStreamProvider 媒体流提供者接口 (新增，用于WebRTC集成)
+type MediaStreamProvider interface {
+	// 订阅管理
+	AddVideoSubscriber(subscriber VideoStreamSubscriber) (uint64, error)
+	RemoveVideoSubscriber(id uint64) bool
+	AddAudioSubscriber(subscriber AudioStreamSubscriber) (uint64, error)
+	RemoveAudioSubscriber(id uint64) bool
+
+	// 网络自适应
+	AdaptToNetworkCondition(condition NetworkCondition) error
+
+	// 配置生成 (为WebRTC提供媒体配置)
+	GenerateMediaConfigForWebRTC() *MediaConfig
 }
 
 // EncodedVideoStream 编码后的视频流
@@ -58,55 +82,4 @@ func (m *Manager) GenerateMediaConfigForWebRTC() *MediaConfig {
 		Resolution:   fmt.Sprintf("%dx%d", m.config.Capture.Width, m.config.Capture.Height),
 		FrameRate:    m.config.Capture.FrameRate,
 	}
-}
-
-// AddSubscriber 添加媒体流订阅者
-func (m *Manager) AddSubscriber(subscriber MediaStreamSubscriber) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	// 初始化subscribers切片如果还没有
-	if m.subscribers == nil {
-		m.subscribers = make([]MediaStreamSubscriber, 0)
-	}
-
-	m.subscribers = append(m.subscribers, subscriber)
-	m.logger.Infof("Added subscriber, total subscribers: %d", len(m.subscribers))
-	return nil
-}
-
-// PublishVideoStream 发布视频流给所有订阅者
-func (m *Manager) PublishVideoStream(stream *EncodedVideoStream) error {
-	m.mutex.RLock()
-	subscribers := make([]MediaStreamSubscriber, len(m.subscribers))
-	copy(subscribers, m.subscribers)
-	m.mutex.RUnlock()
-
-	// 发布给所有订阅者
-	for _, subscriber := range subscribers {
-		if err := subscriber.OnVideoStream(stream); err != nil {
-			m.logger.Warnf("Failed to publish video stream to subscriber: %v", err)
-			// 通知订阅者错误
-			subscriber.OnStreamError(err)
-		}
-	}
-	return nil
-}
-
-// PublishAudioStream 发布音频流给所有订阅者
-func (m *Manager) PublishAudioStream(stream *EncodedAudioStream) error {
-	m.mutex.RLock()
-	subscribers := make([]MediaStreamSubscriber, len(m.subscribers))
-	copy(subscribers, m.subscribers)
-	m.mutex.RUnlock()
-
-	// 发布给所有订阅者
-	for _, subscriber := range subscribers {
-		if err := subscriber.OnAudioStream(stream); err != nil {
-			m.logger.Warnf("Failed to publish audio stream to subscriber: %v", err)
-			// 通知订阅者错误
-			subscriber.OnStreamError(err)
-		}
-	}
-	return nil
 }

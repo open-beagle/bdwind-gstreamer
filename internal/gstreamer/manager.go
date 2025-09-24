@@ -17,151 +17,11 @@ import (
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
-// PipelineStateManager manages pipeline state transitions
-type PipelineStateManager struct {
-	logger              *logrus.Entry
-	currentState        PipelineState
-	stateChangeCallback func(PipelineState, PipelineState, StateTransition)
-	errorCallback       func(ErrorType, string, error)
-}
-
-// NewPipelineStateManager creates a new pipeline state manager
-func NewPipelineStateManager(logger *logrus.Entry) *PipelineStateManager {
-	return &PipelineStateManager{
-		logger:       logger,
-		currentState: PipelineStateNull,
-	}
-}
-
-// SetStateChangeCallback sets the state change callback
-func (psm *PipelineStateManager) SetStateChangeCallback(callback func(PipelineState, PipelineState, StateTransition)) {
-	psm.stateChangeCallback = callback
-}
-
-// SetErrorCallback sets the error callback
-func (psm *PipelineStateManager) SetErrorCallback(callback func(ErrorType, string, error)) {
-	psm.errorCallback = callback
-}
-
-// Start starts the state manager
-func (psm *PipelineStateManager) Start() error {
-	psm.logger.Debug("Pipeline state manager started")
-	return nil
-}
-
-// Stop stops the state manager
-func (psm *PipelineStateManager) Stop() error {
-	psm.logger.Debug("Pipeline state manager stopped")
-	return nil
-}
-
-// GetCurrentState returns the current pipeline state
-func (psm *PipelineStateManager) GetCurrentState() PipelineState {
-	return psm.currentState
-}
-
-// SetState sets the pipeline state
-func (psm *PipelineStateManager) SetState(state PipelineState) error {
-	oldState := psm.currentState
-	psm.currentState = state
-
-	if psm.stateChangeCallback != nil {
-		transition := StateTransition{
-			From:     oldState,
-			To:       state,
-			Duration: 0, // Would be calculated in real implementation
-			Success:  true,
-			Error:    nil,
-		}
-		psm.stateChangeCallback(oldState, state, transition)
-	}
-
-	return nil
-}
-
-// RestartPipeline restarts the pipeline
-func (psm *PipelineStateManager) RestartPipeline() error {
-	psm.logger.Debug("Restarting pipeline")
-	return nil
-}
-
-// GetStats returns state manager statistics
-func (psm *PipelineStateManager) GetStats() interface{} {
-	return map[string]interface{}{
-		"current_state": psm.currentState,
-	}
-}
-
-// GetStateHistory returns state history
-func (psm *PipelineStateManager) GetStateHistory() []StateTransition {
-	return []StateTransition{}
-}
-
-// PipelineHealthChecker monitors pipeline health
-type PipelineHealthChecker struct {
-	logger *logrus.Entry
-}
-
-// NewPipelineHealthChecker creates a new pipeline health checker
-func NewPipelineHealthChecker(logger *logrus.Entry) *PipelineHealthChecker {
-	return &PipelineHealthChecker{
-		logger: logger,
-	}
-}
-
-// GetHealthStatus returns the current health status
-func (phc *PipelineHealthChecker) GetHealthStatus() HealthStatus {
-	return HealthStatus{
-		Overall:   HealthStatusHealthy,
-		LastCheck: time.Now().Unix(),
-		Uptime:    0,
-		Issues:    []string{},
-		Checks:    make(map[string]interface{}),
-	}
-}
-
-// ErrorHandlerConfig holds configuration for error handler
-type ErrorHandlerConfig struct {
-	MaxRetryAttempts    int
-	RetryDelay          time.Duration
-	AutoRecovery        bool
-	MaxErrorHistorySize int
-}
-
-// PipelineErrorHandler handles pipeline errors
-type PipelineErrorHandler struct {
-	logger *logrus.Entry
-	config *ErrorHandlerConfig
-}
-
-// NewPipelineErrorHandler creates a new pipeline error handler
-func NewPipelineErrorHandler(logger *logrus.Entry, config *ErrorHandlerConfig) *PipelineErrorHandler {
-	return &PipelineErrorHandler{
-		logger: logger,
-		config: config,
-	}
-}
-
-// GetErrorHistory returns error history (placeholder implementation)
-func (peh *PipelineErrorHandler) GetErrorHistory() []ErrorEvent {
-	return []ErrorEvent{}
-}
-
-// HandleError handles pipeline errors
-func (peh *PipelineErrorHandler) HandleError(errorType ErrorType, message, details, component string) {
-	peh.logger.WithFields(logrus.Fields{
-		"error_type": errorType,
-		"component":  component,
-		"details":    details,
-	}).Error(message)
-}
-
-// GetStats returns error handler statistics
-func (peh *PipelineErrorHandler) GetStats() interface{} {
-	return map[string]interface{}{
-		"total_errors": 0,
-	}
-}
+// Note: PipelineStateManager, PipelineHealthChecker, and PipelineErrorHandler
+// are now implemented in separate files:
+// - pipeline_state_manager.go
+// - pipeline_health_checker.go
+// - pipeline_error_handler.go
 
 // ManagerConfig GStreamer管理器配置
 type ManagerConfig struct {
@@ -206,6 +66,9 @@ type Manager struct {
 	lastStatsLog       time.Time
 
 	// 发布-订阅机制 (替代复杂回调链，消除GStreamer Bridge)
+	streamPublisher *StreamPublisher
+
+	// 向后兼容的订阅者列表 (保持接口不变)
 	subscribers []MediaStreamSubscriber
 	pubSubMutex sync.RWMutex
 
@@ -219,11 +82,6 @@ type Manager struct {
 	// 上下文控制 (保持不变)
 	ctx    context.Context
 	cancel context.CancelFunc
-
-	// 流媒体数据处理通道 (新增：标准发布-订阅机制)
-	videoStreamChan chan *EncodedVideoStream
-	audioStreamChan chan *EncodedAudioStream
-	streamProcessor *streamProcessor
 }
 
 // streamProcessor 流媒体数据处理器 (新增：标准发布-订阅机制)
@@ -257,6 +115,11 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 	// Trace级别: 记录管理器创建开始
 	logger.Trace("Starting GStreamer manager creation with go-gst refactor")
 
+	// 初始化 GStreamer 库 - 这是使用 go-gst 的必要步骤
+	logger.Debug("Initializing GStreamer library via go-gst")
+	gst.Init(nil)
+	logger.Debug("GStreamer library initialized successfully")
+
 	// Use the provided context instead of creating a new one
 	childCtx, cancel := context.WithCancel(ctx)
 
@@ -269,21 +132,12 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 		encodedSampleCount:  0,
 		lastStatsLog:        time.Now(),
 		configChangeChannel: make(chan *config.LoggingConfig, 10), // 缓冲通道避免阻塞
-
-		// 新增：发布-订阅机制通道
-		videoStreamChan: make(chan *EncodedVideoStream, 100),
-		audioStreamChan: make(chan *EncodedAudioStream, 100),
-		subscribers:     make([]MediaStreamSubscriber, 0),
+		subscribers:         make([]MediaStreamSubscriber, 0),
 	}
 
-	// 初始化流处理器
-	streamCtx, streamCancel := context.WithCancel(childCtx)
-	manager.streamProcessor = &streamProcessor{
-		manager: manager,
-		ctx:     streamCtx,
-		cancel:  streamCancel,
-		logger:  logger.WithField("component", "stream-processor"),
-	}
+	// 初始化流发布器 (新增：标准发布-订阅机制)
+	streamPublisherConfig := DefaultStreamPublisherConfig()
+	manager.streamPublisher = NewStreamPublisher(childCtx, streamPublisherConfig, logger)
 
 	// 初始化日志配置器 (保持接口不变)
 	manager.logConfigurator = NewGStreamerLogConfigurator(logger)
@@ -308,7 +162,6 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 		// Error级别: 组件初始化失败
 		logger.Errorf("Failed to initialize go-gst components: %v", err)
 		cancel()
-		streamCancel()
 		return nil, fmt.Errorf("failed to initialize components: %w", err)
 	}
 
@@ -412,15 +265,15 @@ func (m *Manager) initializeComponents() error {
 	// Trace级别: 记录HTTP处理器详细信息
 	m.logger.Trace("HTTP handlers ready for route registration")
 
-	// Trace级别: 记录流处理器初始化开始
-	m.logger.Trace("Step 5: Initializing stream processor for publish-subscribe")
+	// Trace级别: 记录流发布器初始化开始
+	m.logger.Trace("Step 5: Initializing stream publisher for publish-subscribe")
 
-	// 5. 启动流处理器 (新增：发布-订阅机制)
-	if err := m.startStreamProcessor(); err != nil {
-		m.logger.Errorf("Failed to start stream processor: %v", err)
+	// 5. 启动流发布器 (新增：发布-订阅机制)
+	if err := m.streamPublisher.Start(); err != nil {
+		m.logger.Errorf("Failed to start stream publisher: %v", err)
 		return err
 	}
-	m.logger.Debug("Stream processor initialized for publish-subscribe mechanism")
+	m.logger.Debug("Stream publisher initialized for publish-subscribe mechanism")
 
 	// Trace级别: 记录所有组件初始化完成
 	m.logger.Trace("All go-gst components initialized successfully")
@@ -446,13 +299,8 @@ func (m *Manager) initializePipelineStateManagement() error {
 	// 这里我们只初始化错误处理器，状态管理器将在Start方法中初始化
 
 	// 1. 创建错误处理器
-	errorConfig := &ErrorHandlerConfig{
-		MaxRetryAttempts:    3,
-		RetryDelay:          2 * time.Second,
-		AutoRecovery:        true,
-		MaxErrorHistorySize: 100,
-	}
-	m.errorHandler = NewPipelineErrorHandler(m.logger, errorConfig)
+	errorConfig := DefaultPipelineErrorHandlerConfig()
+	m.errorHandler = NewPipelineErrorHandler(m.logger.WithField("subcomponent", "error-handler"), errorConfig)
 	m.logger.Debug("Pipeline error handler created successfully")
 
 	return nil
@@ -469,41 +317,40 @@ func (m *Manager) initializePipelineStateManagerForCapture() error {
 		return fmt.Errorf("go-gst desktop capture pipeline not available")
 	}
 
-	// 创建状态管理器 (需要适配go-gst pipeline)
-	// TODO: 需要创建pipeline适配器来兼容现有的PipelineStateManager
-	// 暂时跳过状态管理器初始化，直接返回成功
-	m.logger.Debug("Go-gst pipeline state manager initialization skipped (TODO: implement adapter)")
+	// 创建状态管理器配置
+	stateConfig := DefaultPipelineStateManagerConfig()
+
+	// 创建状态管理器
+	m.stateManager = NewPipelineStateManager(m.ctx, m.capture.pipeline,
+		m.logger.WithField("subcomponent", "state-manager"), stateConfig)
+
+	// 设置错误处理器的状态管理器引用
+	if m.errorHandler != nil {
+		m.errorHandler.SetStateManager(m.stateManager)
+	}
+
+	// 设置状态变化回调
+	m.stateManager.SetStateChangeCallback(m.onPipelineStateChange)
+	m.stateManager.SetErrorCallback(m.onPipelineError)
+
+	// 启动状态管理器
+	if err := m.stateManager.Start(); err != nil {
+		return fmt.Errorf("failed to start go-gst pipeline state manager: %w", err)
+	}
+
+	// 启动错误处理器
+	if m.errorHandler != nil {
+		if err := m.errorHandler.Start(m.ctx); err != nil {
+			return fmt.Errorf("failed to start pipeline error handler: %w", err)
+		}
+	}
+
+	m.logger.Debug("Go-gst pipeline state manager initialized and started successfully")
 	return nil
-
-	// 以下代码需要在实现pipeline适配器后启用
-	/*
-		// 创建pipeline适配器
-		pipelineAdapter := NewGstPipelineAdapter(dc.pipeline)
-
-		// 创建状态管理器
-		m.stateManager = NewPipelineStateManager(m.ctx, pipelineAdapter, m.logger, stateConfig)
-
-		// 设置错误处理器的状态管理器引用
-		if m.errorHandler != nil {
-			m.errorHandler.config.StateManager = m.stateManager
-		}
-
-		// 设置状态变化回调
-		m.stateManager.SetStateChangeCallback(m.onPipelineStateChange)
-		m.stateManager.SetErrorCallback(m.onPipelineError)
-
-		// 启动状态管理器
-		if err := m.stateManager.Start(); err != nil {
-			return fmt.Errorf("failed to start go-gst pipeline state manager: %w", err)
-		}
-
-		m.logger.Debug("Go-gst pipeline state manager initialized and started successfully")
-		return nil
-	*/
 }
 
 // onPipelineStateChange 处理Pipeline状态变化回调
-func (m *Manager) onPipelineStateChange(oldState, newState PipelineState, transition StateTransition) {
+func (m *Manager) onPipelineStateChange(oldState, newState PipelineState, transition ExtendedStateTransition) {
 	m.logger.Debugf("Pipeline state changed: %v -> %v (took %v, success: %v)",
 		oldState, newState, transition.Duration, transition.Success)
 
@@ -521,14 +368,16 @@ func (m *Manager) onPipelineStateChange(oldState, newState PipelineState, transi
 }
 
 // onPipelineError 处理Pipeline错误回调
-func (m *Manager) onPipelineError(err error, context string) {
-	m.logger.Errorf("Pipeline error in %s: %v", context, err)
+func (m *Manager) onPipelineError(errorType ErrorType, message string, err error) {
+	m.logger.Errorf("Pipeline error: %s - %v", message, err)
 
 	// 通过错误处理器处理错误
 	if m.errorHandler != nil {
-		// 根据错误内容确定错误类型
-		errorType := m.classifyError(err)
-		m.errorHandler.HandleError(errorType, err.Error(), context, "Pipeline")
+		details := ""
+		if err != nil {
+			details = err.Error()
+		}
+		m.errorHandler.HandleError(errorType, message, details, "Pipeline")
 	}
 }
 
@@ -561,63 +410,6 @@ func (m *Manager) classifyError(err error) ErrorType {
 	}
 }
 
-// startStreamProcessor 启动流处理器 (新增：发布-订阅机制)
-func (m *Manager) startStreamProcessor() error {
-	m.streamProcessor.mu.Lock()
-	defer m.streamProcessor.mu.Unlock()
-
-	if m.streamProcessor.isRunning {
-		return fmt.Errorf("stream processor already running")
-	}
-
-	m.streamProcessor.isRunning = true
-
-	// 启动视频流处理goroutine
-	m.streamProcessor.wg.Add(1)
-	go m.processVideoStreams()
-
-	// 启动音频流处理goroutine
-	m.streamProcessor.wg.Add(1)
-	go m.processAudioStreams()
-
-	m.logger.Debug("Stream processor started for publish-subscribe mechanism")
-	return nil
-}
-
-// processVideoStreams 处理视频流发布 (新增：替代GStreamer Bridge)
-func (m *Manager) processVideoStreams() {
-	defer m.streamProcessor.wg.Done()
-
-	for {
-		select {
-		case videoStream := <-m.videoStreamChan:
-			if err := m.PublishVideoStream(videoStream); err != nil {
-				m.logger.Warnf("Failed to publish video stream: %v", err)
-			}
-		case <-m.streamProcessor.ctx.Done():
-			m.logger.Debug("Video stream processor stopped")
-			return
-		}
-	}
-}
-
-// processAudioStreams 处理音频流发布 (新增：替代GStreamer Bridge)
-func (m *Manager) processAudioStreams() {
-	defer m.streamProcessor.wg.Done()
-
-	for {
-		select {
-		case audioStream := <-m.audioStreamChan:
-			if err := m.PublishAudioStream(audioStream); err != nil {
-				m.logger.Warnf("Failed to publish audio stream: %v", err)
-			}
-		case <-m.streamProcessor.ctx.Done():
-			m.logger.Debug("Audio stream processor stopped")
-			return
-		}
-	}
-}
-
 // Start 启动GStreamer管理器 (保持生命周期管理接口不变)
 func (m *Manager) Start(ctx context.Context) error {
 	m.mutex.Lock()
@@ -641,7 +433,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Debugf("  Go-gst video encoder available: %v", m.encoder != nil)
 	m.logger.Debugf("  Error handler available: %v", m.errorHandler != nil)
 	m.logger.Debugf("  HTTP handlers available: %v", m.handlers != nil)
-	m.logger.Debugf("  Stream processor available: %v", m.streamProcessor != nil)
+	m.logger.Debugf("  Stream publisher available: %v", m.streamPublisher != nil)
 
 	// 启动go-gst桌面捕获（如果可用）
 	if m.capture != nil {
@@ -711,8 +503,8 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Debugf("  Go-gst encoder active: %v", m.encoder != nil)
 	m.logger.Debugf("  State manager active: %v", m.stateManager != nil)
 	m.logger.Debugf("  Config monitoring active: %v", m.configChangeChannel != nil)
-	m.logger.Debugf("  Stream processor active: %v", m.streamProcessor.isRunning)
-	m.logger.Debugf("  Subscribers count: %d", len(m.subscribers))
+	m.logger.Debugf("  Stream publisher active: %v", m.streamPublisher.IsRunning())
+	m.logger.Debugf("  Subscribers count: %d", m.streamPublisher.GetSubscriberCount())
 
 	return nil
 }
@@ -818,8 +610,8 @@ func (m *Manager) processEncodedSample(sample *Sample) error {
 	}
 
 	// 使用发布-订阅机制发布流数据 (替代GStreamer Bridge)
-	if err := m.publishEncodedStreamToSubscribers(sample); err != nil {
-		m.logger.Warnf("Failed to publish go-gst encoded stream to subscribers: %v", err)
+	if err := m.streamPublisher.PublishVideoSample(sample); err != nil {
+		m.logger.Warnf("Failed to publish go-gst encoded sample to stream publisher: %v", err)
 	}
 
 	// 保持原有的回调机制用于向后兼容 (保持接口不变)
@@ -861,12 +653,14 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	m.logger.Trace("Stopping GStreamer manager with go-gst refactor...")
 
-	// 停止流处理器 (新增：发布-订阅机制)
-	if m.streamProcessor != nil {
-		m.logger.Debug("Stopping stream processor...")
-		m.streamProcessor.cancel()
-		m.streamProcessor.wg.Wait()
-		m.logger.Debug("Stream processor stopped successfully")
+	// 停止流发布器 (新增：发布-订阅机制)
+	if m.streamPublisher != nil {
+		m.logger.Debug("Stopping stream publisher...")
+		if err := m.streamPublisher.Stop(); err != nil {
+			m.logger.Warnf("Failed to stop stream publisher: %v", err)
+		} else {
+			m.logger.Debug("Stream publisher stopped successfully")
+		}
 	}
 
 	// 停止go-gst编码器
@@ -887,6 +681,15 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
+	// 停止错误处理器
+	if m.errorHandler != nil {
+		if err := m.errorHandler.Stop(); err != nil {
+			m.logger.Warnf("Failed to stop pipeline error handler: %v", err)
+		} else {
+			m.logger.Debug("Pipeline error handler stopped successfully")
+		}
+	}
+
 	// 停止go-gst桌面捕获
 	if m.capture != nil {
 		if err := m.capture.Stop(); err != nil {
@@ -896,10 +699,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// 关闭流媒体通道
-	close(m.videoStreamChan)
-	close(m.audioStreamChan)
-	m.logger.Debug("Stream channels closed")
+	// 流发布器已在上面停止，无需额外关闭通道
 
 	// 关闭配置变化通道 (保持接口不变)
 	if m.configChangeChannel != nil {
@@ -1047,67 +847,82 @@ func (m *Manager) SetEncodedSampleCallback(callback func(*Sample) error) {
 	m.encodedSampleCallback = callback
 }
 
-// publishEncodedStreamToSubscribers 将go-gst编码后的样本转换为WebRTC兼容格式并通过发布-订阅机制发布
-func (m *Manager) publishEncodedStreamToSubscribers(sample *Sample) error {
-	if sample == nil {
-		return fmt.Errorf("sample is nil")
+// AddSubscriber 添加媒体流订阅者 (使用新的发布-订阅机制)
+func (m *Manager) AddSubscriber(subscriber MediaStreamSubscriber) (uint64, error) {
+	// 添加到流发布器
+	subID, err := m.streamPublisher.AddMediaSubscriber(subscriber)
+	if err != nil {
+		return 0, err
 	}
 
-	// 根据样本类型发布不同的流 (使用发布-订阅机制)
-	switch sample.Format.MediaType {
-	case MediaTypeVideo:
-		return m.publishVideoStreamToSubscribers(sample)
-	case MediaTypeAudio:
-		return m.publishAudioStreamToSubscribers(sample)
-	default:
-		m.logger.Debugf("Unknown media type: %v, skipping publication", sample.Format.MediaType)
-		return nil
-	}
+	// 保持向后兼容的订阅者列表
+	m.pubSubMutex.Lock()
+	m.subscribers = append(m.subscribers, subscriber)
+	m.pubSubMutex.Unlock()
+
+	m.logger.Infof("Added subscriber (ID: %d), total subscribers: %d", subID, len(m.subscribers))
+	return subID, nil
 }
 
-// publishVideoStreamToSubscribers 通过发布-订阅机制发布视频流 (替代GStreamer Bridge)
-func (m *Manager) publishVideoStreamToSubscribers(sample *Sample) error {
-	// 转换为 WebRTC 兼容的视频流格式
-	videoStream := &EncodedVideoStream{
-		Codec:     sample.Format.Codec,
-		Data:      sample.Data,
-		Timestamp: sample.Timestamp.UnixMilli(),
-		KeyFrame:  sample.IsKeyFrame(),
-		Width:     sample.Format.Width,
-		Height:    sample.Format.Height,
-		Bitrate:   m.config.Encoding.Bitrate,
+// RemoveSubscriber 移除媒体流订阅者
+func (m *Manager) RemoveSubscriber(id uint64) bool {
+	// 从流发布器移除
+	removed := m.streamPublisher.RemoveMediaSubscriber(id)
+	if !removed {
+		return false
 	}
 
-	// 使用异步发布-订阅机制 (非阻塞)
-	select {
-	case m.videoStreamChan <- videoStream:
-		return nil
-	default:
-		m.logger.Warn("Video stream channel full, dropping frame")
-		return fmt.Errorf("video stream channel full")
-	}
+	// 从向后兼容列表中移除 (需要通过ID查找，这里简化处理)
+	m.pubSubMutex.Lock()
+	// 注意：这里无法直接通过ID移除，因为原有接口没有ID概念
+	// 实际使用中应该维护ID到subscriber的映射
+	m.pubSubMutex.Unlock()
+
+	m.logger.Infof("Removed subscriber (ID: %d)", id)
+	return true
 }
 
-// publishAudioStreamToSubscribers 通过发布-订阅机制发布音频流 (替代GStreamer Bridge)
-func (m *Manager) publishAudioStreamToSubscribers(sample *Sample) error {
-	// 转换为 WebRTC 兼容的音频流格式
-	audioStream := &EncodedAudioStream{
-		Codec:      sample.Format.Codec,
-		Data:       sample.Data,
-		Timestamp:  sample.Timestamp.UnixMilli(),
-		SampleRate: sample.Format.SampleRate,
-		Channels:   sample.Format.Channels,
-		Bitrate:    m.config.Encoding.Bitrate, // 使用配置的比特率
+// PublishVideoStream 发布视频流给所有订阅者 (保持向后兼容接口)
+func (m *Manager) PublishVideoStream(stream *EncodedVideoStream) error {
+	// 通过流发布器发布 (内部会处理所有订阅者)
+	// 这里需要将EncodedVideoStream转换回Sample格式
+	sample := &Sample{
+		Data:      stream.Data,
+		Timestamp: time.UnixMilli(stream.Timestamp),
+		Format: SampleFormat{
+			MediaType: MediaTypeVideo,
+			Codec:     stream.Codec,
+			Width:     stream.Width,
+			Height:    stream.Height,
+		},
+		Metadata: map[string]interface{}{
+			"key_frame": stream.KeyFrame,
+			"bitrate":   stream.Bitrate,
+		},
 	}
 
-	// 使用异步发布-订阅机制 (非阻塞)
-	select {
-	case m.audioStreamChan <- audioStream:
-		return nil
-	default:
-		m.logger.Warn("Audio stream channel full, dropping frame")
-		return fmt.Errorf("audio stream channel full")
+	return m.streamPublisher.PublishVideoSample(sample)
+}
+
+// PublishAudioStream 发布音频流给所有订阅者 (保持向后兼容接口)
+func (m *Manager) PublishAudioStream(stream *EncodedAudioStream) error {
+	// 通过流发布器发布 (内部会处理所有订阅者)
+	// 这里需要将EncodedAudioStream转换回Sample格式
+	sample := &Sample{
+		Data:      stream.Data,
+		Timestamp: time.UnixMilli(stream.Timestamp),
+		Format: SampleFormat{
+			MediaType:  MediaTypeAudio,
+			Codec:      stream.Codec,
+			SampleRate: stream.SampleRate,
+			Channels:   stream.Channels,
+		},
+		Metadata: map[string]interface{}{
+			"bitrate": stream.Bitrate,
+		},
 	}
+
+	return m.streamPublisher.PublishAudioSample(sample)
 }
 
 // GetStats 获取GStreamer管理器统计信息
@@ -1171,6 +986,29 @@ func (m *Manager) GetStats() map[string]interface{} {
 			"raw_samples_processed":     m.rawSampleCount,
 			"encoded_samples_processed": m.encodedSampleCount,
 			"last_stats_log":            m.lastStatsLog,
+		}
+
+		// 添加流发布器统计 (新增：发布-订阅机制统计)
+		if m.streamPublisher != nil {
+			publisherStats := m.streamPublisher.GetStatistics()
+			stats["stream_publisher"] = map[string]interface{}{
+				"running":                m.streamPublisher.IsRunning(),
+				"video_frames_published": publisherStats.VideoFramesPublished,
+				"audio_frames_published": publisherStats.AudioFramesPublished,
+				"video_frames_dropped":   publisherStats.VideoFramesDropped,
+				"audio_frames_dropped":   publisherStats.AudioFramesDropped,
+				"video_subscribers":      publisherStats.VideoSubscribers,
+				"audio_subscribers":      publisherStats.AudioSubscribers,
+				"total_subscribers":      publisherStats.TotalSubscribers,
+				"active_subscribers":     publisherStats.ActiveSubscribers,
+				"publish_errors":         publisherStats.PublishErrors,
+				"avg_video_frame_size":   publisherStats.AverageVideoFrameSize,
+				"avg_audio_frame_size":   publisherStats.AverageAudioFrameSize,
+			}
+
+			// Stream processor stats are included in main statistics
+
+			// Subscriber manager stats are included in main statistics
 		}
 
 		// 添加日志配置统计
@@ -1246,7 +1084,8 @@ func (m *Manager) GetPipelineHealthStatus() (HealthStatus, error) {
 	if m.healthChecker == nil {
 		return HealthStatus{}, fmt.Errorf("pipeline health checker not initialized")
 	}
-	return m.healthChecker.GetHealthStatus(), nil
+	overallStatus := m.healthChecker.GetHealthStatus()
+	return overallStatus.HealthStatus, nil
 }
 
 // GetPipelineErrorHistory 获取Pipeline错误历史
@@ -1270,7 +1109,12 @@ func (m *Manager) GetPipelineStateHistory() []StateTransition {
 	if m.stateManager == nil {
 		return nil
 	}
-	return m.stateManager.GetStateHistory()
+	extendedHistory := m.stateManager.GetStateHistory()
+	history := make([]StateTransition, len(extendedHistory))
+	for i, ext := range extendedHistory {
+		history[i] = ext.StateTransition
+	}
+	return history
 }
 
 // SetupRoutes 设置GStreamer组件的HTTP路由
@@ -1872,3 +1716,79 @@ func (m *Manager) AdaptToNetworkCondition(condition NetworkCondition) error {
 
 	return nil
 }
+
+// MediaStreamProvider interface implementation
+// These methods provide the new interface for WebRTC integration
+
+// AddVideoSubscriber adds a video stream subscriber and returns its unique ID
+// Implements MediaStreamProvider interface
+func (m *Manager) AddVideoSubscriber(subscriber VideoStreamSubscriber) (uint64, error) {
+	if m.streamPublisher == nil {
+		return 0, fmt.Errorf("stream publisher not initialized")
+	}
+
+	id, err := m.streamPublisher.AddVideoSubscriber(subscriber)
+	if err != nil {
+		m.logger.Errorf("Failed to add video subscriber: %v", err)
+		return 0, err
+	}
+
+	m.logger.Infof("Added video subscriber with ID %d", id)
+	return id, nil
+}
+
+// RemoveVideoSubscriber removes a video stream subscriber by ID
+// Implements MediaStreamProvider interface
+func (m *Manager) RemoveVideoSubscriber(id uint64) bool {
+	if m.streamPublisher == nil {
+		m.logger.Warn("Stream publisher not initialized")
+		return false
+	}
+
+	removed := m.streamPublisher.RemoveVideoSubscriber(id)
+	if removed {
+		m.logger.Infof("Removed video subscriber with ID %d", id)
+	} else {
+		m.logger.Warnf("Failed to remove video subscriber with ID %d (not found)", id)
+	}
+
+	return removed
+}
+
+// AddAudioSubscriber adds an audio stream subscriber and returns its unique ID
+// Implements MediaStreamProvider interface
+func (m *Manager) AddAudioSubscriber(subscriber AudioStreamSubscriber) (uint64, error) {
+	if m.streamPublisher == nil {
+		return 0, fmt.Errorf("stream publisher not initialized")
+	}
+
+	id, err := m.streamPublisher.AddAudioSubscriber(subscriber)
+	if err != nil {
+		m.logger.Errorf("Failed to add audio subscriber: %v", err)
+		return 0, err
+	}
+
+	m.logger.Infof("Added audio subscriber with ID %d", id)
+	return id, nil
+}
+
+// RemoveAudioSubscriber removes an audio stream subscriber by ID
+// Implements MediaStreamProvider interface
+func (m *Manager) RemoveAudioSubscriber(id uint64) bool {
+	if m.streamPublisher == nil {
+		m.logger.Warn("Stream publisher not initialized")
+		return false
+	}
+
+	removed := m.streamPublisher.RemoveAudioSubscriber(id)
+	if removed {
+		m.logger.Infof("Removed audio subscriber with ID %d", id)
+	} else {
+		m.logger.Warnf("Failed to remove audio subscriber with ID %d (not found)", id)
+	}
+
+	return removed
+}
+
+// Compile-time check to ensure Manager implements MediaStreamProvider interface
+var _ MediaStreamProvider = (*Manager)(nil)

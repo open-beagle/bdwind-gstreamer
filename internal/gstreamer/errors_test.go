@@ -397,7 +397,7 @@ func TestGlobalErrorHandler(t *testing.T) {
 	})
 }
 
-func TestRecoveryStrategies(t *testing.T) {
+func TestErrorRecoveryStrategies(t *testing.T) {
 	t.Run("Default recovery strategies", func(t *testing.T) {
 		logger := logrus.NewEntry(logrus.New())
 		eh := NewErrorHandler(logger, nil)

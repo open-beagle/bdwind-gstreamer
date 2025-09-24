@@ -11,11 +11,13 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/gstreamer"
 )
 
 // ManagerConfig WebRTC管理器配置
 type ManagerConfig struct {
-	Config *config.Config
+	Config        *config.Config
+	MediaProvider gstreamer.MediaStreamProvider // Direct connection to GStreamer (replaces bridge)
 }
 
 // Manager WebRTC管理器，统一管理所有WebRTC组件
@@ -26,8 +28,12 @@ type Manager struct {
 	// WebRTC组件
 	signaling   *SignalingServer
 	mediaStream MediaStream
-	bridge      GStreamerBridge
 	sdpGen      *SDPGenerator
+
+	// GStreamer integration (replaces bridge)
+	mediaProvider   gstreamer.MediaStreamProvider
+	mediaSubscriber *WebRTCMediaSubscriber
+	subscriberID    uint64
 
 	// HTTP处理器
 	handlers *webrtcHandlers
@@ -56,6 +62,10 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 		return nil, fmt.Errorf("config is required")
 	}
 
+	if cfg.MediaProvider == nil {
+		return nil, fmt.Errorf("media provider is required")
+	}
+
 	// Use the provided context instead of creating a new one
 	childCtx, cancel := context.WithCancel(ctx)
 
@@ -70,10 +80,11 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 		cfg.Config.GStreamer.Capture.FrameRate)
 
 	manager := &Manager{
-		config: cfg.Config,
-		logger: logger,
-		ctx:    childCtx,
-		cancel: cancel,
+		config:        cfg.Config,
+		logger:        logger,
+		ctx:           childCtx,
+		cancel:        cancel,
+		mediaProvider: cfg.MediaProvider,
 	}
 
 	// 初始化组件
@@ -160,21 +171,21 @@ func (m *Manager) initializeComponents() error {
 	m.logger.Debugf("MediaStream creation result: total_tracks=%d, active_tracks=%d",
 		stats.TotalTracks, stats.ActiveTracks)
 
-	// 3. 创建GStreamer桥接器
-	m.logger.Trace("Step 3: Creating GStreamer Bridge")
-	bridgeConfig := DefaultGStreamerBridgeConfig()
-	m.logger.Tracef("Bridge configuration: video_buffer=%d, audio_buffer=%d, video_clock_rate=%d, audio_clock_rate=%d",
-		bridgeConfig.VideoBufferSize, bridgeConfig.AudioBufferSize,
-		bridgeConfig.VideoClockRate, bridgeConfig.AudioClockRate)
+	// 3. Create WebRTC media subscriber (replaces GStreamer bridge)
+	m.logger.Trace("Step 3: Creating WebRTC media subscriber")
 
-	m.bridge = NewGStreamerBridge(bridgeConfig)
+	// Generate unique subscriber ID
+	subscriberID := uint64(time.Now().UnixNano())
+	m.mediaSubscriber = NewWebRTCMediaSubscriber(subscriberID, m.mediaStream, m.logger)
 
-	// 设置媒体流到桥接器
-	if err := m.bridge.SetMediaStream(m.mediaStream); err != nil {
-		m.logger.Errorf("Failed to set MediaStream to bridge: %v", err)
-		return fmt.Errorf("failed to set media stream to bridge: %w", err)
+	// Subscribe to video stream from GStreamer
+	m.subscriberID, err = m.mediaProvider.AddVideoSubscriber(m.mediaSubscriber)
+	if err != nil {
+		m.logger.Errorf("Failed to add video subscriber to GStreamer: %v", err)
+		return fmt.Errorf("failed to add video subscriber: %w", err)
 	}
-	m.logger.Debug("GStreamer bridge created and MediaStream configured successfully")
+
+	m.logger.Debugf("WebRTC media subscriber created and registered with GStreamer (ID: %d)", m.subscriberID)
 
 	// 4. 创建信令服务器
 	m.logger.Trace("Step 4: Creating signaling server")
@@ -256,22 +267,23 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.logger.Error("MediaStream is nil, cannot start WebRTC manager")
 		return fmt.Errorf("MediaStream not initialized")
 	}
-	if m.bridge == nil {
-		m.logger.Error("GStreamer bridge is nil, cannot start WebRTC manager")
-		return fmt.Errorf("GStreamer bridge not initialized")
+	if m.mediaProvider == nil {
+		m.logger.Error("MediaProvider is nil, cannot start WebRTC manager")
+		return fmt.Errorf("MediaProvider not initialized")
+	}
+	if m.mediaSubscriber == nil {
+		m.logger.Error("Media subscriber is nil, cannot start WebRTC manager")
+		return fmt.Errorf("Media subscriber not initialized")
 	}
 	if m.signaling == nil {
 		m.logger.Error("Signaling server is nil, cannot start WebRTC manager")
 		return fmt.Errorf("Signaling server not initialized")
 	}
 
-	// 启动GStreamer桥接器
-	m.logger.Debug("Starting GStreamer bridge")
-	if err := m.bridge.Start(); err != nil {
-		m.logger.Errorf("Failed to start GStreamer bridge: %v", err)
-		return fmt.Errorf("failed to start GStreamer bridge: %w", err)
-	}
-	m.logger.Debug("GStreamer bridge started successfully")
+	// Activate the media subscriber (replaces bridge startup)
+	m.logger.Debug("Activating WebRTC media subscriber")
+	m.mediaSubscriber.SetActive(true)
+	m.logger.Debug("WebRTC media subscriber activated successfully")
 
 	// 启动媒体流监控
 	m.logger.Debug("Starting MediaStream track monitoring")
@@ -328,12 +340,18 @@ func (m *Manager) Stop(ctx context.Context) error {
 		m.logger.Debug("MediaStream track monitoring stopped")
 	}
 
-	// 停止GStreamer桥接器
-	m.logger.Debug("Stopping GStreamer bridge...")
-	if err := m.bridge.Stop(); err != nil {
-		m.logger.Warnf("Failed to stop GStreamer bridge: %v", err)
-	} else {
-		m.logger.Debug("GStreamer bridge stopped")
+	// Deactivate media subscriber and unsubscribe from GStreamer
+	m.logger.Debug("Deactivating WebRTC media subscriber...")
+	if m.mediaSubscriber != nil {
+		m.mediaSubscriber.SetActive(false)
+	}
+
+	if m.mediaProvider != nil && m.subscriberID != 0 {
+		if removed := m.mediaProvider.RemoveVideoSubscriber(m.subscriberID); removed {
+			m.logger.Debug("Successfully unsubscribed from GStreamer video stream")
+		} else {
+			m.logger.Warn("Failed to unsubscribe from GStreamer video stream")
+		}
 	}
 
 	// 关闭媒体流
@@ -377,9 +395,14 @@ func (m *Manager) GetMediaStream() MediaStream {
 	return m.mediaStream
 }
 
-// GetBridge 获取GStreamer桥接器实例
-func (m *Manager) GetBridge() GStreamerBridge {
-	return m.bridge
+// GetMediaProvider 获取媒体流提供者实例 (replaces GetBridge)
+func (m *Manager) GetMediaProvider() gstreamer.MediaStreamProvider {
+	return m.mediaProvider
+}
+
+// GetMediaSubscriber 获取媒体订阅者实例
+func (m *Manager) GetMediaSubscriber() *WebRTCMediaSubscriber {
+	return m.mediaSubscriber
 }
 
 // GetSDPGenerator 获取SDP生成器实例
@@ -417,17 +440,10 @@ func (m *Manager) GetStats() map[string]interface{} {
 			"last_audio_timestamp": mediaStats.LastAudioTimestamp,
 		}
 
-		// 获取桥接器统计
-		bridgeStats := m.bridge.GetStats()
-		stats["bridge"] = map[string]interface{}{
-			"video_samples_processed": bridgeStats.VideoSamplesProcessed,
-			"audio_samples_processed": bridgeStats.AudioSamplesProcessed,
-			"video_samples_dropped":   bridgeStats.VideoSamplesDropped,
-			"audio_samples_dropped":   bridgeStats.AudioSamplesDropped,
-			"video_processing_time":   bridgeStats.VideoProcessingTime.Milliseconds(),
-			"audio_processing_time":   bridgeStats.AudioProcessingTime.Milliseconds(),
-			"last_video_sample":       bridgeStats.LastVideoSample,
-			"last_audio_sample":       bridgeStats.LastAudioSample,
+		// 获取媒体订阅者统计 (replaces bridge stats)
+		if m.mediaSubscriber != nil {
+			subscriberStats := m.mediaSubscriber.GetStatistics()
+			stats["media_subscriber"] = subscriberStats
 		}
 	}
 
@@ -464,11 +480,12 @@ func (m *Manager) GetComponentStatus() map[string]bool {
 	defer m.mutex.RUnlock()
 
 	return map[string]bool{
-		"manager":       m.running,
-		"signaling":     m.signaling != nil,
-		"media_stream":  m.mediaStream != nil,
-		"bridge":        m.bridge != nil,
-		"sdp_generator": m.sdpGen != nil,
+		"manager":          m.running,
+		"signaling":        m.signaling != nil,
+		"media_stream":     m.mediaStream != nil,
+		"media_provider":   m.mediaProvider != nil,
+		"media_subscriber": m.mediaSubscriber != nil,
+		"sdp_generator":    m.sdpGen != nil,
 	}
 }
 

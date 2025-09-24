@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-gst/go-gst/gst"
 	"github.com/sirupsen/logrus"
 )
 
@@ -103,29 +104,66 @@ func (et GStreamerErrorType) String() string {
 type GStreamerErrorSeverity int
 
 const (
-	UnifiedSeverityInfo GStreamerErrorSeverity = iota
-	UnifiedSeverityWarning
-	UnifiedSeverityError
-	UnifiedSeverityCritical
-	UnifiedSeverityFatal
+	SeverityInfo GStreamerErrorSeverity = iota
+	SeverityWarning
+	SeverityError
+	SeverityCritical
+	SeverityFatal
+)
+
+// Legacy aliases for backward compatibility
+const (
+	UnifiedSeverityInfo     = SeverityInfo
+	UnifiedSeverityWarning  = SeverityWarning
+	UnifiedSeverityError    = SeverityError
+	UnifiedSeverityCritical = SeverityCritical
+	UnifiedSeverityFatal    = SeverityFatal
 )
 
 // String returns the string representation of GStreamerErrorSeverity
 func (es GStreamerErrorSeverity) String() string {
 	switch es {
-	case UnifiedSeverityInfo:
+	case SeverityInfo:
 		return "Info"
-	case UnifiedSeverityWarning:
+	case SeverityWarning:
 		return "Warning"
-	case UnifiedSeverityError:
+	case SeverityError:
 		return "Error"
-	case UnifiedSeverityCritical:
+	case SeverityCritical:
 		return "Critical"
-	case UnifiedSeverityFatal:
+	case SeverityFatal:
 		return "Fatal"
 	default:
 		return "Unknown"
 	}
+}
+
+// GetLogLevel returns the appropriate logrus level for this severity
+func (es GStreamerErrorSeverity) GetLogLevel() logrus.Level {
+	switch es {
+	case SeverityInfo:
+		return logrus.InfoLevel
+	case SeverityWarning:
+		return logrus.WarnLevel
+	case SeverityError:
+		return logrus.ErrorLevel
+	case SeverityCritical:
+		return logrus.ErrorLevel
+	case SeverityFatal:
+		return logrus.FatalLevel
+	default:
+		return logrus.ErrorLevel
+	}
+}
+
+// IsHigherThan returns true if this severity is higher than the other
+func (es GStreamerErrorSeverity) IsHigherThan(other GStreamerErrorSeverity) bool {
+	return es > other
+}
+
+// RequiresImmediateAction returns true if this severity requires immediate action
+func (es GStreamerErrorSeverity) RequiresImmediateAction() bool {
+	return es >= SeverityCritical
 }
 
 // RecoveryAction defines the type of recovery action to take
@@ -160,8 +198,8 @@ func (ra RecoveryAction) String() string {
 	}
 }
 
-// RecoveryStrategy defines how to recover from a specific error type
-type RecoveryStrategy struct {
+// ErrorRecoveryStrategy defines how to recover from a specific error type
+type ErrorRecoveryStrategy struct {
 	MaxRetries     int
 	RetryDelay     time.Duration
 	Actions        []RecoveryAction
@@ -216,7 +254,7 @@ type ErrorHandler struct {
 	componentErrors map[string][]GStreamerError
 
 	// Recovery management
-	recoveryStrategies map[GStreamerErrorType]RecoveryStrategy
+	recoveryStrategies map[GStreamerErrorType]ErrorRecoveryStrategy
 	activeRecoveries   map[string]*RecoveryContext
 
 	// Metrics
@@ -224,6 +262,11 @@ type ErrorHandler struct {
 
 	// Event handlers
 	errorHandlers []ErrorEventHandler
+
+	// Enhanced debugging and analysis
+	debugMode          bool
+	pipelineVisualizer *PipelineVisualizer
+	trendAnalyzer      *TrendAnalyzer
 }
 
 // UnifiedErrorHandlerConfig contains configuration for the unified error handler
@@ -283,6 +326,96 @@ type ErrorMetrics struct {
 
 	ComponentRestarts int64
 	LastErrorTime     time.Time
+
+	// Enhanced metrics for trend analysis
+	ErrorsPerHour   map[time.Time]int64
+	ErrorTrends     *ErrorTrendAnalysis
+	CriticalErrors  int64
+	ErrorBursts     []ErrorBurst
+	MeanTimeBetween time.Duration
+	ErrorFrequency  float64 // errors per minute
+}
+
+// ErrorTrendAnalysis provides trend analysis for errors
+type ErrorTrendAnalysis struct {
+	mu sync.RWMutex
+
+	// Time-based analysis
+	HourlyErrorCounts map[int]int64    // hour of day -> error count
+	DailyErrorCounts  map[string]int64 // date -> error count
+	WeeklyErrorCounts map[int]int64    // week number -> error count
+
+	// Component analysis
+	ComponentTrends map[string]*ComponentErrorTrend
+
+	// Severity trends
+	SeverityTrends map[GStreamerErrorSeverity]*SeverityTrend
+
+	// Recovery analysis
+	RecoverySuccessRate float64
+	AvgRecoveryTime     time.Duration
+
+	// Prediction data
+	PredictedErrorRate float64
+	TrendDirection     TrendDirection
+	ConfidenceLevel    float64
+}
+
+// ComponentErrorTrend tracks error trends for a specific component
+type ComponentErrorTrend struct {
+	Component           string
+	ErrorCount          int64
+	LastErrorTime       time.Time
+	ErrorRate           float64 // errors per hour
+	MostCommonErrorType GStreamerErrorType
+	TrendDirection      TrendDirection
+	HealthScore         float64 // 0-100, higher is better
+}
+
+// SeverityTrend tracks trends for a specific severity level
+type SeverityTrend struct {
+	Severity       GStreamerErrorSeverity
+	Count          int64
+	Rate           float64 // errors per hour
+	TrendDirection TrendDirection
+	RecentIncrease bool
+}
+
+// ErrorBurst represents a burst of errors in a short time period
+type ErrorBurst struct {
+	StartTime  time.Time
+	EndTime    time.Time
+	ErrorCount int64
+	Duration   time.Duration
+	Components []string
+	Severity   GStreamerErrorSeverity
+	Resolved   bool
+}
+
+// TrendDirection indicates the direction of an error trend
+type TrendDirection int
+
+const (
+	TrendStable TrendDirection = iota
+	TrendIncreasing
+	TrendDecreasing
+	TrendVolatile
+)
+
+// String returns the string representation of TrendDirection
+func (td TrendDirection) String() string {
+	switch td {
+	case TrendStable:
+		return "Stable"
+	case TrendIncreasing:
+		return "Increasing"
+	case TrendDecreasing:
+		return "Decreasing"
+	case TrendVolatile:
+		return "Volatile"
+	default:
+		return "Unknown"
+	}
 }
 
 // ErrorEventHandler is called when errors occur
@@ -313,14 +446,20 @@ func NewErrorHandler(logger *logrus.Entry, config *UnifiedErrorHandlerConfig) *E
 		config:             config,
 		errorHistory:       make([]GStreamerError, 0, config.MaxErrorHistory),
 		componentErrors:    make(map[string][]GStreamerError),
-		recoveryStrategies: make(map[GStreamerErrorType]RecoveryStrategy),
+		recoveryStrategies: make(map[GStreamerErrorType]ErrorRecoveryStrategy),
 		activeRecoveries:   make(map[string]*RecoveryContext),
 		metrics: &ErrorMetrics{
 			ErrorsByType:      make(map[GStreamerErrorType]int64),
 			ErrorsBySeverity:  make(map[GStreamerErrorSeverity]int64),
 			ErrorsByComponent: make(map[string]int64),
+			ErrorsPerHour:     make(map[time.Time]int64),
+			ErrorTrends:       NewErrorTrendAnalysis(),
+			ErrorBursts:       make([]ErrorBurst, 0),
 		},
-		errorHandlers: make([]ErrorEventHandler, 0),
+		errorHandlers:      make([]ErrorEventHandler, 0),
+		debugMode:          false,
+		pipelineVisualizer: NewPipelineVisualizer(logger.WithField("subcomponent", "visualizer"), nil),
+		trendAnalyzer:      NewTrendAnalyzer(logger.WithField("subcomponent", "trend-analyzer"), nil),
 	}
 
 	// Initialize default recovery strategies
@@ -364,8 +503,16 @@ func (eh *ErrorHandler) HandleError(ctx context.Context, errorType GStreamerErro
 	// Update metrics
 	eh.updateMetrics(gstError)
 
-	// Log error
-	eh.logError(gstError)
+	// Update trend analysis
+	eh.updateTrendAnalysis(gstError)
+
+	// Log error with enhanced severity handling
+	eh.logErrorWithSeverity(gstError)
+
+	// Record error for pipeline visualization if in debug mode
+	if eh.debugMode && eh.pipelineVisualizer != nil {
+		eh.pipelineVisualizer.RecordError(component, errorType, message)
+	}
 
 	// Notify error handlers
 	eh.notifyErrorHandlers(gstError)
@@ -444,7 +591,7 @@ func (eh *ErrorHandler) WrapError(err error, errorType GStreamerErrorType, compo
 // initializeDefaultRecoveryStrategies sets up default recovery strategies
 func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	// Pipeline state errors - retry with increasing delays
-	eh.recoveryStrategies[ErrorTypePipelineState] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypePipelineState] = ErrorRecoveryStrategy{
 		MaxRetries:     3,
 		RetryDelay:     time.Second,
 		Actions:        []RecoveryAction{RecoveryRetry, RecoveryRestart},
@@ -453,7 +600,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Element creation errors - try alternative elements
-	eh.recoveryStrategies[ErrorTypeElementCreation] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypeElementCreation] = ErrorRecoveryStrategy{
 		MaxRetries:     2,
 		RetryDelay:     2 * time.Second,
 		Actions:        []RecoveryAction{RecoveryFallback, RecoveryRestart},
@@ -462,7 +609,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Element linking errors - reconfigure and retry
-	eh.recoveryStrategies[ErrorTypeElementLinking] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypeElementLinking] = ErrorRecoveryStrategy{
 		MaxRetries:     2,
 		RetryDelay:     time.Second,
 		Actions:        []RecoveryAction{RecoveryReconfigure, RecoveryRestart},
@@ -471,7 +618,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Resource access errors - retry with backoff
-	eh.recoveryStrategies[ErrorTypeResourceAccess] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypeResourceAccess] = ErrorRecoveryStrategy{
 		MaxRetries:     5,
 		RetryDelay:     3 * time.Second,
 		Actions:        []RecoveryAction{RecoveryRetry, RecoveryFallback},
@@ -480,7 +627,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Memory allocation errors - cleanup and restart
-	eh.recoveryStrategies[ErrorTypeMemoryAllocation] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypeMemoryAllocation] = ErrorRecoveryStrategy{
 		MaxRetries:     1,
 		RetryDelay:     5 * time.Second,
 		Actions:        []RecoveryAction{RecoveryRestart},
@@ -489,7 +636,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Permission errors - manual intervention required
-	eh.recoveryStrategies[ErrorTypePermission] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypePermission] = ErrorRecoveryStrategy{
 		MaxRetries:     0,
 		RetryDelay:     0,
 		Actions:        []RecoveryAction{RecoveryManualIntervention},
@@ -498,7 +645,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Hardware errors - limited recovery options
-	eh.recoveryStrategies[ErrorTypeHardware] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypeHardware] = ErrorRecoveryStrategy{
 		MaxRetries:     1,
 		RetryDelay:     5 * time.Second,
 		Actions:        []RecoveryAction{RecoveryFallback, RecoveryManualIntervention},
@@ -507,7 +654,7 @@ func (eh *ErrorHandler) initializeDefaultRecoveryStrategies() {
 	}
 
 	// Configuration errors - validate and reconfigure
-	eh.recoveryStrategies[ErrorTypeConfiguration] = RecoveryStrategy{
+	eh.recoveryStrategies[ErrorTypeConfiguration] = ErrorRecoveryStrategy{
 		MaxRetries:     2,
 		RetryDelay:     time.Second,
 		Actions:        []RecoveryAction{RecoveryReconfigure, RecoveryFallback},
@@ -601,38 +748,200 @@ func (eh *ErrorHandler) attemptRecovery(ctx context.Context, gstError *GStreamer
 	return fmt.Errorf("all recovery attempts failed for error %s", gstError.Code)
 }
 
-// executeRecoveryAction executes a specific recovery action
+// executeRecoveryAction executes a specific recovery action with enhanced context and logging
 func (eh *ErrorHandler) executeRecoveryAction(ctx context.Context, action RecoveryAction, gstError *GStreamerError) error {
-	eh.logger.Debugf("Executing recovery action %s for error %s", action.String(), gstError.Code)
+	actionLogger := eh.logger.WithFields(logrus.Fields{
+		"recovery_action": action.String(),
+		"error_code":      gstError.Code,
+		"error_type":      gstError.Type.String(),
+		"component":       gstError.Component,
+		"operation":       gstError.Operation,
+	})
+
+	actionLogger.Info("Executing recovery action")
+	startTime := time.Now()
+
+	defer func() {
+		duration := time.Since(startTime)
+		actionLogger.WithField("duration", duration).Debug("Recovery action completed")
+	}()
 
 	switch action {
 	case RecoveryRetry:
-		// For retry, we don't need to do anything special
-		// The calling code will retry the original operation
-		return nil
+		return eh.executeRetryRecovery(ctx, gstError, actionLogger)
 
 	case RecoveryRestart:
-		// This would typically involve restarting the component
-		// Implementation depends on the specific component
-		eh.logger.Infof("Component restart recommended for %s", gstError.Component)
-		return fmt.Errorf("restart recovery not implemented")
+		return eh.executeRestartRecovery(ctx, gstError, actionLogger)
 
 	case RecoveryReconfigure:
-		// This would involve adjusting configuration
-		eh.logger.Infof("Reconfiguration recommended for %s", gstError.Component)
-		return fmt.Errorf("reconfigure recovery not implemented")
+		return eh.executeReconfigureRecovery(ctx, gstError, actionLogger)
 
 	case RecoveryFallback:
-		// This would involve switching to alternative configuration
-		eh.logger.Infof("Fallback configuration recommended for %s", gstError.Component)
-		return fmt.Errorf("fallback recovery not implemented")
+		return eh.executeFallbackRecovery(ctx, gstError, actionLogger)
 
 	case RecoveryManualIntervention:
-		return fmt.Errorf("manual intervention required")
+		return eh.executeManualInterventionRecovery(ctx, gstError, actionLogger)
 
 	default:
+		actionLogger.Errorf("Unknown recovery action: %s", action.String())
 		return fmt.Errorf("unknown recovery action: %s", action.String())
 	}
+}
+
+// executeRetryRecovery handles retry recovery with enhanced context
+func (eh *ErrorHandler) executeRetryRecovery(ctx context.Context, gstError *GStreamerError, logger *logrus.Entry) error {
+	logger.Debug("Executing retry recovery - operation will be retried by caller")
+
+	// Add retry context to error metadata
+	if gstError.Metadata == nil {
+		gstError.Metadata = make(map[string]interface{})
+	}
+	gstError.Metadata["retry_timestamp"] = time.Now()
+	gstError.Metadata["retry_context"] = fmt.Sprintf("Retry for %s operation on %s", gstError.Operation, gstError.Component)
+
+	// For retry, we don't need to do anything special
+	// The calling code will retry the original operation
+	return nil
+}
+
+// executeRestartRecovery handles component restart recovery
+func (eh *ErrorHandler) executeRestartRecovery(ctx context.Context, gstError *GStreamerError, logger *logrus.Entry) error {
+	logger.WithFields(logrus.Fields{
+		"restart_reason": fmt.Sprintf("%s error in %s", gstError.Type.String(), gstError.Operation),
+		"error_severity": gstError.Severity.String(),
+	}).Info("Component restart recovery initiated")
+
+	// Add restart context to error metadata
+	if gstError.Metadata == nil {
+		gstError.Metadata = make(map[string]interface{})
+	}
+	gstError.Metadata["restart_recommended"] = true
+	gstError.Metadata["restart_reason"] = fmt.Sprintf("%s error", gstError.Type.String())
+	gstError.Metadata["restart_timestamp"] = time.Now()
+
+	// Update metrics
+	eh.metrics.mu.Lock()
+	eh.metrics.ComponentRestarts++
+	eh.metrics.mu.Unlock()
+
+	// This would typically involve restarting the component
+	// Implementation depends on the specific component
+	logger.Warn("Component restart recovery not fully implemented - manual restart may be required")
+	return fmt.Errorf("restart recovery requires manual intervention for component %s", gstError.Component)
+}
+
+// executeReconfigureRecovery handles reconfiguration recovery
+func (eh *ErrorHandler) executeReconfigureRecovery(ctx context.Context, gstError *GStreamerError, logger *logrus.Entry) error {
+	logger.WithFields(logrus.Fields{
+		"reconfigure_reason": fmt.Sprintf("%s error in %s", gstError.Type.String(), gstError.Operation),
+		"current_config":     "unknown", // Would be populated with actual config
+	}).Info("Reconfiguration recovery initiated")
+
+	// Add reconfiguration context to error metadata
+	if gstError.Metadata == nil {
+		gstError.Metadata = make(map[string]interface{})
+	}
+	gstError.Metadata["reconfigure_recommended"] = true
+	gstError.Metadata["reconfigure_reason"] = fmt.Sprintf("%s error", gstError.Type.String())
+	gstError.Metadata["reconfigure_timestamp"] = time.Now()
+
+	// This would involve adjusting configuration based on error type
+	switch gstError.Type {
+	case ErrorTypeElementProperty:
+		logger.Debug("Attempting to reset element properties to default values")
+		gstError.Metadata["reconfigure_action"] = "reset_element_properties"
+	case ErrorTypeFormatNegotiation:
+		logger.Debug("Attempting to use fallback format negotiation")
+		gstError.Metadata["reconfigure_action"] = "fallback_format_negotiation"
+	case ErrorTypeConfiguration:
+		logger.Debug("Attempting to reload configuration from defaults")
+		gstError.Metadata["reconfigure_action"] = "reload_default_config"
+	default:
+		logger.Debug("Generic reconfiguration attempt")
+		gstError.Metadata["reconfigure_action"] = "generic_reconfigure"
+	}
+
+	logger.Warn("Reconfiguration recovery not fully implemented - configuration changes may be required")
+	return fmt.Errorf("reconfigure recovery requires implementation for error type %s", gstError.Type.String())
+}
+
+// executeFallbackRecovery handles fallback recovery
+func (eh *ErrorHandler) executeFallbackRecovery(ctx context.Context, gstError *GStreamerError, logger *logrus.Entry) error {
+	logger.WithFields(logrus.Fields{
+		"fallback_reason": fmt.Sprintf("%s error in %s", gstError.Type.String(), gstError.Operation),
+		"error_component": gstError.Component,
+	}).Info("Fallback recovery initiated")
+
+	// Add fallback context to error metadata
+	if gstError.Metadata == nil {
+		gstError.Metadata = make(map[string]interface{})
+	}
+	gstError.Metadata["fallback_recommended"] = true
+	gstError.Metadata["fallback_reason"] = fmt.Sprintf("%s error", gstError.Type.String())
+	gstError.Metadata["fallback_timestamp"] = time.Now()
+
+	// Suggest fallback options based on error type and component
+	switch gstError.Type {
+	case ErrorTypeElementCreation:
+		logger.Debug("Suggesting alternative element for creation")
+		gstError.Metadata["fallback_suggestion"] = "try_alternative_element"
+	case ErrorTypeHardware:
+		logger.Debug("Suggesting software fallback for hardware error")
+		gstError.Metadata["fallback_suggestion"] = "use_software_implementation"
+	case ErrorTypeNetwork:
+		logger.Debug("Suggesting local fallback for network error")
+		gstError.Metadata["fallback_suggestion"] = "use_local_resources"
+	case ErrorTypeResourceAccess:
+		logger.Debug("Suggesting alternative resource access method")
+		gstError.Metadata["fallback_suggestion"] = "try_alternative_resource"
+	default:
+		logger.Debug("Generic fallback suggestion")
+		gstError.Metadata["fallback_suggestion"] = "use_safe_defaults"
+	}
+
+	logger.Warn("Fallback recovery not fully implemented - alternative configuration may be needed")
+	return fmt.Errorf("fallback recovery requires implementation for error type %s", gstError.Type.String())
+}
+
+// executeManualInterventionRecovery handles manual intervention recovery
+func (eh *ErrorHandler) executeManualInterventionRecovery(ctx context.Context, gstError *GStreamerError, logger *logrus.Entry) error {
+	logger.WithFields(logrus.Fields{
+		"intervention_reason": fmt.Sprintf("%s error in %s", gstError.Type.String(), gstError.Operation),
+		"error_severity":      gstError.Severity.String(),
+		"component":           gstError.Component,
+	}).Warn("Manual intervention required for error recovery")
+
+	// Add manual intervention context to error metadata
+	if gstError.Metadata == nil {
+		gstError.Metadata = make(map[string]interface{})
+	}
+	gstError.Metadata["manual_intervention_required"] = true
+	gstError.Metadata["intervention_reason"] = fmt.Sprintf("%s error", gstError.Type.String())
+	gstError.Metadata["intervention_timestamp"] = time.Now()
+
+	// Provide specific guidance based on error type
+	var guidance string
+	switch gstError.Type {
+	case ErrorTypePermission:
+		guidance = "Check file/device permissions and user privileges"
+		gstError.Metadata["intervention_guidance"] = guidance
+	case ErrorTypeHardware:
+		guidance = "Verify hardware availability and driver installation"
+		gstError.Metadata["intervention_guidance"] = guidance
+	case ErrorTypeNetwork:
+		guidance = "Check network connectivity and firewall settings"
+		gstError.Metadata["intervention_guidance"] = guidance
+	case ErrorTypeResourceAccess:
+		guidance = "Verify resource availability and access permissions"
+		gstError.Metadata["intervention_guidance"] = guidance
+	default:
+		guidance = "Review error details and system configuration"
+		gstError.Metadata["intervention_guidance"] = guidance
+	}
+
+	logger.WithField("guidance", guidance).Error("Manual intervention guidance")
+
+	return fmt.Errorf("manual intervention required: %s", guidance)
 }
 
 // Helper methods for error handling
@@ -857,14 +1166,14 @@ func (eh *ErrorHandler) CancelRecovery(errorCode string) error {
 }
 
 // SetRecoveryStrategy sets a custom recovery strategy for an error type
-func (eh *ErrorHandler) SetRecoveryStrategy(errorType GStreamerErrorType, strategy RecoveryStrategy) {
+func (eh *ErrorHandler) SetRecoveryStrategy(errorType GStreamerErrorType, strategy ErrorRecoveryStrategy) {
 	eh.mu.Lock()
 	defer eh.mu.Unlock()
 	eh.recoveryStrategies[errorType] = strategy
 }
 
 // GetRecoveryStrategy gets the recovery strategy for an error type
-func (eh *ErrorHandler) GetRecoveryStrategy(errorType GStreamerErrorType) (RecoveryStrategy, bool) {
+func (eh *ErrorHandler) GetRecoveryStrategy(errorType GStreamerErrorType) (ErrorRecoveryStrategy, bool) {
 	eh.mu.RLock()
 	defer eh.mu.RUnlock()
 	strategy, exists := eh.recoveryStrategies[errorType]
@@ -1058,6 +1367,473 @@ func IsRecoverableError(err error) bool {
 		return gstErr.IsRecoverable()
 	}
 	return false
+}
+
+// Enhanced error handling methods
+
+// updateTrendAnalysis updates the trend analysis with enhanced error context
+func (eh *ErrorHandler) updateTrendAnalysis(gstError *GStreamerError) {
+	if eh.trendAnalyzer == nil {
+		eh.logger.Debug("Trend analyzer not available, skipping trend analysis update")
+		return
+	}
+
+	recovered := false
+	recoveryTime := time.Duration(0)
+
+	// Enhanced recovery analysis
+	if len(gstError.Attempted) > 0 {
+		lastAttempt := gstError.Attempted[len(gstError.Attempted)-1]
+		recovered = lastAttempt.Success
+
+		// Calculate total recovery time from first attempt to last success
+		if recovered {
+			firstAttempt := gstError.Attempted[0].Timestamp
+			recoveryTime = lastAttempt.Timestamp.Sub(firstAttempt) + lastAttempt.Duration
+		} else {
+			// If not recovered, use the duration of the last attempt
+			recoveryTime = lastAttempt.Duration
+		}
+	}
+
+	// Add error data point to trend analyzer
+	eh.trendAnalyzer.AddErrorDataPoint(
+		gstError.Type,
+		gstError.Severity,
+		gstError.Component,
+		recovered,
+		recoveryTime,
+	)
+
+	// Log trend analysis update with context
+	eh.logger.WithFields(logrus.Fields{
+		"error_code":    gstError.Code,
+		"error_type":    gstError.Type.String(),
+		"component":     gstError.Component,
+		"recovered":     recovered,
+		"recovery_time": recoveryTime,
+		"attempt_count": len(gstError.Attempted),
+		"trend_updated": true,
+	}).Debug("Updated error trend analysis with enhanced context")
+
+	// Log additional context for critical errors
+	if gstError.IsCritical() {
+		eh.logger.WithFields(logrus.Fields{
+			"error_code":    gstError.Code,
+			"severity":      gstError.Severity.String(),
+			"component":     gstError.Component,
+			"critical_flag": true,
+		}).Info("Critical error added to trend analysis - monitoring for patterns")
+	}
+}
+
+// logErrorWithSeverity logs error with enhanced severity-based formatting
+func (eh *ErrorHandler) logErrorWithSeverity(gstError *GStreamerError) {
+	logEntry := eh.logger.WithFields(logrus.Fields{
+		"error_type":     gstError.Type.String(),
+		"error_severity": gstError.Severity.String(),
+		"error_code":     gstError.Code,
+		"component":      gstError.Component,
+		"operation":      gstError.Operation,
+		"recoverable":    gstError.Recoverable,
+		"timestamp":      gstError.Timestamp,
+	})
+
+	// Add additional context for critical errors
+	if gstError.IsCritical() {
+		logEntry = logEntry.WithFields(logrus.Fields{
+			"requires_immediate_action": true,
+			"suggested_actions":         gstError.Suggested,
+		})
+	}
+
+	// Add recovery information if available
+	if len(gstError.Attempted) > 0 {
+		logEntry = logEntry.WithField("recovery_attempts", len(gstError.Attempted))
+		lastAttempt := gstError.Attempted[len(gstError.Attempted)-1]
+		logEntry = logEntry.WithFields(logrus.Fields{
+			"last_recovery_action":  lastAttempt.Action.String(),
+			"last_recovery_success": lastAttempt.Success,
+		})
+	}
+
+	// Log at appropriate level based on severity
+	switch gstError.Severity {
+	case SeverityInfo:
+		logEntry.Info(gstError.Message)
+	case SeverityWarning:
+		logEntry.Warn(gstError.Message)
+	case SeverityError:
+		logEntry.Error(gstError.Message)
+	case SeverityCritical:
+		logEntry.WithField("alert", "CRITICAL_ERROR").Error(gstError.Message)
+	case SeverityFatal:
+		logEntry.WithField("alert", "FATAL_ERROR").Fatal(gstError.Message)
+	default:
+		logEntry.Error(gstError.Message)
+	}
+}
+
+// formatSuggestedActions formats suggested recovery actions for logging
+func (eh *ErrorHandler) formatSuggestedActions(actions []RecoveryAction) string {
+	if len(actions) == 0 {
+		return "none"
+	}
+
+	actionStrings := make([]string, len(actions))
+	for i, action := range actions {
+		actionStrings[i] = action.String()
+	}
+	return strings.Join(actionStrings, ", ")
+}
+
+// formatEnhancedErrorMessage creates an enhanced error message with context
+func (eh *ErrorHandler) formatEnhancedErrorMessage(gstError *GStreamerError) string {
+	var builder strings.Builder
+
+	// Base message
+	builder.WriteString(gstError.Message)
+
+	// Add operation context if available
+	if gstError.Operation != "" {
+		builder.WriteString(fmt.Sprintf(" [Operation: %s]", gstError.Operation))
+	}
+
+	// Add details if available
+	if gstError.Details != "" {
+		builder.WriteString(fmt.Sprintf(" [Details: %s]", gstError.Details))
+	}
+
+	// Add recovery information
+	if gstError.Recoverable {
+		builder.WriteString(" [Recoverable]")
+		if len(gstError.Suggested) > 0 {
+			builder.WriteString(fmt.Sprintf(" [Suggested: %s]", eh.formatSuggestedActions(gstError.Suggested)))
+		}
+	} else {
+		builder.WriteString(" [Not Recoverable]")
+	}
+
+	// Add attempt count if any
+	if len(gstError.Attempted) > 0 {
+		builder.WriteString(fmt.Sprintf(" [Attempts: %d]", len(gstError.Attempted)))
+	}
+
+	return builder.String()
+}
+
+// logRecoveryAttempts logs detailed information about recovery attempts
+func (eh *ErrorHandler) logRecoveryAttempts(gstError *GStreamerError) {
+	if len(gstError.Attempted) == 0 {
+		return
+	}
+
+	recoveryLogger := eh.logger.WithFields(logrus.Fields{
+		"error_code": gstError.Code,
+		"component":  gstError.Component,
+	})
+
+	recoveryLogger.Infof("Recovery attempts for error %s:", gstError.Code)
+
+	for i, attempt := range gstError.Attempted {
+		attemptLogger := recoveryLogger.WithFields(logrus.Fields{
+			"attempt_number": i + 1,
+			"action":         attempt.Action.String(),
+			"success":        attempt.Success,
+			"duration":       attempt.Duration,
+			"timestamp":      attempt.Timestamp.Format(time.RFC3339),
+		})
+
+		if attempt.Success {
+			attemptLogger.Info("Recovery attempt succeeded")
+		} else {
+			attemptFields := logrus.Fields{}
+			if attempt.Error != nil {
+				attemptFields["error"] = attempt.Error.Error()
+			}
+			attemptLogger.WithFields(attemptFields).Warn("Recovery attempt failed")
+		}
+	}
+}
+
+// logErrorTrendContext logs trend analysis context for the error
+func (eh *ErrorHandler) logErrorTrendContext(gstError *GStreamerError) {
+	trends := eh.trendAnalyzer.GetCurrentTrends()
+	if trends == nil {
+		return
+	}
+
+	trendLogger := eh.logger.WithFields(logrus.Fields{
+		"error_code": gstError.Code,
+		"component":  gstError.Component,
+	})
+
+	// Log component trend if available
+	if componentTrend, exists := trends.ComponentTrends[gstError.Component]; exists {
+		trendLogger.WithFields(logrus.Fields{
+			"component_error_count":     componentTrend.ErrorCount,
+			"component_error_rate":      fmt.Sprintf("%.2f/hour", componentTrend.ErrorRate),
+			"component_trend_direction": componentTrend.TrendDirection.String(),
+			"component_health_score":    fmt.Sprintf("%.1f/100", componentTrend.HealthScore),
+			"most_common_error_type":    componentTrend.MostCommonErrorType.String(),
+		}).Debug("Component error trend context")
+	}
+
+	// Log severity trend if available
+	if severityTrend, exists := trends.SeverityTrends[gstError.Severity]; exists {
+		trendLogger.WithFields(logrus.Fields{
+			"severity_error_count":     severityTrend.Count,
+			"severity_error_rate":      fmt.Sprintf("%.2f/hour", severityTrend.Rate),
+			"severity_trend_direction": severityTrend.TrendDirection.String(),
+			"severity_recent_increase": severityTrend.RecentIncrease,
+		}).Debug("Severity error trend context")
+	}
+
+	// Log overall trend information
+	trendLogger.WithFields(logrus.Fields{
+		"overall_trend_direction": trends.TrendDirection.String(),
+		"trend_confidence_level":  fmt.Sprintf("%.2f", trends.ConfidenceLevel),
+		"predicted_error_rate":    fmt.Sprintf("%.2f/hour", trends.PredictedErrorRate),
+		"recovery_success_rate":   fmt.Sprintf("%.2f%%", trends.RecoverySuccessRate*100),
+		"avg_recovery_time":       trends.AvgRecoveryTime.String(),
+	}).Debug("Overall error trend context")
+}
+
+// EnableDebugMode enables debug mode with enhanced logging and visualization
+func (eh *ErrorHandler) EnableDebugMode() {
+	eh.mu.Lock()
+	defer eh.mu.Unlock()
+
+	eh.debugMode = true
+	eh.logger.Info("Error handler debug mode enabled")
+
+	// Enable pipeline visualization export
+	if eh.pipelineVisualizer != nil {
+		eh.pipelineVisualizer.SetExportEnabled(true)
+	}
+}
+
+// DisableDebugMode disables debug mode
+func (eh *ErrorHandler) DisableDebugMode() {
+	eh.mu.Lock()
+	defer eh.mu.Unlock()
+
+	eh.debugMode = false
+	eh.logger.Info("Error handler debug mode disabled")
+
+	// Disable pipeline visualization export
+	if eh.pipelineVisualizer != nil {
+		eh.pipelineVisualizer.SetExportEnabled(false)
+	}
+}
+
+// IsDebugMode returns whether debug mode is enabled
+func (eh *ErrorHandler) IsDebugMode() bool {
+	eh.mu.RLock()
+	defer eh.mu.RUnlock()
+	return eh.debugMode
+}
+
+// RegisterPipelineForVisualization registers a pipeline for visualization
+func (eh *ErrorHandler) RegisterPipelineForVisualization(name string, pipeline *gst.Pipeline) error {
+	if eh.pipelineVisualizer == nil {
+		return fmt.Errorf("pipeline visualizer not available")
+	}
+
+	return eh.pipelineVisualizer.RegisterPipeline(name, pipeline)
+}
+
+// ExportPipelineVisualization exports a pipeline visualization
+func (eh *ErrorHandler) ExportPipelineVisualization(pipelineName, reason string) error {
+	if eh.pipelineVisualizer == nil {
+		return fmt.Errorf("pipeline visualizer not available")
+	}
+
+	return eh.pipelineVisualizer.ExportPipeline(pipelineName, reason)
+}
+
+// GetErrorTrends returns current error trend analysis
+func (eh *ErrorHandler) GetErrorTrends() *ErrorTrendAnalysis {
+	if eh.trendAnalyzer == nil {
+		return NewErrorTrendAnalysis()
+	}
+
+	return eh.trendAnalyzer.GetCurrentTrends()
+}
+
+// GetEnhancedMetrics returns enhanced error metrics with trend analysis
+func (eh *ErrorHandler) GetEnhancedMetrics() *EnhancedErrorMetrics {
+	eh.metrics.mu.RLock()
+	baseMetrics := *eh.metrics
+	eh.metrics.mu.RUnlock()
+
+	trends := eh.GetErrorTrends()
+
+	return &EnhancedErrorMetrics{
+		ErrorMetrics: baseMetrics,
+		Trends:       trends,
+		DebugMode:    eh.debugMode,
+		LastAnalysis: time.Now(),
+	}
+}
+
+// EnhancedErrorMetrics combines basic metrics with trend analysis
+type EnhancedErrorMetrics struct {
+	ErrorMetrics
+	Trends       *ErrorTrendAnalysis
+	DebugMode    bool
+	LastAnalysis time.Time
+}
+
+// GetErrorStatistics returns comprehensive error statistics
+func (eh *ErrorHandler) GetErrorStatistics() *GStreamerErrorStatistics {
+	eh.mu.RLock()
+	defer eh.mu.RUnlock()
+
+	stats := &GStreamerErrorStatistics{
+		TotalErrors:       eh.metrics.TotalErrors,
+		ErrorsByType:      make(map[string]int64),
+		ErrorsBySeverity:  make(map[string]int64),
+		ErrorsByComponent: make(map[string]int64),
+		RecoveryStats: RecoveryStatistics{
+			TotalAttempts: eh.metrics.RecoveryAttempts,
+			Successes:     eh.metrics.RecoverySuccesses,
+			Failures:      eh.metrics.RecoveryFailures,
+			SuccessRate:   0.0,
+		},
+		TimeStats: TimeStatistics{
+			LastErrorTime: eh.metrics.LastErrorTime,
+			Uptime:        time.Since(eh.metrics.LastErrorTime),
+		},
+	}
+
+	// Convert maps to string keys for JSON serialization
+	for errorType, count := range eh.metrics.ErrorsByType {
+		stats.ErrorsByType[errorType.String()] = count
+	}
+	for severity, count := range eh.metrics.ErrorsBySeverity {
+		stats.ErrorsBySeverity[severity.String()] = count
+	}
+	for component, count := range eh.metrics.ErrorsByComponent {
+		stats.ErrorsByComponent[component] = count
+	}
+
+	// Calculate recovery success rate
+	if eh.metrics.RecoveryAttempts > 0 {
+		stats.RecoveryStats.SuccessRate = float64(eh.metrics.RecoverySuccesses) / float64(eh.metrics.RecoveryAttempts)
+	}
+
+	return stats
+}
+
+// GStreamerErrorStatistics provides comprehensive error statistics
+type GStreamerErrorStatistics struct {
+	TotalErrors       int64              `json:"total_errors"`
+	ErrorsByType      map[string]int64   `json:"errors_by_type"`
+	ErrorsBySeverity  map[string]int64   `json:"errors_by_severity"`
+	ErrorsByComponent map[string]int64   `json:"errors_by_component"`
+	RecoveryStats     RecoveryStatistics `json:"recovery_stats"`
+	TimeStats         TimeStatistics     `json:"time_stats"`
+}
+
+// RecoveryStatistics provides recovery-related statistics
+type RecoveryStatistics struct {
+	TotalAttempts int64   `json:"total_attempts"`
+	Successes     int64   `json:"successes"`
+	Failures      int64   `json:"failures"`
+	SuccessRate   float64 `json:"success_rate"`
+}
+
+// TimeStatistics provides time-related statistics
+type TimeStatistics struct {
+	LastErrorTime time.Time     `json:"last_error_time"`
+	Uptime        time.Duration `json:"uptime"`
+}
+
+// GenerateErrorReport generates a comprehensive error report
+func (eh *ErrorHandler) GenerateErrorReport() *ErrorReport {
+	statistics := eh.GetErrorStatistics()
+	trends := eh.GetErrorTrends()
+	enhancedMetrics := eh.GetEnhancedMetrics()
+
+	report := &ErrorReport{
+		GeneratedAt:     time.Now(),
+		Statistics:      statistics,
+		Trends:          trends,
+		EnhancedMetrics: enhancedMetrics,
+		RecentErrors:    eh.getRecentErrors(10),
+		Recommendations: eh.generateRecommendations(trends),
+	}
+
+	return report
+}
+
+// ErrorReport provides a comprehensive error analysis report
+type ErrorReport struct {
+	GeneratedAt     time.Time                 `json:"generated_at"`
+	Statistics      *GStreamerErrorStatistics `json:"statistics"`
+	Trends          *ErrorTrendAnalysis       `json:"trends"`
+	EnhancedMetrics *EnhancedErrorMetrics     `json:"enhanced_metrics"`
+	RecentErrors    []GStreamerError          `json:"recent_errors"`
+	Recommendations []string                  `json:"recommendations"`
+}
+
+// getRecentErrors returns the most recent errors
+func (eh *ErrorHandler) getRecentErrors(limit int) []GStreamerError {
+	eh.mu.RLock()
+	defer eh.mu.RUnlock()
+
+	if len(eh.errorHistory) == 0 {
+		return []GStreamerError{}
+	}
+
+	start := len(eh.errorHistory) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	recent := make([]GStreamerError, len(eh.errorHistory)-start)
+	copy(recent, eh.errorHistory[start:])
+
+	return recent
+}
+
+// generateRecommendations generates recommendations based on error trends
+func (eh *ErrorHandler) generateRecommendations(trends *ErrorTrendAnalysis) []string {
+	var recommendations []string
+
+	// Check recovery success rate
+	if trends.RecoverySuccessRate < 0.5 {
+		recommendations = append(recommendations,
+			"Low recovery success rate detected. Consider reviewing recovery strategies.")
+	}
+
+	// Check for increasing error trends
+	if trends.TrendDirection == TrendIncreasing {
+		recommendations = append(recommendations,
+			"Error rate is increasing. Investigate root causes and consider preventive measures.")
+	}
+
+	// Check for component-specific issues
+	for component, trend := range trends.ComponentTrends {
+		if trend.HealthScore < 50 {
+			recommendations = append(recommendations,
+				fmt.Sprintf("Component '%s' has low health score (%.1f). Consider maintenance or replacement.",
+					component, trend.HealthScore))
+		}
+	}
+
+	// Check for critical error trends
+	if criticalTrend, exists := trends.SeverityTrends[SeverityCritical]; exists && criticalTrend.RecentIncrease {
+		recommendations = append(recommendations,
+			"Recent increase in critical errors detected. Immediate investigation recommended.")
+	}
+
+	if len(recommendations) == 0 {
+		recommendations = append(recommendations, "No specific recommendations at this time. System appears stable.")
+	}
+
+	return recommendations
 }
 
 // Error aggregation utilities

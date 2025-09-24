@@ -120,9 +120,28 @@ if xdpyinfo -display :99 >/dev/null 2>&1; then
         echo "👀 启动 xeyes 作为测试应用..."
         xeyes -display :99 &
         XEYES_PID=$!
+    elif command -v xterm >/dev/null 2>&1; then
+        echo "🖥️  启动 xterm 作为测试应用..."
+        xterm -display :99 -geometry 80x24+100+100 -e "echo 'BDWind-GStreamer Debug Environment'; echo 'Virtual Display Content'; sleep 3600" &
+        XEYES_PID=$!
     else
-        echo "⚠️  xeyes 未安装，屏幕上可能没有任何内容可捕获"
-        echo "   请安装 xeyes: sudo apt-get install x11-apps"
+        echo "⚠️  没有找到合适的X11应用程序，创建简单的测试窗口..."
+        # 创建一个简单的测试窗口使用 xwininfo 或其他基本工具
+        if command -v xsetroot >/dev/null 2>&1; then
+            echo "🎨 设置虚拟显示背景..."
+            DISPLAY=:99 xsetroot -solid "#2E3440" &
+        fi
+        echo "   建议安装测试应用: sudo apt-get install x11-apps"
+    fi
+    
+    # 等待测试应用程序完全启动
+    echo "⏳ 等待虚拟显示内容准备就绪..."
+    sleep 2
+    
+    # 验证显示内容
+    if command -v xwininfo >/dev/null 2>&1; then
+        WINDOW_COUNT=$(DISPLAY=:99 xwininfo -root -tree 2>/dev/null | grep -c "child" || echo "0")
+        echo "📊 虚拟显示窗口数量: $WINDOW_COUNT"
     fi
 else
     echo "❌ 虚拟显示启动失败"

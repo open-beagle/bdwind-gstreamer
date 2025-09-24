@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -213,6 +214,176 @@ func TestEncoderGst_SampleProcessing(t *testing.T) {
 	// Check if we can get stats
 	stats := encoder.GetStats()
 	assert.GreaterOrEqual(t, stats.FramesEncoded, int64(0))
+}
+
+func TestEncoderGst_SafeSampleConversion(t *testing.T) {
+	config := createValidX264Config()
+
+	encoder, err := NewEncoderGst(config)
+	if err != nil {
+		t.Skipf("Encoder creation failed: %v", err)
+		return
+	}
+	require.NotNil(t, encoder)
+
+	// Test lifecycle manager initialization
+	assert.NotNil(t, encoder.lifecycleManager, "Lifecycle manager should be initialized")
+
+	// Test safe sample conversion with nil sample
+	sample, err := encoder.safeConvertGstSample(nil)
+	assert.Error(t, err)
+	assert.Nil(t, sample)
+	assert.Contains(t, err.Error(), "received nil gst sample")
+
+	// Test lifecycle manager statistics
+	stats := encoder.lifecycleManager.GetStats()
+	assert.GreaterOrEqual(t, stats.TotalRegistered, int64(0))
+	assert.GreaterOrEqual(t, stats.CurrentActive, int64(0))
+
+	// Test lifecycle manager object listing
+	activeObjects := encoder.lifecycleManager.ListActiveObjects()
+	assert.NotNil(t, activeObjects)
+
+	// Cleanup
+	encoder.Stop()
+
+	// Verify lifecycle manager cleanup
+	finalStats := encoder.lifecycleManager.GetStats()
+	t.Logf("Final lifecycle stats - Total: %d, Active: %d, Released: %d",
+		finalStats.TotalRegistered, finalStats.CurrentActive, finalStats.TotalReleased)
+}
+
+func TestEncoderGst_LifecycleManagerInitialization(t *testing.T) {
+	// Test that lifecycle manager is properly initialized even without GStreamer
+	config := createValidX264Config()
+
+	// Create encoder struct manually to test lifecycle manager initialization
+	enc := &EncoderGst{
+		config: config,
+		logger: logrus.WithField("component", "encoder-gst-test"),
+	}
+
+	// Initialize lifecycle manager
+	lifecycleConfig := ObjectLifecycleConfig{
+		CleanupInterval:    30 * time.Second,
+		ObjectRetention:    5 * time.Minute,
+		EnableValidation:   true,
+		ValidationInterval: 60 * time.Second,
+		EnableStackTrace:   false,
+		LogObjectEvents:    false,
+	}
+	enc.lifecycleManager = NewObjectLifecycleManager(lifecycleConfig)
+
+	// Test lifecycle manager functionality
+	assert.NotNil(t, enc.lifecycleManager)
+
+	// Test registering a mock object
+	mockObject := "test-object"
+	id, err := enc.lifecycleManager.RegisterObject(mockObject, "string", "test")
+	assert.NoError(t, err)
+	assert.NotEqual(t, uintptr(0), id)
+
+	// Test object validation
+	isValid := enc.lifecycleManager.IsValidObject(id)
+	assert.True(t, isValid)
+
+	// Test getting object info
+	info := enc.lifecycleManager.GetObjectInfo(id)
+	assert.NotNil(t, info)
+	assert.Equal(t, "string", info.Type)
+	assert.Equal(t, "test", info.Name)
+
+	// Test unregistering object
+	err = enc.lifecycleManager.UnregisterObject(id)
+	assert.NoError(t, err)
+
+	// Test statistics
+	stats := enc.lifecycleManager.GetStats()
+	assert.Equal(t, int64(1), stats.TotalRegistered)
+	assert.Equal(t, int64(1), stats.TotalReleased)
+
+	// Cleanup
+	enc.lifecycleManager.Close()
+}
+
+func TestEncoderGst_LifecycleManagement(t *testing.T) {
+	config := createValidX264Config()
+
+	encoder, err := NewEncoderGst(config)
+	if err != nil {
+		t.Skipf("Encoder creation failed: %v", err)
+		return
+	}
+	require.NotNil(t, encoder)
+
+	// Check initial lifecycle manager state
+	initialStats := encoder.lifecycleManager.GetStats()
+	assert.Equal(t, int64(0), initialStats.TotalRegistered)
+
+	err = encoder.Start()
+	if err != nil {
+		t.Skipf("Encoder start failed: %v", err)
+		return
+	}
+
+	// Check that pipeline objects are registered
+	afterStartStats := encoder.lifecycleManager.GetStats()
+	assert.Greater(t, afterStartStats.TotalRegistered, int64(0))
+	assert.Greater(t, afterStartStats.CurrentActive, int64(0))
+
+	// List active objects
+	activeObjects := encoder.lifecycleManager.ListActiveObjects()
+	assert.NotEmpty(t, activeObjects)
+
+	// Verify we have expected object types
+	objectTypes := make(map[string]int)
+	for _, obj := range activeObjects {
+		objectTypes[obj.Type]++
+	}
+
+	// Should have pipeline, elements, and possibly other objects
+	assert.Contains(t, objectTypes, "gst.Pipeline")
+	assert.Contains(t, objectTypes, "gst.Element")
+
+	// Stop encoder and check cleanup
+	encoder.Stop()
+
+	// Verify lifecycle manager was cleaned up
+	assert.Nil(t, encoder.lifecycleManager)
+}
+
+func TestEncoderGst_ResourceCleanup(t *testing.T) {
+	config := createValidX264Config()
+
+	encoder, err := NewEncoderGst(config)
+	if err != nil {
+		t.Skipf("Encoder creation failed: %v", err)
+		return
+	}
+	require.NotNil(t, encoder)
+
+	// Start and immediately stop to test cleanup
+	err = encoder.Start()
+	if err != nil {
+		t.Skipf("Encoder start failed: %v", err)
+		return
+	}
+
+	// Verify running state
+	assert.True(t, encoder.IsRunning())
+	assert.NotNil(t, encoder.pipeline)
+	assert.NotNil(t, encoder.lifecycleManager)
+
+	// Stop and verify cleanup
+	err = encoder.Stop()
+	assert.NoError(t, err)
+	assert.False(t, encoder.IsRunning())
+	assert.Nil(t, encoder.pipeline)
+	assert.Nil(t, encoder.lifecycleManager)
+
+	// Test double stop (should not panic)
+	err = encoder.Stop()
+	assert.NoError(t, err)
 }
 
 func TestEncoderGst_BitrateControl(t *testing.T) {

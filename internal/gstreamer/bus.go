@@ -27,6 +27,45 @@ type BusWrapper struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	running bool
+
+	// Enhanced debugging and statistics
+	messageStats   *BusMessageStats
+	debugMode      bool
+	messageHistory []BusMessage
+	maxHistorySize int
+	errorHandler   *ErrorHandler
+}
+
+// BusMessageStats tracks statistics for bus messages
+type BusMessageStats struct {
+	mu sync.RWMutex
+
+	TotalMessages      int64
+	MessagesByType     map[gst.MessageType]int64
+	MessagesBySeverity map[GStreamerErrorSeverity]int64
+	MessagesPerSecond  float64
+	LastMessageTime    time.Time
+
+	// Error-specific stats
+	ErrorMessages   int64
+	WarningMessages int64
+	InfoMessages    int64
+
+	// Performance stats
+	ProcessingTime        time.Duration
+	AverageProcessingTime time.Duration
+	MaxProcessingTime     time.Duration
+}
+
+// BusMessage represents a processed bus message with metadata
+type BusMessage struct {
+	Type        gst.MessageType
+	Source      string
+	Message     string
+	Timestamp   time.Time
+	Severity    GStreamerErrorSeverity
+	ProcessTime time.Duration
+	Handled     bool
 }
 
 // NewBusWrapper creates a new bus wrapper for the given pipeline
@@ -39,6 +78,13 @@ func NewBusWrapper(pipeline *gst.Pipeline) *BusWrapper {
 		handlers: make(map[gst.MessageType][]GstMessageHandler),
 		ctx:      ctx,
 		cancel:   cancel,
+		messageStats: &BusMessageStats{
+			MessagesByType:     make(map[gst.MessageType]int64),
+			MessagesBySeverity: make(map[GStreamerErrorSeverity]int64),
+		},
+		debugMode:      false,
+		messageHistory: make([]BusMessage, 0),
+		maxHistorySize: 1000,
 	}
 
 	wrapper.logger.Debug("Bus wrapper created successfully")
@@ -142,32 +188,73 @@ func (bw *BusWrapper) processMessages() {
 	}
 }
 
-// handleMessage dispatches a message to registered handlers
+// handleMessage dispatches a message to registered handlers with enhanced statistics
 func (bw *BusWrapper) handleMessage(message *gst.Message) {
+	startTime := time.Now()
 	messageType := message.Type()
+	sourceName := message.Source()
+	if sourceName == "" {
+		sourceName = "unknown"
+	}
+
+	// Update message statistics
+	bw.updateMessageStats(messageType, startTime)
+
+	// Determine message severity
+	severity := bw.getMessageSeverity(messageType)
+
+	// Create bus message record
+	busMessage := BusMessage{
+		Type:      messageType,
+		Source:    sourceName,
+		Message:   bw.extractMessageText(message),
+		Timestamp: startTime,
+		Severity:  severity,
+		Handled:   false,
+	}
 
 	bw.mutex.RLock()
 	handlers, exists := bw.handlers[messageType]
+	debugMode := bw.debugMode
 	bw.mutex.RUnlock()
 
 	if !exists || len(handlers) == 0 {
-		// Log unhandled messages at debug level
-		sourceName := message.Source()
-		if sourceName == "" {
-			sourceName = "unknown"
+		// Log unhandled messages with severity-based level
+		bw.logUnhandledMessage(messageType, sourceName, severity)
+
+		// Record in history if debug mode is enabled
+		if debugMode {
+			bw.addToMessageHistory(busMessage)
 		}
-		bw.logger.Debugf("Unhandled message: %d from %s", int(messageType), sourceName)
 		return
 	}
 
 	// Call all registered handlers for this message type
+	handled := false
 	for _, handler := range handlers {
 		if handler != nil {
 			// If handler returns false, stop processing this message
 			if !handler(message) {
 				break
 			}
+			handled = true
 		}
+	}
+
+	// Update processing time and handled status
+	processingTime := time.Since(startTime)
+	busMessage.ProcessTime = processingTime
+	busMessage.Handled = handled
+
+	// Record in history if debug mode is enabled
+	if debugMode {
+		bw.addToMessageHistory(busMessage)
+	}
+
+	// Log processing time for performance monitoring
+	if processingTime > 10*time.Millisecond {
+		bw.logger.Warnf("Slow message processing: %s from %s took %v",
+			messageType.String(), sourceName, processingTime)
 	}
 }
 
@@ -358,4 +445,258 @@ func (bw *BusWrapper) ListHandledMessageTypes() []gst.MessageType {
 		types = append(types, messageType)
 	}
 	return types
+}
+
+// Enhanced bus message processing methods
+
+// updateMessageStats updates message statistics
+func (bw *BusWrapper) updateMessageStats(messageType gst.MessageType, timestamp time.Time) {
+	bw.messageStats.mu.Lock()
+	defer bw.messageStats.mu.Unlock()
+
+	bw.messageStats.TotalMessages++
+	bw.messageStats.MessagesByType[messageType]++
+	bw.messageStats.LastMessageTime = timestamp
+
+	// Update severity-based stats
+	severity := bw.getMessageSeverity(messageType)
+	bw.messageStats.MessagesBySeverity[severity]++
+
+	switch severity {
+	case SeverityError:
+		bw.messageStats.ErrorMessages++
+	case SeverityWarning:
+		bw.messageStats.WarningMessages++
+	case SeverityInfo:
+		bw.messageStats.InfoMessages++
+	}
+
+	// Calculate messages per second (simple moving average)
+	if bw.messageStats.TotalMessages > 1 {
+		// This is a simplified calculation - in a full implementation,
+		// you would maintain a time window for more accurate rate calculation
+		bw.messageStats.MessagesPerSecond = float64(bw.messageStats.TotalMessages) /
+			time.Since(timestamp).Seconds()
+	}
+}
+
+// getMessageSeverity determines the severity level of a message type
+func (bw *BusWrapper) getMessageSeverity(messageType gst.MessageType) GStreamerErrorSeverity {
+	switch messageType {
+	case gst.MessageError:
+		return SeverityError
+	case gst.MessageWarning:
+		return SeverityWarning
+	case gst.MessageInfo:
+		return SeverityInfo
+	case gst.MessageEOS:
+		return SeverityInfo
+	case gst.MessageStateChanged:
+		return SeverityInfo
+	case gst.MessageBuffering:
+		return SeverityInfo
+	case gst.MessageClockLost:
+		return SeverityWarning
+	case gst.MessageNewClock:
+		return SeverityInfo
+	default:
+		return SeverityInfo
+	}
+}
+
+// extractMessageText extracts readable text from a message
+func (bw *BusWrapper) extractMessageText(message *gst.Message) string {
+	messageType := message.Type()
+
+	switch messageType {
+	case gst.MessageError:
+		if err := message.ParseError(); err != nil {
+			return err.Error()
+		}
+	case gst.MessageWarning:
+		if err := message.ParseWarning(); err != nil {
+			return err.Error()
+		}
+	case gst.MessageInfo:
+		if err := message.ParseInfo(); err != nil {
+			return err.Error()
+		}
+	case gst.MessageStateChanged:
+		oldState, newState := message.ParseStateChanged()
+		return fmt.Sprintf("State changed: %s -> %s", oldState.String(), newState.String())
+	case gst.MessageBuffering:
+		percent := message.ParseBuffering()
+		return fmt.Sprintf("Buffering: %d%%", percent)
+	case gst.MessageEOS:
+		return "End of stream"
+	case gst.MessageClockLost:
+		return "Clock lost"
+	case gst.MessageNewClock:
+		clock := message.ParseNewClock()
+		if clock != nil {
+			return fmt.Sprintf("New clock: %s", clock.GetName())
+		}
+		return "New clock set"
+	default:
+		return fmt.Sprintf("Message type: %s", messageType.String())
+	}
+
+	return "Unknown message"
+}
+
+// logUnhandledMessage logs unhandled messages with appropriate severity
+func (bw *BusWrapper) logUnhandledMessage(messageType gst.MessageType, sourceName string, severity GStreamerErrorSeverity) {
+	logEntry := bw.logger.WithFields(logrus.Fields{
+		"message_type": messageType.String(),
+		"source":       sourceName,
+		"severity":     severity.String(),
+	})
+
+	switch severity {
+	case SeverityError:
+		logEntry.Errorf("Unhandled error message from %s", sourceName)
+	case SeverityWarning:
+		logEntry.Warnf("Unhandled warning message from %s", sourceName)
+	case SeverityInfo:
+		logEntry.Debugf("Unhandled info message from %s", sourceName)
+	default:
+		logEntry.Debugf("Unhandled message from %s", sourceName)
+	}
+}
+
+// addToMessageHistory adds a message to the history buffer
+func (bw *BusWrapper) addToMessageHistory(busMessage BusMessage) {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	bw.messageHistory = append(bw.messageHistory, busMessage)
+
+	// Trim history if it exceeds maximum size
+	if len(bw.messageHistory) > bw.maxHistorySize {
+		bw.messageHistory = bw.messageHistory[1:]
+	}
+}
+
+// EnableDebugMode enables debug mode with message history tracking
+func (bw *BusWrapper) EnableDebugMode() {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	bw.debugMode = true
+	bw.logger.Info("Bus wrapper debug mode enabled")
+}
+
+// DisableDebugMode disables debug mode
+func (bw *BusWrapper) DisableDebugMode() {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	bw.debugMode = false
+	bw.messageHistory = bw.messageHistory[:0] // Clear history
+	bw.logger.Info("Bus wrapper debug mode disabled")
+}
+
+// IsDebugMode returns whether debug mode is enabled
+func (bw *BusWrapper) IsDebugMode() bool {
+	bw.mutex.RLock()
+	defer bw.mutex.RUnlock()
+	return bw.debugMode
+}
+
+// GetMessageStats returns current message statistics
+func (bw *BusWrapper) GetMessageStats() *BusMessageStats {
+	bw.messageStats.mu.RLock()
+	defer bw.messageStats.mu.RUnlock()
+
+	// Return a copy to prevent external modification
+	stats := &BusMessageStats{
+		TotalMessages:         bw.messageStats.TotalMessages,
+		MessagesByType:        make(map[gst.MessageType]int64),
+		MessagesBySeverity:    make(map[GStreamerErrorSeverity]int64),
+		MessagesPerSecond:     bw.messageStats.MessagesPerSecond,
+		LastMessageTime:       bw.messageStats.LastMessageTime,
+		ErrorMessages:         bw.messageStats.ErrorMessages,
+		WarningMessages:       bw.messageStats.WarningMessages,
+		InfoMessages:          bw.messageStats.InfoMessages,
+		ProcessingTime:        bw.messageStats.ProcessingTime,
+		AverageProcessingTime: bw.messageStats.AverageProcessingTime,
+		MaxProcessingTime:     bw.messageStats.MaxProcessingTime,
+	}
+
+	// Copy maps
+	for k, v := range bw.messageStats.MessagesByType {
+		stats.MessagesByType[k] = v
+	}
+	for k, v := range bw.messageStats.MessagesBySeverity {
+		stats.MessagesBySeverity[k] = v
+	}
+
+	return stats
+}
+
+// GetMessageHistory returns the message history (if debug mode is enabled)
+func (bw *BusWrapper) GetMessageHistory() []BusMessage {
+	bw.mutex.RLock()
+	defer bw.mutex.RUnlock()
+
+	if !bw.debugMode {
+		return nil
+	}
+
+	// Return a copy to prevent external modification
+	history := make([]BusMessage, len(bw.messageHistory))
+	copy(history, bw.messageHistory)
+	return history
+}
+
+// GetRecentMessages returns the most recent messages
+func (bw *BusWrapper) GetRecentMessages(limit int) []BusMessage {
+	bw.mutex.RLock()
+	defer bw.mutex.RUnlock()
+
+	if !bw.debugMode || len(bw.messageHistory) == 0 {
+		return nil
+	}
+
+	start := len(bw.messageHistory) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	recent := make([]BusMessage, len(bw.messageHistory)-start)
+	copy(recent, bw.messageHistory[start:])
+	return recent
+}
+
+// SetErrorHandler sets an error handler for bus message processing
+func (bw *BusWrapper) SetErrorHandler(errorHandler *ErrorHandler) {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	bw.errorHandler = errorHandler
+	bw.logger.Debug("Error handler set for bus wrapper")
+}
+
+// ClearMessageHistory clears the message history
+func (bw *BusWrapper) ClearMessageHistory() {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	bw.messageHistory = bw.messageHistory[:0]
+	bw.logger.Debug("Message history cleared")
+}
+
+// SetMaxHistorySize sets the maximum size of the message history
+func (bw *BusWrapper) SetMaxHistorySize(size int) {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	bw.maxHistorySize = size
+
+	// Trim current history if needed
+	if len(bw.messageHistory) > size {
+		bw.messageHistory = bw.messageHistory[len(bw.messageHistory)-size:]
+	}
+
+	bw.logger.Debugf("Message history size set to %d", size)
 }

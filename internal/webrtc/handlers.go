@@ -321,7 +321,8 @@ func (h *webrtcHandlers) handlePeerInfo(w http.ResponseWriter, r *http.Request) 
 
 	// 获取媒体流统计信息
 	mediaStats := h.manager.mediaStream.GetStats()
-	bridgeStats := h.manager.bridge.GetStats()
+	// TODO: Fix bridge stats - bridge field doesn't exist
+	// bridgeStats := h.manager.bridge.GetStats()
 
 	info := map[string]any{
 		"id":         peerID,
@@ -329,12 +330,13 @@ func (h *webrtcHandlers) handlePeerInfo(w http.ResponseWriter, r *http.Request) 
 		"created_at": time.Now().Unix() - 300,
 		"remote_ip":  "192.168.1.100",
 		"stats": map[string]any{
-			"video_frames_sent":    mediaStats.VideoFramesSent,
-			"video_bytes_sent":     mediaStats.VideoBytesSent,
-			"audio_frames_sent":    mediaStats.AudioFramesSent,
-			"audio_bytes_sent":     mediaStats.AudioBytesSent,
-			"bridge_video_samples": bridgeStats.VideoSamplesProcessed,
-			"bridge_audio_samples": bridgeStats.AudioSamplesProcessed,
+			"video_frames_sent": mediaStats.VideoFramesSent,
+			"video_bytes_sent":  mediaStats.VideoBytesSent,
+			"audio_frames_sent": mediaStats.AudioFramesSent,
+			"audio_bytes_sent":  mediaStats.AudioBytesSent,
+			// TODO: Add bridge stats when available
+			"bridge_video_samples": 0,
+			"bridge_audio_samples": 0,
 		},
 	}
 

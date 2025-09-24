@@ -1,0 +1,292 @@
+package gstreamer
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/sirupsen/logrus"
+)
+
+// ExampleSubscriber demonstrates how to implement a MediaStreamSubscriber
+type ExampleSubscriber struct {
+	name       string
+	logger     *logrus.Entry
+	videoCount int
+	audioCount int
+	errorCount int
+}
+
+// NewExampleSubscriber creates a new example subscriber
+func NewExampleSubscriber(name string) *ExampleSubscriber {
+	return &ExampleSubscriber{
+		name:   name,
+		logger: logrus.WithField("subscriber", name),
+	}
+}
+
+// OnVideoStream handles incoming video streams
+func (es *ExampleSubscriber) OnVideoStream(stream *EncodedVideoStream) error {
+	es.videoCount++
+	es.logger.Infof("Received video stream #%d: codec=%s, size=%d bytes, %dx%d, keyframe=%v",
+		es.videoCount, stream.Codec, len(stream.Data), stream.Width, stream.Height, stream.KeyFrame)
+
+	// Simulate some processing time
+	time.Sleep(1 * time.Millisecond)
+
+	return nil
+}
+
+// OnAudioStream handles incoming audio streams
+func (es *ExampleSubscriber) OnAudioStream(stream *EncodedAudioStream) error {
+	es.audioCount++
+	es.logger.Infof("Received audio stream #%d: codec=%s, size=%d bytes, %dHz, %d channels",
+		es.audioCount, stream.Codec, len(stream.Data), stream.SampleRate, stream.Channels)
+
+	// Simulate some processing time
+	time.Sleep(1 * time.Millisecond)
+
+	return nil
+}
+
+// OnStreamError handles stream errors
+func (es *ExampleSubscriber) OnStreamError(err error) error {
+	es.errorCount++
+	es.logger.Errorf("Stream error #%d: %v", es.errorCount, err)
+	return nil
+}
+
+// GetStats returns subscriber statistics
+func (es *ExampleSubscriber) GetStats() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        es.name,
+		"video_count": es.videoCount,
+		"audio_count": es.audioCount,
+		"error_count": es.errorCount,
+		"total_count": es.videoCount + es.audioCount,
+	}
+}
+
+// DemonstratePubSubMechanism shows how the new publish-subscribe mechanism works
+func DemonstratePubSubMechanism() {
+	fmt.Println("=== GStreamer Publish-Subscribe Mechanism Demo ===")
+
+	// Create context
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create logger
+	logger := logrus.NewEntry(logrus.New())
+	logger.Logger.SetLevel(logrus.InfoLevel)
+
+	// Create stream publisher with default configuration
+	config := DefaultStreamPublisherConfig()
+	config.LogProcessingErrors = true
+
+	publisher := NewStreamPublisher(ctx, config, logger)
+
+	fmt.Println("1. Starting stream publisher...")
+	if err := publisher.Start(); err != nil {
+		fmt.Printf("Failed to start publisher: %v\n", err)
+		return
+	}
+	defer publisher.Stop()
+
+	// Create and add multiple subscribers
+	fmt.Println("2. Adding subscribers...")
+	subscribers := make([]*ExampleSubscriber, 3)
+	for i := 0; i < 3; i++ {
+		subscribers[i] = NewExampleSubscriber(fmt.Sprintf("subscriber-%d", i+1))
+		subID, err := publisher.AddSubscriber(subscribers[i])
+		if err != nil {
+			fmt.Printf("Failed to add subscriber %d: %v\n", i+1, err)
+			continue
+		}
+		fmt.Printf("   Added subscriber-%d (ID: %d)\n", i+1, subID)
+	}
+
+	fmt.Printf("   Total subscribers: %d\n", publisher.GetSubscriberCount())
+
+	// Publish video samples
+	fmt.Println("3. Publishing video samples...")
+	for i := 0; i < 5; i++ {
+		videoData := []byte(fmt.Sprintf("video frame %d data", i+1))
+		videoSample := NewVideoSample(videoData, 1920, 1080, "h264")
+
+		// Mark every 3rd frame as keyframe
+		if (i+1)%3 == 0 {
+			videoSample.Metadata["key_frame"] = true
+		}
+
+		if err := publisher.PublishVideoSample(videoSample); err != nil {
+			fmt.Printf("   Failed to publish video sample %d: %v\n", i+1, err)
+		} else {
+			fmt.Printf("   Published video sample %d (%d bytes)\n", i+1, len(videoData))
+		}
+
+		time.Sleep(10 * time.Millisecond) // Simulate frame rate
+	}
+
+	// Publish audio samples
+	fmt.Println("4. Publishing audio samples...")
+	for i := 0; i < 3; i++ {
+		audioData := []byte(fmt.Sprintf("audio frame %d data", i+1))
+		audioSample := NewAudioSample(audioData, 2, 48000, "opus")
+
+		if err := publisher.PublishAudioSample(audioSample); err != nil {
+			fmt.Printf("   Failed to publish audio sample %d: %v\n", i+1, err)
+		} else {
+			fmt.Printf("   Published audio sample %d (%d bytes)\n", i+1, len(audioData))
+		}
+
+		time.Sleep(20 * time.Millisecond) // Simulate audio frame rate
+	}
+
+	// Wait for processing to complete
+	fmt.Println("5. Waiting for processing to complete...")
+	time.Sleep(200 * time.Millisecond)
+
+	// Display subscriber statistics
+	fmt.Println("6. Subscriber statistics:")
+	for i, subscriber := range subscribers {
+		stats := subscriber.GetStats()
+		fmt.Printf("   Subscriber-%d: %d video, %d audio, %d errors, %d total\n",
+			i+1, stats["video_count"], stats["audio_count"],
+			stats["error_count"], stats["total_count"])
+	}
+
+	// Display publisher statistics
+	fmt.Println("7. Publisher statistics:")
+	publisherStats := publisher.GetStats()
+	fmt.Printf("   Video samples received: %d\n", publisherStats.VideoSamplesReceived)
+	fmt.Printf("   Audio samples received: %d\n", publisherStats.AudioSamplesReceived)
+	fmt.Printf("   Video streams published: %d\n", publisherStats.VideoStreamsPublished)
+	fmt.Printf("   Audio streams published: %d\n", publisherStats.AudioStreamsPublished)
+	fmt.Printf("   Conversion errors: %d\n", publisherStats.ConversionErrors)
+	fmt.Printf("   Validation errors: %d\n", publisherStats.ValidationErrors)
+	fmt.Printf("   Publishing errors: %d\n", publisherStats.PublishingErrors)
+	fmt.Printf("   Dropped samples: %d\n", publisherStats.DroppedSamples)
+	fmt.Printf("   Avg processing latency: %v\n", publisherStats.AvgProcessingLatency)
+
+	// Display stream processor statistics
+	fmt.Println("8. Stream processor statistics:")
+	processorStats := publisher.GetStreamProcessorStats()
+	fmt.Printf("   Video frames processed: %d\n", processorStats.VideoFramesProcessed)
+	fmt.Printf("   Audio frames processed: %d\n", processorStats.AudioFramesProcessed)
+	fmt.Printf("   Active subscribers: %d\n", processorStats.ActiveSubscribers)
+	fmt.Printf("   Subscriber errors: %d\n", processorStats.SubscriberErrors)
+
+	// Display subscriber manager statistics
+	fmt.Println("9. Subscriber manager statistics:")
+	subscriberStats := publisher.GetSubscriberManagerStats()
+	fmt.Printf("   Active subscribers: %d\n", subscriberStats.ActiveSubscribers)
+	fmt.Printf("   Healthy subscribers: %d\n", subscriberStats.HealthySubscribers)
+	fmt.Printf("   Total subscribers: %d\n", subscriberStats.TotalSubscribers)
+	fmt.Printf("   Removed subscribers: %d\n", subscriberStats.RemovedSubscribers)
+
+	fmt.Println("=== Demo completed successfully! ===")
+}
+
+// CompareOldVsNewApproach demonstrates the difference between callback chains and pub-sub
+func CompareOldVsNewApproach() {
+	fmt.Println("\n=== Comparison: Old Callback Chain vs New Publish-Subscribe ===")
+
+	fmt.Println("\nOLD APPROACH (Complex Callback Chains):")
+	fmt.Println("  ┌─────────────────┐    callback    ┌─────────────────┐")
+	fmt.Println("  │ Desktop Capture │ ──────────────→ │    Manager      │")
+	fmt.Println("  └─────────────────┘                 └─────────────────┘")
+	fmt.Println("                                              │ callback")
+	fmt.Println("                                              ▼")
+	fmt.Println("                                      ┌─────────────────┐")
+	fmt.Println("                                      │    Encoder      │")
+	fmt.Println("                                      └─────────────────┘")
+	fmt.Println("                                              │ callback")
+	fmt.Println("                                              ▼")
+	fmt.Println("                                      ┌─────────────────┐")
+	fmt.Println("                                      │ WebRTC Bridge   │")
+	fmt.Println("                                      └─────────────────┘")
+	fmt.Println("  Problems:")
+	fmt.Println("  - Tight coupling between components")
+	fmt.Println("  - Complex error handling")
+	fmt.Println("  - Difficult to add new subscribers")
+	fmt.Println("  - No type safety")
+	fmt.Println("  - Hard to test individual components")
+
+	fmt.Println("\nNEW APPROACH (Publish-Subscribe with Type Safety):")
+	fmt.Println("  ┌─────────────────┐    Sample     ┌─────────────────┐")
+	fmt.Println("  │ Desktop Capture │ ──────────────→ │ Stream Publisher│")
+	fmt.Println("  └─────────────────┘                 └─────────────────┘")
+	fmt.Println("                                              │")
+	fmt.Println("                                              │ EncodedVideoStream")
+	fmt.Println("                                              │ EncodedAudioStream")
+	fmt.Println("                                              ▼")
+	fmt.Println("                                      ┌─────────────────┐")
+	fmt.Println("                                      │Stream Processor │")
+	fmt.Println("                                      └─────────────────┘")
+	fmt.Println("                                              │")
+	fmt.Println("                                              │ Parallel Distribution")
+	fmt.Println("                                              ▼")
+	fmt.Println("  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐")
+	fmt.Println("  │  Subscriber 1   │  │  Subscriber 2   │  │  Subscriber N   │")
+	fmt.Println("  │  (WebRTC)       │  │  (Recording)    │  │  (Analytics)    │")
+	fmt.Println("  └─────────────────┘  └─────────────────┘  └─────────────────┘")
+	fmt.Println("  Benefits:")
+	fmt.Println("  - Loose coupling between components")
+	fmt.Println("  - Type-safe stream transmission")
+	fmt.Println("  - Easy to add/remove subscribers")
+	fmt.Println("  - Robust error handling per subscriber")
+	fmt.Println("  - Individual component testing")
+	fmt.Println("  - Dynamic subscription management")
+	fmt.Println("  - Performance monitoring and statistics")
+	fmt.Println("  - Automatic subscriber health checking")
+	fmt.Println("  - Quality-based stream filtering")
+
+	fmt.Println("\nKEY IMPROVEMENTS:")
+	fmt.Println("  1. Type Safety: Strongly typed EncodedVideoStream and EncodedAudioStream")
+	fmt.Println("  2. Clear Communication: Channel-based instead of callback chains")
+	fmt.Println("  3. Dynamic Subscription: Add/remove subscribers at runtime")
+	fmt.Println("  4. Error Isolation: Subscriber errors don't affect others")
+	fmt.Println("  5. Performance Monitoring: Detailed statistics and health checks")
+	fmt.Println("  6. Quality Control: Stream validation and quality filtering")
+	fmt.Println("  7. Scalability: Easy to add new stream types and subscribers")
+}
+
+// ShowPublishSubscribeFeatures demonstrates advanced features
+func ShowPublishSubscribeFeatures() {
+	fmt.Println("\n=== Advanced Publish-Subscribe Features ===")
+
+	fmt.Println("\n1. TYPE-SAFE STREAM TRANSMISSION:")
+	fmt.Println("   - EncodedVideoStream: codec, data, timestamp, keyframe, dimensions, bitrate")
+	fmt.Println("   - EncodedAudioStream: codec, data, timestamp, sample rate, channels, bitrate")
+	fmt.Println("   - Compile-time type checking prevents wrong stream types")
+
+	fmt.Println("\n2. DYNAMIC SUBSCRIBER MANAGEMENT:")
+	fmt.Println("   - Add subscribers at runtime with custom configuration")
+	fmt.Println("   - Remove subscribers without affecting others")
+	fmt.Println("   - Health monitoring and automatic cleanup")
+	fmt.Println("   - Subscriber-specific error handling")
+
+	fmt.Println("\n3. STREAM PROCESSING PIPELINE:")
+	fmt.Println("   - Stream validation (format, dimensions, codecs)")
+	fmt.Println("   - Stream conversion (format adaptation)")
+	fmt.Println("   - Quality analysis and filtering")
+	fmt.Println("   - Performance monitoring")
+
+	fmt.Println("\n4. ERROR HANDLING AND RECOVERY:")
+	fmt.Println("   - Per-subscriber error isolation")
+	fmt.Println("   - Automatic retry mechanisms")
+	fmt.Println("   - Failed subscriber removal")
+	fmt.Println("   - Detailed error statistics")
+
+	fmt.Println("\n5. PERFORMANCE MONITORING:")
+	fmt.Println("   - Processing latency tracking")
+	fmt.Println("   - Stream quality metrics")
+	fmt.Println("   - Subscriber health status")
+	fmt.Println("   - Throughput statistics")
+
+	fmt.Println("\n6. CONFIGURATION OPTIONS:")
+	fmt.Println("   - Buffer sizes and timeouts")
+	fmt.Println("   - Quality thresholds")
+	fmt.Println("   - Error handling policies")
+	fmt.Println("   - Performance tuning parameters")
+}
