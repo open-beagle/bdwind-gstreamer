@@ -63,55 +63,113 @@ func NewManager(ctx context.Context, cfg *config.WebServerConfig) (*Manager, err
 
 // Start 启动webserver管理器
 func (m *Manager) Start(ctx context.Context) error {
+	startTime := time.Now()
+	m.logger.Info("Starting webserver manager...")
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.running {
+		m.logger.Warn("Webserver manager already running, skipping start")
 		return fmt.Errorf("webserver manager already running")
 	}
 
-	m.logger.Debug("Starting webserver manager...")
+	// 记录配置信息
+	addr := fmt.Sprintf("%s:%d", m.config.Host, m.config.Port)
+	m.logger.Debugf("Webserver configuration: host=%s, port=%d, tls=%v, auth=%v, cors=%v", 
+		m.config.Host, m.config.Port, m.config.EnableTLS, m.config.Auth.Enabled, m.config.EnableCORS)
+
+	// TLS配置验证和记录
+	if m.config.EnableTLS {
+		m.logger.Debug("TLS enabled, validating certificate files...")
+		m.logger.Debugf("TLS certificate file: %s", m.config.TLS.CertFile)
+		m.logger.Debugf("TLS key file: %s", m.config.TLS.KeyFile)
+		
+		// 验证TLS文件是否存在
+		if m.config.TLS.CertFile == "" || m.config.TLS.KeyFile == "" {
+			m.logger.Error("TLS enabled but certificate or key file not specified")
+			return fmt.Errorf("TLS certificate or key file not specified")
+		}
+	} else {
+		m.logger.Debug("TLS disabled, using HTTP")
+	}
+
+	// 获取处理器
+	m.logger.Debug("Setting up webserver handler...")
+	handler := m.webServer.GetHandler()
+	if handler == nil {
+		m.logger.Error("Failed to get webserver handler")
+		return fmt.Errorf("webserver handler is nil")
+	}
+	m.logger.Debug("Webserver handler obtained successfully")
 
 	// 创建HTTP服务器
-	addr := fmt.Sprintf("%s:%d", m.config.Host, m.config.Port)
-
-	m.logger.Trace("Getting webserver handler...")
-	handler := m.webServer.GetHandler()
-	m.logger.Trace("Webserver handler obtained successfully")
-
+	m.logger.Debug("Creating HTTP server instance...")
 	m.server = &http.Server{
 		Addr:    addr,
 		Handler: handler,
 	}
+	m.logger.Debugf("HTTP server created for address: %s", addr)
 
-	// 在goroutine中启动服务器
-	go func() {
-		m.logger.Tracef("Starting webserver on %s", addr)
-
-		var err error
-		if m.config.EnableTLS {
-			err = m.server.ListenAndServeTLS(m.config.TLS.CertFile, m.config.TLS.KeyFile)
-		} else {
-			err = m.server.ListenAndServe()
-		}
-
-		if err != nil && err != http.ErrServerClosed {
-			m.logger.Errorf("Webserver error: %v", err)
-		}
-	}()
-
-	// 等待服务器启动
-	time.Sleep(100 * time.Millisecond)
-
-	m.running = true
-	m.startTime = time.Now()
-
+	// 启动服务器监听
 	protocol := "http"
 	if m.config.EnableTLS {
 		protocol = "https"
 	}
 
-	m.logger.Infof("Webserver started successfully on %s://%s", protocol, addr)
+	m.logger.Infof("Starting %s server on %s...", protocol, addr)
+
+	// 在goroutine中启动服务器
+	serverStarted := make(chan error, 1)
+	go func() {
+		m.logger.Tracef("Attempting to bind to %s", addr)
+
+		var err error
+		if m.config.EnableTLS {
+			m.logger.Trace("Starting HTTPS server with TLS...")
+			err = m.server.ListenAndServeTLS(m.config.TLS.CertFile, m.config.TLS.KeyFile)
+		} else {
+			m.logger.Trace("Starting HTTP server...")
+			err = m.server.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
+			m.logger.Errorf("Server failed to start: %v", err)
+			serverStarted <- err
+		} else if err == http.ErrServerClosed {
+			m.logger.Debug("Server closed normally")
+		}
+	}()
+
+	// 等待服务器启动并验证
+	m.logger.Debug("Waiting for server to start...")
+	time.Sleep(100 * time.Millisecond)
+
+	// 检查是否有启动错误
+	select {
+	case err := <-serverStarted:
+		m.logger.Errorf("Server startup failed: %v", err)
+		return fmt.Errorf("failed to start webserver: %w", err)
+	default:
+		// 没有错误，继续
+	}
+
+	// 标记为运行状态
+	m.running = true
+	m.startTime = time.Now()
+	
+	duration := time.Since(startTime)
+	m.logger.Infof("Webserver started successfully on %s://%s in %v", protocol, addr, duration)
+	
+	// 记录服务状态
+	m.logger.Infof("Webserver ready to accept connections")
+	if m.config.Auth.Enabled {
+		m.logger.Info("Authentication is enabled")
+	}
+	if m.config.EnableCORS {
+		m.logger.Info("CORS is enabled")
+	}
+
 	return nil
 }
 

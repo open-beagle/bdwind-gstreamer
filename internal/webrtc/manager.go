@@ -50,35 +50,55 @@ type Manager struct {
 
 // NewManager 创建WebRTC管理器
 func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
+	// 使用临时logger来调试
+	tempLogger := config.GetLoggerWithPrefix("webrtc-debug")
+	tempLogger.Info("WebRTC NewManager called")
+	
 	if ctx == nil {
+		tempLogger.Error("Context is nil")
 		return nil, fmt.Errorf("context is required")
 	}
+	tempLogger.Info("Context validation passed")
 
 	if cfg == nil {
+		tempLogger.Error("Manager config is nil")
 		return nil, fmt.Errorf("manager config is required")
 	}
+	tempLogger.Info("Manager config validation passed")
 
 	if cfg.Config == nil {
+		tempLogger.Error("Config is nil")
 		return nil, fmt.Errorf("config is required")
 	}
+	tempLogger.Info("Config validation passed")
 
 	if cfg.MediaProvider == nil {
+		tempLogger.Error("MediaProvider is nil")
 		return nil, fmt.Errorf("media provider is required")
 	}
+	tempLogger.Info("MediaProvider validation passed")
 
 	// Use the provided context instead of creating a new one
+	tempLogger.Info("Creating child context")
 	childCtx, cancel := context.WithCancel(ctx)
+	tempLogger.Info("Child context created")
 
 	// 获取 logrus entry 用于结构化日志记录
+	tempLogger.Info("Getting logger with prefix")
 	logger := config.GetLoggerWithPrefix("webrtc-manager")
+	tempLogger.Info("Logger obtained")
 
+	tempLogger.Info("About to log WebRTC configuration")
 	logger.Trace("Creating WebRTC manager with configuration")
+	tempLogger.Info("WebRTC configuration trace logged")
 	logger.Debugf("WebRTC configuration: codec=%s, resolution=%dx%d@%dfps",
 		cfg.Config.GStreamer.Encoding.Codec,
 		cfg.Config.GStreamer.Capture.Width,
 		cfg.Config.GStreamer.Capture.Height,
 		cfg.Config.GStreamer.Capture.FrameRate)
+	tempLogger.Info("WebRTC configuration debug logged")
 
+	tempLogger.Info("Creating manager struct")
 	manager := &Manager{
 		config:        cfg.Config,
 		logger:        logger,
@@ -86,16 +106,21 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 		cancel:        cancel,
 		mediaProvider: cfg.MediaProvider,
 	}
+	tempLogger.Info("Manager struct created")
 
 	// 初始化组件
+	tempLogger.Info("About to initialize WebRTC components")
 	logger.Trace("Initializing WebRTC components")
 	if err := manager.initializeComponents(); err != nil {
+		tempLogger.Errorf("Failed to initialize WebRTC components: %v", err)
 		logger.Errorf("Failed to initialize WebRTC components: %v", err)
 		cancel()
 		return nil, fmt.Errorf("failed to initialize components: %w", err)
 	}
+	tempLogger.Info("WebRTC components initialized successfully")
 
 	logger.Debug("WebRTC manager created successfully")
+	tempLogger.Info("WebRTC manager creation completed")
 	return manager, nil
 }
 
@@ -179,7 +204,10 @@ func (m *Manager) initializeComponents() error {
 	m.mediaSubscriber = NewWebRTCMediaSubscriber(subscriberID, m.mediaStream, m.logger)
 
 	// Subscribe to video stream from GStreamer
+	m.logger.Debug("Registering WebRTC media subscriber with GStreamer...")
+	m.logger.Tracef("About to call AddVideoSubscriber on media provider")
 	m.subscriberID, err = m.mediaProvider.AddVideoSubscriber(m.mediaSubscriber)
+	m.logger.Tracef("AddVideoSubscriber call completed")
 	if err != nil {
 		m.logger.Errorf("Failed to add video subscriber to GStreamer: %v", err)
 		return fmt.Errorf("failed to add video subscriber: %w", err)
@@ -194,7 +222,9 @@ func (m *Manager) initializeComponents() error {
 	}
 
 	// 转换配置中的ICE服务器格式
+	m.logger.Debug("Converting ICE servers configuration...")
 	iceServers := m.convertICEServers()
+	m.logger.Debug("Creating signaling server...")
 	m.signaling = NewSignalingServer(m.ctx, signalingConfig, m.mediaStream, iceServers)
 	m.logger.Debug("Signaling server created successfully")
 
@@ -250,19 +280,35 @@ func (m *Manager) convertICEServers() []webrtc.ICEServer {
 
 // Start 启动WebRTC管理器和所有组件
 func (m *Manager) Start(ctx context.Context) error {
+	startTime := time.Now()
+	m.logger.Info("Starting WebRTC manager...")
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.running {
-		m.logger.Warn("WebRTC manager already running")
+		m.logger.Warn("WebRTC manager already running, skipping start")
 		return fmt.Errorf("WebRTC manager already running")
 	}
 
-	m.logger.Debug("Starting WebRTC manager")
+	// 记录WebRTC配置信息
+	m.logger.Debugf("WebRTC configuration: codec=%s, resolution=%dx%d@%dfps, ice_servers=%d",
+		m.config.GStreamer.Encoding.Codec,
+		m.config.GStreamer.Capture.Width,
+		m.config.GStreamer.Capture.Height,
+		m.config.GStreamer.Capture.FrameRate,
+		len(m.config.WebRTC.ICEServers))
+
 	m.startTime = time.Now()
 
 	// 验证组件状态
-	m.logger.Trace("Verifying component availability before startup")
+	m.logger.Debug("Verifying component availability before startup...")
+	componentStatus := m.GetComponentStatus()
+	m.logger.Debugf("Component status: signaling=%v, media_stream=%v, media_provider=%v, media_subscriber=%v, sdp_generator=%v",
+		componentStatus["signaling"], componentStatus["media_stream"], 
+		componentStatus["media_provider"], componentStatus["media_subscriber"], 
+		componentStatus["sdp_generator"])
+
 	if m.mediaStream == nil {
 		m.logger.Error("MediaStream is nil, cannot start WebRTC manager")
 		return fmt.Errorf("MediaStream not initialized")
@@ -279,36 +325,65 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.logger.Error("Signaling server is nil, cannot start WebRTC manager")
 		return fmt.Errorf("Signaling server not initialized")
 	}
+	m.logger.Debug("All components verified successfully")
 
-	// Activate the media subscriber (replaces bridge startup)
-	m.logger.Debug("Activating WebRTC media subscriber")
+	// 验证MediaStream初始状态
+	initialStats := m.mediaStream.GetStats()
+	m.logger.Debugf("Initial MediaStream state: total_tracks=%d, active_tracks=%d",
+		initialStats.TotalTracks, initialStats.ActiveTracks)
+
+	// 激活媒体订阅者
+	m.logger.Debug("Activating WebRTC media subscriber...")
+	m.logger.Tracef("Media subscriber ID: %d", m.subscriberID)
 	m.mediaSubscriber.SetActive(true)
 	m.logger.Debug("WebRTC media subscriber activated successfully")
 
 	// 启动媒体流监控
-	m.logger.Debug("Starting MediaStream track monitoring")
+	m.logger.Debug("Starting MediaStream track monitoring...")
 	if err := m.mediaStream.StartTrackMonitoring(); err != nil {
-		m.logger.Warnf("Failed to start media stream monitoring: %v", err)
-	} else {
-		m.logger.Debug("MediaStream track monitoring started successfully")
+		m.logger.Errorf("Failed to start media stream monitoring: %v", err)
+		return fmt.Errorf("failed to start media stream monitoring: %w", err)
 	}
+	m.logger.Debug("MediaStream track monitoring started successfully")
 
-	// 验证MediaStream状态
-	stats := m.mediaStream.GetStats()
-	m.logger.Debugf("MediaStream status verification: total_tracks=%d, active_tracks=%d",
-		stats.TotalTracks, stats.ActiveTracks)
+	// 验证MediaStream启动后状态
+	postStartStats := m.mediaStream.GetStats()
+	m.logger.Debugf("Post-start MediaStream state: total_tracks=%d, active_tracks=%d",
+		postStartStats.TotalTracks, postStartStats.ActiveTracks)
 
 	// 启动信令服务器
-	m.logger.Debug("Starting signaling server")
-	go m.signaling.Start()
+	m.logger.Debug("Starting signaling server...")
+	go func() {
+		m.logger.Trace("Signaling server goroutine started")
+		m.signaling.Start()
+	}()
+	
+	// 给信令服务器一点时间启动
+	time.Sleep(50 * time.Millisecond)
 	m.logger.Debug("Signaling server started successfully")
+
+	// 验证媒体提供者连接
+	m.logger.Debug("Verifying media provider connection...")
+	if provider, ok := m.mediaProvider.(interface{ IsRunning() bool }); ok {
+		if provider.IsRunning() {
+			m.logger.Debug("Media provider is running and ready")
+		} else {
+			m.logger.Warn("Media provider is not running - WebRTC may not receive media")
+		}
+	} else {
+		m.logger.Debug("Media provider status check not available")
+	}
 
 	// 记录MediaStream创建结果摘要 (Info级别)
 	m.logMediaStreamCreationResult()
 
 	m.running = true
-	uptime := time.Since(m.startTime)
-	m.logger.Debugf("WebRTC manager started successfully (startup time: %v)", uptime)
+	duration := time.Since(startTime)
+	m.logger.Infof("WebRTC manager started successfully in %v", duration)
+	
+	// 记录最终状态
+	finalStats := m.mediaStream.GetStats()
+	m.logger.Infof("WebRTC ready: %d tracks available, signaling server active", finalStats.TotalTracks)
 
 	return nil
 }

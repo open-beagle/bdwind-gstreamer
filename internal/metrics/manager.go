@@ -81,40 +81,90 @@ func NewManager(ctx context.Context, cfg *config.MetricsConfig) (*Manager, error
 
 // Start 启动监控管理器
 func (m *Manager) Start(ctx context.Context) error {
+	startTime := time.Now()
+	m.logger.Info("Starting metrics manager...")
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.internalRunning {
+		m.logger.Warn("Metrics manager already running, skipping start")
 		return fmt.Errorf("metrics manager already running")
 	}
 
-	m.logger.Debug("Starting metrics manager...")
+	// 记录配置信息
+	m.logger.Debugf("Metrics configuration: external_enabled=%v, external_host=%s, external_port=%d, external_path=%s",
+		m.config.External.Enabled, m.config.External.Host, m.config.External.Port, m.config.External.Path)
 
 	// 始终启动内部监控（为web页面提供数据）
+	m.logger.Debug("Starting internal metrics collection...")
 	if err := m.startInternalMetrics(); err != nil {
+		m.logger.Errorf("Failed to start internal metrics: %v", err)
 		return fmt.Errorf("failed to start internal metrics: %w", err)
 	}
+	m.logger.Debug("Internal metrics collection started successfully")
 
 	// 根据配置决定是否启动外部metrics暴露
 	if m.config.External.Enabled {
+		m.logger.Debug("Starting external metrics server...")
 		if err := m.startExternalMetrics(); err != nil {
 			m.logger.Errorf("Failed to start external metrics server: %v", err)
-			// 外部metrics启动失败不影响内部监控
+			// 外部metrics启动失败不影响内部监控，但记录警告
+			m.logger.Warn("External metrics server failed to start, continuing with internal metrics only")
+		} else {
+			m.logger.Infof("External metrics server started on %s", m.config.GetExternalEndpoint())
 		}
 	} else {
 		m.logger.Debug("External metrics disabled, only internal metrics will be available")
 	}
 
 	m.startTime = time.Now()
-	m.logger.Debug("Metrics manager started successfully")
+	duration := time.Since(startTime)
+	
+	// 验证启动状态
+	internalStatus := "stopped"
+	if m.internalRunning {
+		internalStatus = "running"
+	}
+	externalStatus := "disabled"
+	if m.config.External.Enabled {
+		if m.externalRunning {
+			externalStatus = "running"
+		} else {
+			externalStatus = "failed"
+		}
+	}
+
+	m.logger.Infof("Metrics manager started successfully in %v (internal: %s, external: %s)", 
+		duration, internalStatus, externalStatus)
+
+	// 记录系统监控状态
+	if m.systemMetrics.IsRunning() {
+		m.logger.Info("System metrics collection is active")
+	} else {
+		m.logger.Warn("System metrics collection is not active")
+	}
+
 	return nil
 }
 
 // startInternalMetrics 启动内部监控
 func (m *Manager) startInternalMetrics() error {
+	m.logger.Trace("Initializing internal metrics collection...")
+	
 	// 启动系统监控，使用管理器的context以确保能够响应取消信号
+	m.logger.Trace("Starting system metrics collector...")
 	if err := m.systemMetrics.Start(m.ctx); err != nil {
+		m.logger.Errorf("System metrics collector failed to start: %v", err)
 		return fmt.Errorf("failed to start system metrics: %w", err)
+	}
+	m.logger.Trace("System metrics collector started successfully")
+
+	// 验证系统监控状态
+	if m.systemMetrics.IsRunning() {
+		m.logger.Debug("System metrics collector is running and collecting data")
+	} else {
+		m.logger.Warn("System metrics collector started but not reporting as running")
 	}
 
 	m.internalRunning = true
@@ -124,10 +174,14 @@ func (m *Manager) startInternalMetrics() error {
 
 // startExternalMetrics 启动外部metrics暴露服务器
 func (m *Manager) startExternalMetrics() error {
+	addr := fmt.Sprintf("%s:%d", m.config.External.Host, m.config.External.Port)
+	m.logger.Tracef("Creating external metrics server for %s%s", addr, m.config.External.Path)
+
 	// 创建外部metrics服务器
 	mux := http.NewServeMux()
 
 	// 注册metrics端点
+	m.logger.Trace("Registering metrics endpoint handler...")
 	mux.HandleFunc(m.config.External.Path, func(w http.ResponseWriter, r *http.Request) {
 		// 这里应该返回Prometheus格式的metrics
 		// 暂时返回基本信息
@@ -149,22 +203,38 @@ func (m *Manager) startExternalMetrics() error {
 		}
 	})
 
-	addr := fmt.Sprintf("%s:%d", m.config.External.Host, m.config.External.Port)
+	m.logger.Debug("Creating HTTP server for external metrics...")
 	m.externalServer = &http.Server{
 		Addr:    addr,
 		Handler: mux,
 	}
 
+	// 验证端口可用性
+	m.logger.Debugf("Attempting to bind external metrics server to %s", addr)
+
 	// 在goroutine中启动服务器
+	serverStarted := make(chan error, 1)
 	go func() {
-		m.logger.Debugf("Starting external metrics server on %s", addr)
+		m.logger.Tracef("Starting external metrics server goroutine on %s", addr)
 		if err := m.externalServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			m.logger.Errorf("External metrics server error: %v", err)
+			serverStarted <- err
 		}
 	}()
 
+	// 等待服务器启动并检查错误
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-serverStarted:
+		m.logger.Errorf("External metrics server failed to start: %v", err)
+		return fmt.Errorf("failed to start external metrics server: %w", err)
+	default:
+		// 没有错误，继续
+	}
+
 	m.externalRunning = true
-	m.logger.Debugf("External metrics server started on %s%s", addr, m.config.External.Path)
+	endpoint := fmt.Sprintf("http://%s%s", addr, m.config.External.Path)
+	m.logger.Debugf("External metrics server started successfully on %s", endpoint)
 	return nil
 }
 

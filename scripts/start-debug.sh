@@ -70,19 +70,108 @@ if [ -f ".tmp/bdwind-gstreamer.log" ]; then
     echo "✅ 旧日志文件已删除"
 fi
 
-# 编译程序
-echo "🔨 编译程序..."
+# 检查二进制文件
+echo "🔨 检查二进制文件..."
 mkdir -p .tmp
-go build -o .tmp/bdwind-gstreamer ./cmd/bdwind-gstreamer
-if [ $? -ne 0 ]; then
-    echo "❌ 编译失败"
-    exit 1
+
+if [ -f ".tmp/bdwind-gstreamer" ]; then
+    echo "✅ 找到修复版本的二进制文件"
+    BINARY_FILE=".tmp/bdwind-gstreamer"
+elif [ -f ".tmp/bdwind-gstreamer" ]; then
+    echo "⚠️  使用标准二进制文件（可能有问题）"
+    echo "   建议先运行修复编译"
+    BINARY_FILE=".tmp/bdwind-gstreamer"
+else
+    echo "❌ 找不到二进制文件，使用修复编译..."
+    
+    # 设置编译环境变量（来自 compile-with-fixes.sh 的修复）
+    export CGO_ENABLED=1
+    export GOGC=20
+    export GODEBUG=checkptr=0  # 编译时禁用指针检查
+    
+    echo "📋 编译设置:"
+    echo "   CGO_ENABLED=$CGO_ENABLED"
+    echo "   GODEBUG=$GODEBUG (禁用指针检查)"
+    echo "   GOGC=$GOGC"
+    echo ""
+    
+    # 使用修复的编译选项
+    echo "🔨 开始修复编译..."
+    go build -ldflags="-s -w" -o .tmp/bdwind-gstreamer ./cmd/bdwind-gstreamer
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ 修复编译成功"
+        BINARY_FILE=".tmp/bdwind-gstreamer"
+        echo "   二进制文件: $BINARY_FILE"
+        echo "   文件大小: $(du -h $BINARY_FILE | cut -f1)"
+    else
+        echo "❌ 修复编译失败"
+        exit 1
+    fi
 fi
-echo "✅ 编译成功"
 
 # 设置环境变量
 export DISPLAY=:99
 export BDWIND_DEBUG=true
+
+# 修复 EGL/GPU 权限问题
+echo "🔧 配置图形渲染环境..."
+
+# 检查 DRI 设备权限
+if [ -d "/dev/dri" ]; then
+    echo "📊 DRI 设备状态:"
+    ls -la /dev/dri/ 2>/dev/null || echo "   无法访问 /dev/dri/"
+    
+    # 尝试修复权限（如果有sudo权限）
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        echo "🔑 尝试修复 DRI 设备权限..."
+        sudo chmod 666 /dev/dri/* 2>/dev/null || echo "   权限修复失败或不需要"
+    else
+        echo "⚠️  无sudo权限，将使用软件渲染"
+    fi
+else
+    echo "⚠️  /dev/dri 目录不存在，将使用软件渲染"
+fi
+
+# 强制使用软件渲染以避免GPU权限问题
+export LIBGL_ALWAYS_SOFTWARE=1
+export MESA_GL_VERSION_OVERRIDE=3.3
+export MESA_GLSL_VERSION_OVERRIDE=330
+export GALLIUM_DRIVER=llvmpipe
+
+# 禁用硬件加速相关的EGL/DRI访问
+export EGL_PLATFORM=surfaceless
+export MESA_LOADER_DRIVER_OVERRIDE=swrast
+
+# GStreamer 兼容性设置
+export GST_DEBUG_NO_COLOR=1
+export GST_DEBUG_DUMP_DOT_DIR=/tmp
+export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
+export GST_REGISTRY_REUSE_PLUGIN_SCANNER=no
+
+# Go-GStreamer 兼容性设置
+export CGO_CFLAGS="-I/usr/include/gstreamer-1.0 -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include"
+export CGO_LDFLAGS="-lgstreamer-1.0 -lgobject-2.0 -lglib-2.0"
+
+# 内存管理设置 - 基于 go-gst issue #198 的解决方案
+export GOGC=20  # 更频繁的垃圾回收，解决 GStreamer 对象堆积
+export GODEBUG=madvdontneed=1,checkptr=0  # 禁用指针检查，优化内存管理
+export GOMEMLIMIT=1GiB  # 限制内存使用
+
+echo "✅ 图形环境配置完成:"
+echo "   软件渲染: 已启用"
+echo "   EGL平台: surfaceless"
+echo "   Mesa驱动: swrast (软件光栅化)"
+
+# 验证图形环境
+echo "🔍 验证图形环境..."
+if command -v glxinfo >/dev/null 2>&1; then
+    echo "📊 OpenGL 信息:"
+    DISPLAY=:99 timeout 10s glxinfo 2>/dev/null | grep -E "(OpenGL renderer|OpenGL version)" || echo "   无法获取OpenGL信息"
+else
+    echo "   glxinfo 未安装，跳过OpenGL验证"
+    echo "   安装命令: sudo apt-get install mesa-utils"
+fi
 
 # 设置日志相关环境变量
 export BDWIND_LOG_LEVEL="${BDWIND_LOG_LEVEL:-$LOG_LEVEL}"
@@ -107,7 +196,8 @@ sleep 1
 
 # 启动虚拟显示
 echo "🖥️  启动虚拟显示..."
-Xvfb :99 -screen 0 1920x1080x24 -ac -nolisten tcp &
+# 使用软件渲染兼容的 Xvfb 配置
+Xvfb :99 -screen 0 1920x1080x24 -ac -nolisten tcp -noreset +extension GLX +extension RENDER -dpi 96 &
 XVFB_PID=$!
 sleep 3
 
@@ -150,7 +240,7 @@ else
 fi
 
 # 启动应用程序
-echo "🌐 Web 界面: http://localhost:8080"
+echo "🌐 Web 界面: http://localhost:48080"
 echo "🔍 WebRTC 诊断: ./scripts/test-ice-connectivity.sh"
 echo "📊 按 Ctrl+C 停止应用"
 echo ""
@@ -178,6 +268,12 @@ cleanup() {
                 sleep 1
             fi
         done
+    fi
+
+    # 停止日志监控
+    if [ ! -z "$LOG_MONITOR_PID" ]; then
+        echo "停止日志监控..."
+        kill $LOG_MONITOR_PID 2>/dev/null || true
     fi
 
     # 停止 xeyes
@@ -239,7 +335,8 @@ echo "   时间戳: ${BDWIND_LOG_TIMESTAMP:-true}"
 echo "   调用者信息: ${BDWIND_LOG_CALLER:-false}"
 echo "   彩色输出: ${BDWIND_LOG_COLORS:-false}"
 echo ""
-.tmp/bdwind-gstreamer --config examples/debug_config.yaml --log-level "$BDWIND_LOG_LEVEL" --log-output "$BDWIND_LOG_OUTPUT" --log-file "$BDWIND_LOG_FILE" &
+echo "   使用二进制文件: $BINARY_FILE"
+$BINARY_FILE --config examples/debug_config.yaml --log-level "$BDWIND_LOG_LEVEL" --log-output "$BDWIND_LOG_OUTPUT" --log-file "$BDWIND_LOG_FILE" &
 APP_PID=$!
 
 # 等待应用程序启动
@@ -249,52 +346,194 @@ sleep 5
 if kill -0 $APP_PID 2>/dev/null; then
     echo "✅ 应用程序启动成功 (PID: $APP_PID)"
 
+    # 等待HTTP服务启动
+    echo "⏳ 等待HTTP服务启动..."
+    sleep 3
+    
     # 检查端口是否在监听
     echo "🔍 检查端口监听状态..."
-    if ss -tlnp | grep :8080 >/dev/null 2>&1; then
-        echo "✅ 端口8080正在监听"
-    else
-        echo "⚠️  端口8080未在监听"
-        echo "   当前监听的端口:"
-        ss -tlnp | grep LISTEN | head -5
-    fi
-
-    # 等待HTTP服务可用
-    echo "⏳ 等待HTTP服务启动..."
-    for i in {1..5}; do
-        if curl -s http://localhost:8080/health >/dev/null 2>&1; then
-            echo "✅ HTTP服务已就绪"
+    for i in {1..10}; do
+        if ss -tlnp | grep :48080 >/dev/null 2>&1; then
+            echo "✅ 端口48080正在监听"
             break
-        fi
-        sleep 1
-        if [ $i -eq 5 ]; then
-            echo "⚠️  HTTP服务检查超时，但应用程序可能仍在运行"
-            echo "   请手动检查: curl http://localhost:8080/health"
+        elif [ $i -eq 10 ]; then
+            echo "❌ 端口48080未在监听"
+            echo "   当前监听的端口:"
+            ss -tlnp | grep LISTEN | head -5
+            echo ""
+            echo "🔍 应用程序进程状态:"
+            if kill -0 $APP_PID 2>/dev/null; then
+                echo "   应用程序进程仍在运行 (PID: $APP_PID)"
+            else
+                echo "   应用程序进程已退出"
+            fi
             break
+        else
+            echo "   等待端口监听... ($i/10)"
+            sleep 2
         fi
     done
 
-    # 显示服务状态
+    # 测试HTTP服务可用性
+    echo "🌐 测试HTTP服务..."
+    for i in {1..5}; do
+        # 首先测试根路径
+        if curl -s -f http://localhost:48080/ >/dev/null 2>&1; then
+            echo "✅ HTTP根路径可访问"
+            break
+        elif curl -s http://localhost:48080/health >/dev/null 2>&1; then
+            echo "✅ HTTP健康检查可访问"
+            break
+        elif curl -s http://localhost:48080/api/status >/dev/null 2>&1; then
+            echo "✅ HTTP API可访问"
+            break
+        else
+            if [ $i -eq 5 ]; then
+                echo "⚠️  HTTP服务检查失败，尝试诊断..."
+                
+                # 详细的HTTP测试
+                echo "🔍 详细HTTP诊断:"
+                echo "   测试根路径:"
+                curl -v http://localhost:48080/ 2>&1 | head -10 || echo "   连接失败"
+                echo ""
+                echo "   测试健康检查:"
+                curl -v http://localhost:48080/health 2>&1 | head -5 || echo "   连接失败"
+                echo ""
+                
+                # 检查防火墙
+                if command -v ufw >/dev/null 2>&1; then
+                    echo "   防火墙状态:"
+                    sudo ufw status 2>/dev/null || echo "   无法检查防火墙状态"
+                fi
+                
+                # 检查网络接口
+                echo "   网络接口:"
+                ip addr show lo | grep inet || echo "   无法获取本地接口信息"
+                
+                break
+            else
+                echo "   HTTP服务测试 $i/5 失败，等待..."
+                sleep 2
+            fi
+        fi
+    done
+
+    # 显示服务状态和访问信息
     echo ""
-    echo "📋 服务状态:"
-    echo "   - HTTP API: http://localhost:8080/api/status"
-    echo "   - WebSocket: ws://localhost:8080/ws"
+    echo "🌐 服务访问信息:"
+    echo "   - 主页面: http://localhost:48080/"
+    echo "   - HTTP API: http://localhost:48080/api/status"
+    echo "   - WebSocket: ws://localhost:48080/ws"
+    echo "   - 健康检查: http://localhost:48080/health"
+    
+    # 检查静态文件
+    if [ -f "internal/webserver/static/index.html" ]; then
+        echo "   ✅ 静态文件存在"
+    else
+        echo "   ❌ 静态文件缺失"
+    fi
+    
     if [ "$BDWIND_LOG_OUTPUT" = "file" ]; then
         echo "   - 日志文件: $BDWIND_LOG_FILE"
         if [ -f "$BDWIND_LOG_FILE" ]; then
             LOG_SIZE=$(du -h "$BDWIND_LOG_FILE" 2>/dev/null | cut -f1 || echo "0B")
             echo "   - 当前日志大小: $LOG_SIZE"
+            
+            # 显示最近的日志条目
+            echo ""
+            echo "📄 最近日志 (最后5行):"
+            tail -5 "$BDWIND_LOG_FILE" 2>/dev/null | sed 's/^/   /' || echo "   无法读取日志文件"
+        fi
+    fi
+    
+    echo ""
+    echo "🔧 故障排除命令:"
+    echo "   - 实时日志: tail -f $BDWIND_LOG_FILE"
+    echo "   - 完整日志: cat $BDWIND_LOG_FILE"
+    echo "   - 错误日志: grep -i error $BDWIND_LOG_FILE"
+    echo "   - HTTP测试: curl -v http://localhost:48080/"
+    echo "   - 端口检查: ss -tlnp | grep 48080"
+    echo "   - 进程检查: ps aux | grep bdwind"
+    echo ""
+    echo "🎨 图形渲染说明:"
+    echo "   - 已启用软件渲染模式，避免GPU权限问题"
+    echo "   - 如果仍有EGL警告，这是正常的，不影响功能"
+    echo "   - 软件渲染性能较低，但适合调试环境"
+    echo ""
+    
+    # 启动后综合检查
+    echo "🧪 启动后综合检查:"
+    sleep 3
+    
+    # 检查HTTP服务
+    if curl -s -f http://localhost:48080/ >/dev/null 2>&1; then
+        echo "   ✅ HTTP服务正常响应"
+        echo "   🌐 可以在浏览器中访问: http://localhost:48080/"
+        
+        # 检查API端点
+        if curl -s http://localhost:48080/api/status >/dev/null 2>&1; then
+            echo "   ✅ API端点可访问"
+        else
+            echo "   ⚠️  API端点可能还在初始化"
+        fi
+        
+        # 检查静态文件
+        if curl -s -f http://localhost:48080/index.html >/dev/null 2>&1; then
+            echo "   ✅ 静态文件服务正常"
+        else
+            echo "   ⚠️  静态文件服务可能有问题"
+        fi
+        
+    else
+        echo "   ❌ HTTP服务无响应"
+        echo "   💡 故障排除步骤:"
+        echo "      1. 检查应用程序是否仍在运行: ps aux | grep bdwind"
+        echo "      2. 检查端口占用: ss -tlnp | grep 48080"
+        echo "      3. 查看错误日志: grep -i error $BDWIND_LOG_FILE"
+        echo "      4. 手动测试连接: curl -v http://localhost:48080/"
+        
+        # 显示应用程序状态
+        if kill -0 $APP_PID 2>/dev/null; then
+            echo "      应用程序进程状态: 运行中 (PID: $APP_PID)"
+        else
+            echo "      应用程序进程状态: 已退出"
+            echo "      请检查日志文件了解退出原因"
         fi
     fi
     echo ""
-    echo "🔧 故障排除:"
-    echo "   - 查看实时日志: tail -f $BDWIND_LOG_FILE"
-    echo "   - 查看完整日志: cat $BDWIND_LOG_FILE"
-    echo "   - 查看分析工具: 在脚本结束后会显示详细的日志分析命令"
-    echo ""
+
+    # 启动日志监控（如果是文件输出）
+    if [ "$BDWIND_LOG_OUTPUT" = "file" ] && [ -f "$BDWIND_LOG_FILE" ]; then
+        echo "📊 启动日志监控..."
+        echo "   日志文件: $BDWIND_LOG_FILE"
+        echo "   按 Ctrl+C 停止应用程序和日志监控"
+        echo ""
+        
+        # 在后台启动日志监控
+        (
+            sleep 3  # 等待应用程序完全启动
+            echo "=== 开始实时日志监控 ==="
+            tail -f "$BDWIND_LOG_FILE" 2>/dev/null | while read line; do
+                # 高亮重要信息
+                if echo "$line" | grep -qi "error\|fatal\|panic"; then
+                    echo "🔴 $line"
+                elif echo "$line" | grep -qi "warn"; then
+                    echo "🟡 $line"
+                elif echo "$line" | grep -qi "http\|server\|listening"; then
+                    echo "🌐 $line"
+                elif echo "$line" | grep -qi "webrtc\|ice\|sdp"; then
+                    echo "📡 $line"
+                else
+                    echo "   $line"
+                fi
+            done
+        ) &
+        LOG_MONITOR_PID=$!
+    else
+        echo "应用程序正在运行，按 Ctrl+C 停止..."
+    fi
 
     # 等待应用程序结束
-    echo "应用程序正在运行，按Ctrl+C停止..."
     wait $APP_PID
 else
     echo "❌ 应用程序启动失败"

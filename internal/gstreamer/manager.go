@@ -412,99 +412,108 @@ func (m *Manager) classifyError(err error) ErrorType {
 
 // Start 启动GStreamer管理器 (保持生命周期管理接口不变)
 func (m *Manager) Start(ctx context.Context) error {
+	startTime := time.Now()
+	m.logger.Info("Starting GStreamer manager...")
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.running {
-		// Error级别: 管理器已经在运行
-		m.logger.Error("Manager is already running")
+		m.logger.Warn("GStreamer manager already running, skipping start")
 		return fmt.Errorf("GStreamer manager already running")
 	}
 
-	// Debug级别: 记录管理器启动开始
-	m.logger.Debug("Starting GStreamer manager with go-gst refactor...")
-	// Trace级别: 记录启动时间
+	// 记录GStreamer配置信息
+	m.logger.Debugf("GStreamer configuration: display=%s, codec=%s, resolution=%dx%d@%dfps, bitrate=%dkbps",
+		m.config.Capture.DisplayID, m.config.Encoding.Codec,
+		m.config.Capture.Width, m.config.Capture.Height, m.config.Capture.FrameRate,
+		m.config.Encoding.Bitrate)
+	m.logger.Debugf("Hardware acceleration: %v, preset: %s, profile: %s",
+		m.config.Encoding.UseHardware, m.config.Encoding.Preset, m.config.Encoding.Profile)
+
 	m.startTime = time.Now()
-	m.logger.Tracef("Manager start time: %v", m.startTime)
 
-	// Debug级别: 记录启动前的组件状态检查
-	m.logger.Debug("Pre-start component status check (go-gst):")
-	m.logger.Debugf("  Go-gst desktop capture available: %v", m.capture != nil)
-	m.logger.Debugf("  Go-gst video encoder available: %v", m.encoder != nil)
-	m.logger.Debugf("  Error handler available: %v", m.errorHandler != nil)
-	m.logger.Debugf("  HTTP handlers available: %v", m.handlers != nil)
-	m.logger.Debugf("  Stream publisher available: %v", m.streamPublisher != nil)
+	// 验证组件状态
+	m.logger.Debug("Verifying component availability before startup...")
+	m.logger.Debugf("Component status: capture=%v, encoder=%v, error_handler=%v, http_handlers=%v, stream_publisher=%v",
+		m.capture != nil, m.encoder != nil, m.errorHandler != nil, m.handlers != nil, m.streamPublisher != nil)
 
-	// 启动go-gst桌面捕获（如果可用）
+	// 启动桌面捕获组件
 	if m.capture != nil {
-		// Trace级别: 记录桌面捕获启动开始
-		m.logger.Trace("Starting go-gst desktop capture component")
+		m.logger.Debug("Starting desktop capture component...")
+		m.logger.Tracef("Display ID: %s, capture region: %dx%d", 
+			m.config.Capture.DisplayID, m.config.Capture.Width, m.config.Capture.Height)
 
 		if err := m.startDesktopCaptureWithContext(); err != nil {
-			// Error级别: 桌面捕获启动失败（但不阻止管理器启动）
-			m.logger.Errorf("Failed to start go-gst desktop capture: %v", err)
-			// Debug级别: 记录桌面捕获详细状态
-			m.logger.Debug("Go-gst desktop capture status: failed (continuing without capture)")
+			m.logger.Errorf("Failed to start desktop capture: %v", err)
+			m.logger.Warn("Desktop capture failed - continuing without video capture")
 		} else {
-			// Debug级别: 记录桌面捕获启动成功
-			m.logger.Debug("Go-gst desktop capture started successfully")
-			m.logger.Debug("  Sample callback configured: yes")
-			m.logger.Debug("  Monitoring goroutine: started")
+			m.logger.Debug("Desktop capture started successfully")
+			m.logger.Debug("Sample callback chain established")
 
-			// Trace级别: 记录Pipeline状态管理器初始化开始
-			m.logger.Trace("Initializing go-gst pipeline state manager for capture")
-
-			// 初始化Pipeline状态管理器（在桌面捕获启动后）
+			// 初始化Pipeline状态管理器
+			m.logger.Debug("Initializing pipeline state manager...")
 			if err := m.initializePipelineStateManagerForCapture(); err != nil {
-				// Error级别: Pipeline状态管理器初始化失败（但不阻止管理器启动）
-				m.logger.Errorf("Failed to initialize go-gst pipeline state manager: %v", err)
-				// Debug级别: 记录状态管理器详细状态
-				m.logger.Debug("Go-gst pipeline state manager status: failed (continuing without state management)")
+				m.logger.Errorf("Failed to initialize pipeline state manager: %v", err)
+				m.logger.Warn("Pipeline state management disabled - continuing without monitoring")
 			} else {
-				// Debug级别: 记录状态管理器启动成功
-				m.logger.Debug("Go-gst pipeline state manager initialized successfully")
-				m.logger.Debug("  State change callbacks: configured")
-				m.logger.Debug("  Error callbacks: configured")
-				// Trace级别: 记录状态管理器详细信息
-				m.logger.Trace("Go-gst pipeline state manager monitoring started")
+				m.logger.Debug("Pipeline state manager initialized successfully")
 			}
 		}
 	} else {
-		// Debug级别: 记录桌面捕获不可用
-		m.logger.Debug("Go-gst desktop capture not available, skipping capture startup")
+		m.logger.Warn("Desktop capture component not available")
 	}
 
-	// 启动go-gst编码器（如果可用）
+	// 启动视频编码器
 	if m.encoder != nil {
-		m.logger.Trace("Starting go-gst encoder component")
+		m.logger.Debug("Starting video encoder...")
+		m.logger.Tracef("Encoder codec: %s, bitrate: %dkbps, hardware: %v", 
+			m.config.Encoding.Codec, m.config.Encoding.Bitrate, m.config.Encoding.UseHardware)
+		
 		if err := m.encoder.Start(); err != nil {
-			m.logger.Errorf("Failed to start go-gst encoder: %v", err)
-			// 不返回错误，允许继续运行
+			m.logger.Errorf("Failed to start video encoder: %v", err)
+			m.logger.Warn("Video encoder failed - continuing without encoding")
 		} else {
-			m.logger.Debug("Go-gst encoder started successfully")
+			m.logger.Debug("Video encoder started successfully")
+		}
+	} else {
+		m.logger.Warn("Video encoder component not available")
+	}
+
+	// 启动流发布器
+	if m.streamPublisher != nil {
+		m.logger.Debug("Starting stream publisher...")
+		if !m.streamPublisher.IsRunning() {
+			m.logger.Warn("Stream publisher not running - media distribution may be affected")
+		} else {
+			subscriberCount := m.streamPublisher.GetSubscriberCount()
+			m.logger.Debugf("Stream publisher active with %d subscribers", subscriberCount)
 		}
 	}
 
-	// Trace级别: 记录管理器状态设置
-	m.logger.Trace("Setting manager running state to true")
-	m.running = true
-
-	// 启动配置监控 (保持接口不变)
+	// 启动配置监控
+	m.logger.Debug("Starting configuration monitoring...")
 	m.MonitorLoggingConfigChanges(m.configChangeChannel)
 
-	// Debug级别: 记录管理器启动成功 - 内部状态
-	uptime := time.Since(m.startTime)
-	m.logger.Debugf("GStreamer manager started successfully with go-gst (startup time: %v)", uptime)
-
-	// Debug级别: 记录启动后的状态摘要
-	m.logger.Debug("Final component status (go-gst):")
-	m.logger.Debugf("  Manager running: %v", m.running)
-	m.logger.Debugf("  Go-gst desktop capture active: %v", m.capture != nil)
-	m.logger.Debugf("  Go-gst encoder active: %v", m.encoder != nil)
-	m.logger.Debugf("  State manager active: %v", m.stateManager != nil)
-	m.logger.Debugf("  Config monitoring active: %v", m.configChangeChannel != nil)
-	m.logger.Debugf("  Stream publisher active: %v", m.streamPublisher.IsRunning())
-	m.logger.Debugf("  Subscribers count: %d", m.streamPublisher.GetSubscriberCount())
+	m.running = true
+	duration := time.Since(startTime)
+	
+	// 记录最终状态
+	captureStatus := "disabled"
+	if m.capture != nil {
+		captureStatus = "active"
+	}
+	encoderStatus := "disabled"
+	if m.encoder != nil {
+		encoderStatus = "active"
+	}
+	
+	m.logger.Infof("GStreamer manager started successfully in %v (capture: %s, encoder: %s)", 
+		duration, captureStatus, encoderStatus)
+	
+	// 记录组件摘要
+	m.logger.Infof("GStreamer ready: display capture from %s, %s encoding", 
+		m.config.Capture.DisplayID, m.config.Encoding.Codec)
 
 	return nil
 }

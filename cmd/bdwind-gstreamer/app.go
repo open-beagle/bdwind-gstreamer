@@ -41,24 +41,32 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 		logger = config.GetLoggerWithPrefix("app")
 	}
 
+	logger.Info("Creating BDWind application...")
+
 	// Create root context for lifecycle management
+	logger.Debug("Creating root context for lifecycle management...")
 	rootCtx, cancelFunc := context.WithCancel(context.Background())
 
 	// Create signal channel for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
+	logger.Debug("Signal channel created")
 
 	// 创建GStreamer管理器 (必须先创建，因为WebRTC需要它作为MediaProvider)
+	logger.Info("Creating GStreamer manager...")
 	gstreamerMgrConfig := &gstreamer.ManagerConfig{
 		Config: cfg.GStreamer,
 	}
 
 	gstreamerMgr, err := gstreamer.NewManager(rootCtx, gstreamerMgrConfig)
 	if err != nil {
+		logger.Errorf("Failed to create GStreamer manager: %v", err)
 		cancelFunc() // Clean up context on error
 		return nil, fmt.Errorf("failed to create GStreamer manager: %w", err)
 	}
+	logger.Info("GStreamer manager created successfully")
 
 	// 创建WebRTC管理器 (使用GStreamer作为MediaProvider)
+	logger.Info("Creating WebRTC manager...")
 	webrtcMgrConfig := &webrtc.ManagerConfig{
 		Config:        cfg,
 		MediaProvider: gstreamerMgr, // 使用GStreamer管理器作为媒体提供者
@@ -66,24 +74,33 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 
 	webrtcMgr, err := webrtc.NewManager(rootCtx, webrtcMgrConfig)
 	if err != nil {
+		logger.Errorf("Failed to create WebRTC manager: %v", err)
 		cancelFunc() // Clean up context on error
 		return nil, fmt.Errorf("failed to create WebRTC manager: %w", err)
 	}
+	logger.Info("WebRTC manager created successfully")
 
 	// 创建webserver管理器（包含认证功能）
+	logger.Info("Creating webserver manager...")
 	webserverMgr, err := webserver.NewManager(rootCtx, cfg.WebServer)
 	if err != nil {
+		logger.Errorf("Failed to create webserver manager: %v", err)
 		cancelFunc() // Clean up context on error
 		return nil, fmt.Errorf("failed to create webserver manager: %w", err)
 	}
+	logger.Info("Webserver manager created successfully")
 
 	// 创建监控管理器
+	logger.Info("Creating metrics manager...")
 	metricsMgr, err := metrics.NewManager(rootCtx, cfg.Metrics)
 	if err != nil {
+		logger.Errorf("Failed to create metrics manager: %v", err)
 		cancelFunc() // Clean up context on error
 		return nil, fmt.Errorf("failed to create metrics manager: %w", err)
 	}
+	logger.Info("Metrics manager created successfully")
 
+	logger.Debug("Assembling application components...")
 	app := &BDWindApp{
 		config:       cfg,
 		webserverMgr: webserverMgr,
@@ -97,6 +114,7 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 		sigChan:      sigChan,
 	}
 
+	logger.Info("BDWind application created successfully")
 	return app, nil
 }
 
@@ -147,17 +165,26 @@ func (app *BDWindApp) connectGStreamerToWebRTC() error {
 // Start 启动应用
 func (app *BDWindApp) Start() error {
 	startupStartTime := time.Now()
-	app.logger.Trace("Starting BDWind-GStreamer v1.0.0")
+	app.logger.Info("Starting BDWind-GStreamer v1.0.0...")
+
+	// 记录应用配置摘要
+	app.logger.Debugf("Application configuration: webserver_port=%d, webserver_tls=%v, metrics_external=%v",
+		app.config.WebServer.Port, app.config.WebServer.EnableTLS, app.config.Metrics.External.Enabled)
+	app.logger.Debugf("GStreamer config: display=%s, codec=%s, resolution=%dx%d@%dfps",
+		app.config.GStreamer.Capture.DisplayID, app.config.GStreamer.Encoding.Codec,
+		app.config.GStreamer.Capture.Width, app.config.GStreamer.Capture.Height,
+		app.config.GStreamer.Capture.FrameRate)
 
 	// Setup signal handling for graceful shutdown
+	app.logger.Debug("Setting up signal handling for graceful shutdown...")
 	signal.Notify(app.sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Start signal handler goroutine
 	app.wg.Add(1)
 	go app.handleSignals()
+	app.logger.Debug("Signal handler started")
 
 	// Define component startup order: metrics → gstreamer → webrtc → webserver
-	// Note: webserver.Manager doesn't implement ComponentManager interface as it IS the webserver
 	type managerInfo struct {
 		name    string
 		manager interface {
@@ -174,19 +201,24 @@ func (app *BDWindApp) Start() error {
 		{"webserver", app.webserverMgr},
 	}
 
+	app.logger.Infof("Starting %d components in sequence: metrics → gstreamer → webrtc → webserver", len(managers))
+
 	// Track startup timings for consolidated summary
 	startupTimings := make(map[string]time.Duration)
 	var startedManagers []string
 
-	// Start components in order, but handle webserver specially
+	// Start components in order
 	for i, mgr := range managers {
+		app.logger.Infof("Starting %s manager (%d/%d)...", mgr.name, i+1, len(managers))
+		
+		// Special handling for webserver - register components first
 		if mgr.name == "webserver" {
-			// Before starting webserver, register other components for route setup
-			app.logger.Debugf("Registering components with webserver before starting...")
+			app.logger.Debug("Registering components with webserver before starting...")
 			if err := app.registerComponentsWithWebServer(); err != nil {
 				app.logger.Errorf("Failed to register components with webserver: %v", err)
 
 				// Rollback: stop already started components
+				app.logger.Warn("Starting rollback procedure due to webserver registration failure")
 				for j := i - 1; j >= 0; j-- {
 					app.logger.Warnf("Rolling back: stopping %s manager...", managers[j].name)
 					if stopErr := managers[j].manager.Stop(app.rootCtx); stopErr != nil {
@@ -197,26 +229,28 @@ func (app *BDWindApp) Start() error {
 
 				return fmt.Errorf("failed to register components with webserver: %w", err)
 			}
+			app.logger.Debug("Component registration completed successfully")
 		}
 
-		// Configure GStreamer logging before starting GStreamer manager
+		// Special handling for GStreamer - configure logging first
 		if mgr.name == "gstreamer" {
-			app.logger.Debug("Configuring GStreamer logging before manager startup...")
+			app.logger.Debug("Configuring GStreamer logging...")
 			if err := app.configureGStreamerLogging(); err != nil {
-				// Log warning but don't fail startup - GStreamer can still work without logging configuration
 				app.logger.Warnf("Failed to configure GStreamer logging: %v", err)
 			} else {
 				app.logger.Debug("GStreamer logging configured successfully")
 			}
 		}
 
-		// Track individual manager startup time
+		// Start the component
 		managerStartTime := time.Now()
+		app.logger.Debugf("Attempting to start %s manager...", mgr.name)
 
 		if err := mgr.manager.Start(app.rootCtx); err != nil {
 			app.logger.Errorf("Failed to start %s manager: %v", mgr.name, err)
 
 			// Rollback: stop already started components in reverse order
+			app.logger.Warnf("Starting rollback procedure due to %s manager failure", mgr.name)
 			for j := i - 1; j >= 0; j-- {
 				app.logger.Warnf("Rolling back: stopping %s manager...", managers[j].name)
 				if stopErr := managers[j].manager.Stop(app.rootCtx); stopErr != nil {
@@ -230,25 +264,50 @@ func (app *BDWindApp) Start() error {
 			return fmt.Errorf("failed to start %s manager: %w", mgr.name, err)
 		}
 
-		// Record successful startup timing
-		startupTimings[mgr.name] = time.Since(managerStartTime)
+		// Record successful startup
+		duration := time.Since(managerStartTime)
+		startupTimings[mgr.name] = duration
 		startedManagers = append(startedManagers, mgr.name)
+		
+		app.logger.Infof("%s manager started successfully in %v", mgr.name, duration)
+		
+		// Verify component is running
+		if mgr.manager.IsRunning() {
+			app.logger.Debugf("%s manager confirmed running", mgr.name)
+		} else {
+			app.logger.Warnf("%s manager started but not reporting as running", mgr.name)
+		}
 	}
 
 	// Connect GStreamer to WebRTC after all components are started
+	app.logger.Debug("Establishing GStreamer to WebRTC connection...")
 	if err := app.connectGStreamerToWebRTC(); err != nil {
 		app.logger.Warnf("Failed to connect GStreamer to WebRTC: %v", err)
-		// Don't fail the startup, but log the error
+		app.logger.Warn("Media streaming may be affected - continuing startup")
+	} else {
+		app.logger.Debug("GStreamer to WebRTC connection established successfully")
 	}
 
-	// Log consolidated startup summary with total time
+	// Final application startup summary
 	totalStartupTime := time.Since(startupStartTime)
 	app.logger.Infof("BDWind-GStreamer application started successfully in %v", totalStartupTime)
 
+	// Log component status summary
+	app.logger.Infof("All %d components started: %v", len(startedManagers), startedManagers)
+	
 	// Log detailed timing breakdown at DEBUG level
-	app.logger.Debugf("Manager startup timings: metrics(%v), gstreamer(%v), webrtc(%v), webserver(%v)",
+	app.logger.Debugf("Component startup timings: metrics=%v, gstreamer=%v, webrtc=%v, webserver=%v",
 		startupTimings["metrics"], startupTimings["gstreamer"],
 		startupTimings["webrtc"], startupTimings["webserver"])
+
+	// Log service endpoints
+	webserverAddr := app.webserverMgr.GetAddress()
+	app.logger.Infof("Application ready - Web interface: %s", webserverAddr)
+	
+	if app.config.Metrics.External.Enabled {
+		metricsEndpoint := app.config.Metrics.GetExternalEndpoint()
+		app.logger.Infof("Metrics endpoint: %s", metricsEndpoint)
+	}
 
 	return nil
 }
