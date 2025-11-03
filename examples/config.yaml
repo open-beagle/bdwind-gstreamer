@@ -1,0 +1,35 @@
+# BDWind-GStreamer 调试配置
+# 适用于容器环境，无显卡，使用外部 TURN 服务器
+
+# Web 服务器配置
+webserver:
+  host: "0.0.0.0"
+  port: 48080
+  enable_tls: false
+  static_dir: "internal/webserver/static"
+  auth:
+    enabled: false
+
+# GStreamer 配置
+gstreamer:
+  capture:
+    display_id: ":99"
+    enabled: true
+    use_software_rendering: true
+    width: 1920
+    height: 1080
+    framerate: 30
+  encoding:
+    codec: "h264"
+    use_software_encoder: true
+    bitrate: 2500
+
+# WebRTC 配置
+webrtc:
+  ice_servers:
+    - urls: ["stun:stun.ali.wodcloud.com:3478"]
+
+# 日志配置
+logging:
+  level: "info"
+  file: ".tmp/bdwind-gstreamer.log"

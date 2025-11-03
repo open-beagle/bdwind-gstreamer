@@ -316,12 +316,20 @@ func (sp *StreamPublisher) PublishAudioFrame(frame *EncodedAudioFrame) error {
 
 // AddVideoSubscriber adds a video stream subscriber and returns its unique ID
 func (sp *StreamPublisher) AddVideoSubscriber(subscriber VideoStreamSubscriber) (uint64, error) {
+	sp.logger.Debug("AddVideoSubscriber called on StreamPublisher")
+	
 	if subscriber == nil {
+		sp.logger.Error("Subscriber is nil")
 		return 0, fmt.Errorf("subscriber is nil")
 	}
 
+	sp.logger.Debug("Acquiring video mutex...")
 	sp.videoMutex.Lock()
-	defer sp.videoMutex.Unlock()
+	sp.logger.Debug("Video mutex acquired")
+	defer func() {
+		sp.videoMutex.Unlock()
+		sp.logger.Debug("Video mutex released")
+	}()
 
 	if len(sp.videoSubscribers) >= sp.config.MaxSubscribers {
 		return 0, fmt.Errorf("maximum number of subscribers reached")

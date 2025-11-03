@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Diagnostic</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test { margin: 10px 0; padding: 10px; border: 1px solid #ccc; }
+        .pass { background: #d4edda; border-color: #c3e6cb; }
+        .fail { background: #f8d7da; border-color: #f5c6cb; }
+        .pending { background: #fff3cd; border-color: #ffeaa7; }
+        button { margin: 5px; padding: 8px 16px; }
+        .logs { height: 200px; overflow-y: scroll; border: 1px solid #ccc; padding: 10px; font-family: monospace; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>WebRTC Desktop Capture Diagnostic</h1>
+    
+    <div id="test1" class="test pending">
+        <h3>Test 1: API Endpoints</h3>
+        <p>Status: <span id="test1-status">Pending</span></p>
+        <button onclick="runTest1()">Run Test</button>
+    </div>
+    
+    <div id="test2" class="test pending">
+        <h3>Test 2: WebSocket Connection</h3>
+        <p>Status: <span id="test2-status">Pending</span></p>
+        <button onclick="runTest2()">Run Test</button>
+    </div>
+    
+    <div id="test3" class="test pending">
+        <h3>Test 3: WebRTC Offer</h3>
+        <p>Status: <span id="test3-status">Pending</span></p>
+        <button onclick="runTest3()">Run Test</button>
+    </div>
+    
+    <div id="test4" class="test pending">
+        <h3>Test 4: Full WebRTC Connection</h3>
+        <p>Status: <span id="test4-status">Pending</span></p>
+        <video id="video" width="320" height="240" autoplay playsinline muted style="border: 1px solid #333; background: #000;"></video><br>
+        <button onclick="runTest4()">Run Test</button>
+    </div>
+    
+    <div class="logs" id="logs"></div>
+    
+    <script>
+        function log(msg, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            document.getElementById('logs').innerHTML += `[${timestamp}] ${icon} ${msg}<br>`;
+            document.getElementById('logs').scrollTop = document.getElementById('logs').scrollHeight;
+            console.log(msg);
+        }
+        
+        function setTestStatus(testId, status, className) {
+            document.getElementById(testId + '-status').textContent = status;
+            document.getElementById(testId).className = 'test ' + className;
+        }
+        
+        async function runTest1() {
+            log('Running API endpoints test...');
+            setTestStatus('test1', 'Running...', 'pending');
+            
+            try {
+                // Test bridge status
+                const response = await fetch('/api/bridge/status');
+                const data = await response.json();
+                
+                if (data.running && data.gstreamer_running && data.webrtc_running) {
+                    log('✅ Bridge status: All components running', 'success');
+                    setTestStatus('test1', 'Pass - All components running', 'pass');
+                } else {
+                    log('⚠️ Bridge status: Some components not running', 'error');
+                    log(`   Bridge: ${data.running}, GStreamer: ${data.gstreamer_running}, WebRTC: ${data.webrtc_running}`);
+                    setTestStatus('test1', 'Partial - Some components not running', 'fail');
+                }
+            } catch (error) {
+                log('❌ API test failed: ' + error, 'error');
+                setTestStatus('test1', 'Fail - API error', 'fail');
+            }
+        }
+        
+        async function runTest2() {
+            log('Running WebSocket connection test...');
+            setTestStatus('test2', 'Running...', 'pending');
+            
+            return new Promise((resolve) => {
+                const ws = new WebSocket(`ws://${window.location.host}/api/signaling`);
+                let connected = false;
+                
+                const timeout = setTimeout(() => {
+                    if (!connected) {
+                        log('❌ WebSocket connection timeout', 'error');
+                        setTestStatus('test2', 'Fail - Connection timeout', 'fail');
+                        ws.close();
+                        resolve(false);
+                    }
+                }, 5000);
+                
+                ws.onopen = () => {
+                    connected = true;
+                    clearTimeout(timeout);
+                    log('✅ WebSocket connected successfully', 'success');
+                    setTestStatus('test2', 'Pass - WebSocket connected', 'pass');
+                    ws.close();
+                    resolve(true);
+                };
+                
+                ws.onerror = (error) => {
+                    clearTimeout(timeout);
+                    log('❌ WebSocket error: ' + error, 'error');
+                    setTestStatus('test2', 'Fail - WebSocket error', 'fail');
+                    resolve(false);
+                };
+            });
+        }
+        
+        async function runTest3() {
+            log('Running WebRTC offer test...');
+            setTestStatus('test3', 'Running...', 'pending');
+            
+            return new Promise((resolve) => {
+                const ws = new WebSocket(`ws://${window.location.host}/api/signaling`);
+                let offerReceived = false;
+                
+                const timeout = setTimeout(() => {
+                    if (!offerReceived) {
+                        log('❌ Offer request timeout', 'error');
+                        setTestStatus('test3', 'Fail - Offer timeout', 'fail');
+                        ws.close();
+                        resolve(false);
+                    }
+                }, 10000);
+                
+                ws.onopen = () => {
+                    log('WebSocket connected, requesting offer...');
+                    setTimeout(() => {
+                        ws.send(JSON.stringify({
+                            type: 'request-offer',
+                            timestamp: Date.now()
+                        }));
+                    }, 1000);
+                };
+                
+                ws.onmessage = (event) => {
+                    const msg = JSON.parse(event.data);
+                    log(`Received: ${msg.type}`);
+                    
+                    if (msg.type === 'offer') {
+                        offerReceived = true;
+                        clearTimeout(timeout);
+                        
+                        const sdp = msg.data.sdp?.sdp || '';
+                        const hasVideo = sdp.includes('m=video');
+                        const hasAudio = sdp.includes('m=audio');
+                        
+                        log(`✅ Offer received: video=${hasVideo}, audio=${hasAudio}`, 'success');
+                        
+                        if (hasVideo) {
+                            setTestStatus('test3', 'Pass - Offer with video track', 'pass');
+                        } else {
+                            setTestStatus('test3', 'Partial - Offer without video', 'fail');
+                        }
+                        
+                        ws.close();
+                        resolve(hasVideo);
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    clearTimeout(timeout);
+                    log('❌ WebSocket error during offer test: ' + error, 'error');
+                    setTestStatus('test3', 'Fail - WebSocket error', 'fail');
+                    resolve(false);
+                };
+            });
+        }
+        
+        async function runTest4() {
+            log('Running full WebRTC connection test...');
+            setTestStatus('test4', 'Running...', 'pending');
+            
+            const video = document.getElementById('video');
+            let ws = null;
+            let pc = null;
+            
+            try {
+                ws = new WebSocket(`ws://${window.location.host}/api/signaling`);
+                
+                ws.onopen = () => {
+                    log('WebSocket connected for full test');
+                    
+                    pc = new RTCPeerConnection({
+                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                    });
+                    
+                    pc.ontrack = (event) => {
+                        log('✅ Video track received!', 'success');
+                        video.srcObject = event.streams[0];
+                        setTestStatus('test4', 'Pass - Video streaming', 'pass');
+                    };
+                    
+                    pc.onconnectionstatechange = () => {
+                        log(`Connection state: ${pc.connectionState}`);
+                        if (pc.connectionState === 'failed') {
+                            setTestStatus('test4', 'Fail - Connection failed', 'fail');
+                        }
+                    };
+                    
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            ws.send(JSON.stringify({
+                                type: 'ice-candidate',
+                                data: {
+                                    candidate: event.candidate.candidate,
+                                    sdpMid: event.candidate.sdpMid,
+                                    sdpMLineIndex: event.candidate.sdpMLineIndex
+                                }
+                            }));
+                        }
+                    };
+                    
+                    setTimeout(() => {
+                        ws.send(JSON.stringify({
+                            type: 'request-offer',
+                            timestamp: Date.now()
+                        }));
+                    }, 1000);
+                };
+                
+                ws.onmessage = async (event) => {
+                    const msg = JSON.parse(event.data);
+                    
+                    if (msg.type === 'offer') {
+                        log('Processing offer for full test...');
+                        await pc.setRemoteDescription({
+                            type: 'offer',
+                            sdp: msg.data.sdp.sdp
+                        });
+                        
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        
+                        ws.send(JSON.stringify({
+                            type: 'answer',
+                            data: {
+                                type: 'answer',
+                                sdp: answer.sdp
+                            }
+                        }));
+                        log('Answer sent for full test');
+                    }
+                    
+                    if (msg.type === 'ice-candidate') {
+                        await pc.addIceCandidate({
+                            candidate: msg.data.candidate,
+                            sdpMid: msg.data.sdpMid,
+                            sdpMLineIndex: msg.data.sdpMLineIndex
+                        });
+                    }
+                };
+                
+                // Set timeout for full test
+                setTimeout(() => {
+                    if (video.srcObject === null) {
+                        log('❌ Full test timeout - no video received', 'error');
+                        setTestStatus('test4', 'Fail - No video received', 'fail');
+                        if (ws) ws.close();
+                        if (pc) pc.close();
+                    }
+                }, 15000);
+                
+            } catch (error) {
+                log('❌ Full test error: ' + error, 'error');
+                setTestStatus('test4', 'Fail - Error', 'fail');
+            }
+        }
+        
+        // Auto-run tests
+        log('🚀 Starting diagnostic tests...');
+        setTimeout(() => {
+            runTest1().then(() => {
+                setTimeout(() => {
+                    runTest2().then(() => {
+                        setTimeout(() => {
+                            runTest3().then(() => {
+                                log('🏁 Basic tests completed. Run Test 4 manually if needed.');
+                            });
+                        }, 1000);
+                    });
+                }, 1000);
+            });
+        }, 1000);
+    </script>
+</body>
+</html>

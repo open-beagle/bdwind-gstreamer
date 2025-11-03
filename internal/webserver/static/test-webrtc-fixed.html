@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Desktop Capture Test (Fixed)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { text-align: center; margin-bottom: 30px; }
+    .header h1 { color: #333; margin-bottom: 10px; }
+    .header p { color: #666; }
+    video { width: 100%; max-width: 800px; height: auto; border: 2px solid #333; background: #000; border-radius: 8px; }
+    .video-container { text-align: center; margin-bottom: 20px; }
+    .controls { text-align: center; margin: 20px 0; }
+    button { margin: 5px; padding: 12px 24px; font-size: 16px; border: none; border-radius: 6px; cursor: pointer; }
+    .btn-primary { background: #007bff; color: white; }
+    .btn-danger { background: #dc3545; color: white; }
+    .btn-secondary { background: #6c757d; color: white; }
+    .status { margin: 20px 0; padding: 15px; background: #fff; border-radius: 8px; text-align: center; }
+    .logs { height: 300px; overflow-y: scroll; border: 1px solid #ccc; padding: 10px; font-family: monospace; font-size: 12px; background: #fff; }
+    .log-entry { margin: 2px 0; }
+    .log-success { color: #28a745; }
+    .log-error { color: #dc3545; }
+    .log-warning { color: #ffc107; }
+    .log-info { color: #17a2b8; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>WebRTC Desktop Capture Test (Fixed)</h1>
+      <p>测试桌面捕获和 WebRTC 流媒体功能 - 修复版本</p>
+    </div>
+
+    <div class="video-container">
+      <video id="video" autoplay playsinline muted></video>
+    </div>
+
+    <div class="controls">
+      <button class="btn-primary" onclick="startCapture()">开始桌面捕获</button>
+      <button class="btn-danger" onclick="stopCapture()">停止捕获</button>
+      <button class="btn-secondary" onclick="clearLogs()">清除日志</button>
+    </div>
+
+    <div class="status">
+      <span class="status-indicator">●</span>
+      <span id="status">状态: 准备就绪</span>
+    </div>
+
+    <div class="logs" id="logs"></div>
+  </div>
+
+  <script>
+    let ws = null;
+    let pc = null;
+    const video = document.getElementById('video');
+    const status = document.getElementById('status');
+    const logs = document.getElementById('logs');
+
+    function log(message, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString();
+      const entry = document.createElement('div');
+      entry.className = `log-entry log-${type}`;
+      entry.textContent = `[${timestamp}] ${message}`;
+      logs.appendChild(entry);
+      logs.scrollTop = logs.scrollHeight;
+      console.log(`[${type.toUpperCase()}] ${message}`);
+    }
+
+    function updateStatus(message, type = 'info') {
+      status.textContent = `状态: ${message}`;
+    }
+
+    function clearLogs() {
+      logs.innerHTML = '';
+      log('日志已清除', 'info');
+    }
+
+    function startCapture() {
+      log('开始桌面捕获测试...', 'info');
+      updateStatus('正在连接...', 'connecting');
+
+      // Connect to signaling server
+      ws = new WebSocket(`ws://${window.location.host}/api/signaling`);
+
+      ws.onopen = function () {
+        log('WebSocket 连接成功', 'success');
+        updateStatus('已连接到信令服务器', 'connected');
+
+        // Create RTCPeerConnection
+        const config = {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+          ]
+        };
+
+        pc = new RTCPeerConnection(config);
+
+        // FIXED: ICE candidate handling with correct format
+        pc.onicecandidate = function (event) {
+          if (event.candidate) {
+            log(`生成 ICE 候选: ${event.candidate.candidate.substring(0, 50)}...`, 'info');
+            ws.send(JSON.stringify({
+              type: 'ice-candidate',
+              data: {
+                candidate: {
+                  candidate: event.candidate.candidate,
+                  sdpMid: event.candidate.sdpMid,
+                  sdpMLineIndex: event.candidate.sdpMLineIndex
+                }
+              }
+            }));
+          } else {
+            log('ICE 候选收集完成', 'success');
+          }
+        };
+
+        pc.ontrack = function (event) {
+          log('收到远程视频轨道!', 'success');
+          updateStatus('视频流已接收', 'connected');
+          video.srcObject = event.streams[0];
+        };
+
+        pc.onconnectionstatechange = function () {
+          log(`连接状态变化: ${pc.connectionState}`, 'info');
+          updateStatus(`连接状态: ${pc.connectionState}`, 'info');
+        };
+
+        // Request offer from server
+        setTimeout(() => {
+          log('请求服务器创建 offer...', 'info');
+          ws.send(JSON.stringify({
+            type: 'request-offer',
+            timestamp: Date.now()
+          }));
+        }, 1000);
+      };
+
+      ws.onmessage = function (event) {
+        const message = JSON.parse(event.data);
+        log(`收到消息: ${message.type}`, 'info');
+
+        switch (message.type) {
+          case 'offer':
+            handleOffer(message);
+            break;
+          case 'ice-candidate':
+            handleIceCandidate(message);
+            break;
+          case 'error':
+            log(`服务器错误: ${message.error?.message || '未知错误'}`, 'error');
+            updateStatus('服务器错误', 'error');
+            break;
+          default:
+            log(`未知消息类型: ${message.type}`, 'warning');
+        }
+      };
+
+      ws.onerror = function (error) {
+        log(`WebSocket 错误: ${error}`, 'error');
+        updateStatus('WebSocket 连接错误', 'error');
+      };
+
+      ws.onclose = function (event) {
+        log(`WebSocket 连接关闭 (代码: ${event.code})`, 'warning');
+        updateStatus('连接已断开', 'error');
+      };
+    }
+
+    async function handleOffer(message) {
+      try {
+        const offer = message.data.sdp;
+        log(`收到 offer: ${offer.type}, SDP 长度: ${offer.sdp.length}`, 'success');
+
+        await pc.setRemoteDescription({
+          type: 'offer',
+          sdp: offer.sdp
+        });
+
+        log('远程描述设置成功，创建 answer...', 'success');
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        log('发送 answer 到服务器...', 'info');
+        // FIXED: Answer format
+        ws.send(JSON.stringify({
+          type: 'answer',
+          data: {
+            sdp: {
+              type: 'answer',
+              sdp: answer.sdp
+            }
+          }
+        }));
+
+        updateStatus('Answer 已发送，等待连接...', 'connecting');
+      } catch (error) {
+        log(`处理 offer 失败: ${error}`, 'error');
+        updateStatus('处理 offer 错误', 'error');
+      }
+    }
+
+    // FIXED: ICE candidate handling with correct format
+    async function handleIceCandidate(message) {
+      const candidateData = message.data.candidate;
+      log(`处理 ICE 候选: ${candidateData.candidate.substring(0, 50)}...`, 'info');
+
+      try {
+        await pc.addIceCandidate({
+          candidate: candidateData.candidate,
+          sdpMid: candidateData.sdpMid,
+          sdpMLineIndex: candidateData.sdpMLineIndex
+        });
+        log('ICE 候选添加成功', 'success');
+      } catch (error) {
+        log(`添加 ICE 候选失败: ${error}`, 'error');
+      }
+    }
+
+    function stopCapture() {
+      log('停止桌面捕获...', 'info');
+
+      if (pc) {
+        pc.close();
+        pc = null;
+        log('PeerConnection 已关闭', 'info');
+      }
+
+      if (ws) {
+        ws.close();
+        ws = null;
+        log('WebSocket 已关闭', 'info');
+      }
+
+      if (video.srcObject) {
+        video.srcObject = null;
+        log('视频流已停止', 'info');
+      }
+
+      updateStatus('已停止', 'info');
+    }
+
+    // Initialize
+    log('页面加载完成，准备开始桌面捕获测试 (修复版本)', 'success');
+    log('点击 "开始桌面捕获" 按钮开始测试', 'info');
+  </script>
+</body>
+</html>

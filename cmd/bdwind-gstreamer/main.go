@@ -179,7 +179,7 @@ func main() {
 	logger.Trace("✅ All required ports are available")
 
 	// 创建应用
-	app, err := NewBDWindApp(cfg, nil)
+	app, err := NewBDWindApp(cfg, logger)
 	if err != nil {
 		logger.Fatalf("Failed to create application: %v", err)
 	}

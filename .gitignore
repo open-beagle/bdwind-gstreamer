@@ -1,7 +1,8 @@
 /.kiro
 /.tmp
 /.vscode
-/examples/debug_config.yaml
-/selkies-gstreamer
+/examples/debug.yaml
+/selkies
+/go-gst
 /bdwind-gstreamer
 /cmd/bdwind-gstreamer/__debug_*

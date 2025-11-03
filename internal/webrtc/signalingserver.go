@@ -62,6 +62,7 @@ type SignalingServer struct {
 	sdpGenerator          *SDPGenerator
 	mediaStream           any // WebRTC 媒体流
 	peerConnectionManager *PeerConnectionManager
+	webrtcManager         *MinimalWebRTCManager // Direct reference to WebRTC manager
 	messageRouter         *MessageRouter
 	protocolManager       *protocol.ProtocolManager
 	protocolNegotiator    *ProtocolNegotiator
@@ -710,6 +711,14 @@ func (s *SignalingServer) ResetPerformanceStats() {
 		s.performanceMonitor.ResetStats()
 		s.logger.Infof("✅ Performance statistics reset")
 	}
+}
+
+// SetWebRTCManager sets the WebRTC manager for direct access
+func (s *SignalingServer) SetWebRTCManager(manager *MinimalWebRTCManager) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.webrtcManager = manager
+	s.logger.Debug("WebRTC manager set for direct access")
 }
 
 // cleanupRoutine 清理过期连接

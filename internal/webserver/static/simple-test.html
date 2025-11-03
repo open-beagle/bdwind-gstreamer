@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Simple WebRTC Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        video {
+            width: 640px;
+            height: 480px;
+            border: 2px solid #333;
+            background: #000;
+        }
+
+        button {
+            margin: 10px;
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f0f0f0;
+        }
+
+        .logs {
+            height: 200px;
+            overflow-y: scroll;
+            border: 1px solid #ccc;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Simple WebRTC Desktop Capture Test</h1>
+
+    <video id="video" autoplay playsinline muted></video><br>
+
+    <button onclick="start()">Start</button>
+    <button onclick="stop()">Stop</button>
+
+    <div class="status">Status: <span id="status">Ready</span></div>
+
+    <div class="logs" id="logs"></div>
+
+    <script>
+        let ws = null;
+        let pc = null;
+        const video = document.getElementById('video');
+        const status = document.getElementById('status');
+        const logs = document.getElementById('logs');
+
+        function log(msg) {
+            logs.innerHTML += new Date().toLocaleTimeString() + ': ' + msg + '<br>';
+            logs.scrollTop = logs.scrollHeight;
+            console.log(msg);
+        }
+
+        function start() {
+            status.textContent = 'Connecting...';
+            log('Starting WebRTC connection...');
+
+            ws = new WebSocket('ws://localhost:48080/api/signaling');
+
+            ws.onopen = () => {
+                log('WebSocket connected');
+                status.textContent = 'Connected';
+
+                pc = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+
+                pc.ontrack = (event) => {
+                    log('Video track received!');
+                    video.srcObject = event.streams[0];
+                    status.textContent = 'Video streaming';
+                };
+
+                pc.onconnectionstatechange = () => {
+                    log('Connection state: ' + pc.connectionState);
+                };
+
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        ws.send(JSON.stringify({
+                            type: 'ice-candidate',
+                            data: {
+                                candidate: event.candidate.candidate,
+                                sdpMid: event.candidate.sdpMid,
+                                sdpMLineIndex: event.candidate.sdpMLineIndex
+                            }
+                        }));
+                    }
+                };
+
+                setTimeout(() => {
+                    log('Requesting offer...');
+                    ws.send(JSON.stringify({
+                        type: 'request-offer',
+                        timestamp: Date.now()
+                    }));
+                }, 1000);
+            };
+
+            ws.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+                log('Received: ' + msg.type);
+
+                if (msg.type === 'offer') {
+                    log('Processing offer...');
+                    await pc.setRemoteDescription({
+                        type: 'offer',
+                        sdp: msg.data.sdp.sdp
+                    });
+
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+
+                    ws.send(JSON.stringify({
+                        type: 'answer',
+                        data: {
+                            type: 'answer',
+                            sdp: answer.sdp
+                        }
+                    }));
+                    log('Answer sent');
+                }
+
+                if (msg.type === 'ice-candidate') {
+                    await pc.addIceCandidate({
+                        candidate: msg.data.candidate,
+                        sdpMid: msg.data.sdpMid,
+                        sdpMLineIndex: msg.data.sdpMLineIndex
+                    });
+                }
+            };
+
+            ws.onerror = (error) => {
+                log('WebSocket error: ' + error);
+                status.textContent = 'Error';
+            };
+        }
+
+        function stop() {
+            if (pc) pc.close();
+            if (ws) ws.close();
+            video.srcObject = null;
+            status.textContent = 'Stopped';
+            log('Stopped');
+        }
+    </script>
+</body>
+
+</html>

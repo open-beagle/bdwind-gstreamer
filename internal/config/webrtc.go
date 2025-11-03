@@ -51,7 +51,7 @@ func (c *WebRTCConfig) SetDefaults() {
 	}
 
 	// 默认信令路径配置
-	c.SignalingPath = "/ws"
+	c.SignalingPath = "/api/signaling"
 
 	// TURN服务器默认禁用
 	c.EnableTURN = false
@@ -210,7 +210,7 @@ func (c *WebRTCConfig) Merge(other ConfigModule) error {
 	}
 
 	// 合并信令路径
-	if otherConfig.SignalingPath != "" && otherConfig.SignalingPath != "/ws" {
+	if otherConfig.SignalingPath != "" && otherConfig.SignalingPath != "/api/signaling" {
 		c.SignalingPath = otherConfig.SignalingPath
 	}
 

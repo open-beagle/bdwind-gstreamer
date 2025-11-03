@@ -27,6 +27,21 @@ type Config struct {
 
 	// 生命周期管理配置
 	Lifecycle LifecycleConfig `yaml:"lifecycle" json:"lifecycle"`
+
+	// 实现选择配置
+	Implementation ImplementationConfig `yaml:"implementation" json:"implementation"`
+}
+
+// ImplementationConfig 实现选择配置
+type ImplementationConfig struct {
+	// 使用简化实现 (true) 还是复杂实现 (false)
+	UseSimplified bool `yaml:"use_simplified" json:"use_simplified"`
+
+	// 实现类型: "simplified" 或 "complex"
+	Type string `yaml:"type" json:"type"`
+
+	// 是否允许运行时切换实现
+	AllowRuntimeSwitch bool `yaml:"allow_runtime_switch" json:"allow_runtime_switch"`
 }
 
 // LifecycleConfig 生命周期管理配置
@@ -59,6 +74,11 @@ func DefaultConfig() *Config {
 	cfg.Lifecycle.ForceShutdownTimeout = 10 * time.Second
 	cfg.Lifecycle.StartupTimeout = 60 * time.Second
 	cfg.Lifecycle.EnableGracefulShutdown = true
+
+	// 实现选择默认配置 - 默认使用简化实现
+	cfg.Implementation.UseSimplified = true
+	cfg.Implementation.Type = "simplified"
+	cfg.Implementation.AllowRuntimeSwitch = false
 
 	return cfg
 }

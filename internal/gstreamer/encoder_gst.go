@@ -2977,7 +2977,8 @@ func (enc *EncoderGst) monitorQuality() {
 		enc.qualityMonitor.qualityHistory = enc.qualityMonitor.qualityHistory[1:]
 	}
 
-	enc.logger.Debugf("Quality monitoring: current=%.3f, target=%.3f, drop_rate=%.3f",
+	// Only log quality monitoring at trace level to reduce log noise
+	enc.logger.Tracef("Quality monitoring: current=%.3f, target=%.3f, drop_rate=%.3f",
 		currentQuality, enc.qualityMonitor.targetQuality, dropRate)
 }
 

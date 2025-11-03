@@ -237,7 +237,15 @@ func (phc *PipelineHealthChecker) CheckHealth() OverallHealthStatus {
 	}
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(phc.ctx, phc.config.CheckTimeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	if phc.ctx != nil {
+		ctx, cancel = context.WithTimeout(phc.ctx, phc.config.CheckTimeout)
+	} else {
+		// If health checker hasn't been started yet, use background context
+		ctx, cancel = context.WithTimeout(context.Background(), phc.config.CheckTimeout)
+	}
 	defer cancel()
 
 	// Run all health checks

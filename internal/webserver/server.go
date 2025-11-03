@@ -798,3 +798,65 @@ func (ws *WebServer) handlePermissionCheck(w http.ResponseWriter, r *http.Reques
 
 	ws.writeJSON(w, response)
 }
+
+// handleImplementationStatus 处理实现状态查询请求
+func (ws *WebServer) handleImplementationStatus(w http.ResponseWriter, r *http.Request) {
+	// Check if we have a simplified component registered
+	simplifiedComponent, hasSimplified := ws.GetComponent("simplified")
+	
+	var currentImplementation string
+	var simplifiedRunning bool
+	
+	if hasSimplified {
+		currentImplementation = "simplified"
+		simplifiedRunning = simplifiedComponent.IsRunning()
+	} else {
+		currentImplementation = "complex"
+		simplifiedRunning = false
+	}
+
+	status := map[string]interface{}{
+		"current_implementation": currentImplementation,
+		"available_implementations": []string{"simplified", "complex"},
+		"simplified_available": hasSimplified,
+		"simplified_running": simplifiedRunning,
+		"components": ws.ListComponents(),
+	}
+
+	ws.writeJSON(w, status)
+}
+
+// handleImplementationInfo 处理实现信息查询请求
+func (ws *WebServer) handleImplementationInfo(w http.ResponseWriter, r *http.Request) {
+	info := map[string]interface{}{
+		"implementations": map[string]interface{}{
+			"simplified": map[string]interface{}{
+				"description": "Simplified GStreamer and WebRTC implementation",
+				"features": []string{
+					"Direct data flow",
+					"Minimal abstractions",
+					"Single media bridge",
+					"Simplified error handling",
+				},
+				"components": []string{"SimpleGStreamerManager", "MinimalWebRTCManager", "SimpleMediaBridge"},
+			},
+			"complex": map[string]interface{}{
+				"description": "Full-featured GStreamer and WebRTC implementation",
+				"features": []string{
+					"Advanced state management",
+					"Complex error handling",
+					"Multiple abstraction layers",
+					"Comprehensive monitoring",
+				},
+				"components": []string{"GStreamerManager", "WebRTCManager", "Various bridges and adapters"},
+			},
+		},
+		"switching": map[string]interface{}{
+			"runtime_switch_supported": false,
+			"switch_method": "Configuration change + application restart",
+			"config_key": "implementation.use_simplified",
+		},
+	}
+
+	ws.writeJSON(w, info)
+}

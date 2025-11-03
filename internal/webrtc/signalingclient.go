@@ -690,57 +690,27 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 		}
 	}
 
-	// 使用 PeerConnection 管理器创建 Offer
-	if c.Server.peerConnectionManager == nil {
+	// 使用 MinimalWebRTCManager 创建 Offer
+	if c.Server.webrtcManager == nil {
 		errorContext := map[string]any{
 			"client_id":       c.ID,
 			"message_id":      message.ID,
 			"processing_time": time.Since(startTime).Milliseconds(),
-			"error_stage":     "peer_connection_manager_check",
+			"error_stage":     "webrtc_manager_check",
 			"request_context": requestContext,
 		}
 
-		c.logger.Infof("❌ PeerConnection manager not available for client %s (context: %+v)", c.ID, errorContext)
-		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
-			"PeerConnection manager is not available",
+		c.logger.Infof("❌ WebRTC manager not available for client %s (context: %+v)", c.ID, errorContext)
+		c.sendStandardErrorMessage("WEBRTC_MANAGER_UNAVAILABLE",
+			"WebRTC manager is not available",
 			fmt.Sprintf("Context: %+v", errorContext))
 		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
 		return
 	}
 
-	// 创建 PeerConnection
-	pcCreationStart := time.Now()
-	pc, err := c.Server.peerConnectionManager.CreatePeerConnection(c.ID)
-	pcCreationTime := time.Since(pcCreationStart)
-
-	if err != nil {
-		errorContext := map[string]any{
-			"client_id":         c.ID,
-			"message_id":        message.ID,
-			"processing_time":   time.Since(startTime).Milliseconds(),
-			"pc_creation_time":  pcCreationTime.Milliseconds(),
-			"error_stage":       "peer_connection_creation",
-			"error_details":     err.Error(),
-			"request_context":   requestContext,
-			"constraints":       constraints,
-			"codec_preferences": codecPreferences,
-		}
-
-		c.logger.Infof("❌ Failed to create PeerConnection for client %s: %v (context: %+v)",
-			c.ID, err, errorContext)
-		c.sendStandardErrorMessage("PEER_CONNECTION_CREATION_FAILED",
-			"Failed to create PeerConnection",
-			fmt.Sprintf("Error: %v, Context: %+v", err, errorContext))
-		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
-		return
-	}
-
-	c.logger.Infof("✅ PeerConnection created for client %s (creation time: %dms)",
-		c.ID, pcCreationTime.Milliseconds())
-
-	// 创建 SDP Offer
+	// 创建 SDP Offer using MinimalWebRTCManager
 	offerCreationStart := time.Now()
-	offer, err := pc.CreateOffer(nil)
+	offer, err := c.Server.webrtcManager.CreateOffer()
 	offerCreationTime := time.Since(offerCreationStart)
 
 	if err != nil {
@@ -748,7 +718,6 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 			"client_id":           c.ID,
 			"message_id":          message.ID,
 			"processing_time":     time.Since(startTime).Milliseconds(),
-			"pc_creation_time":    pcCreationTime.Milliseconds(),
 			"offer_creation_time": offerCreationTime.Milliseconds(),
 			"error_stage":         "offer_creation",
 			"error_details":       err.Error(),
@@ -768,39 +737,6 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 
 	c.logger.Infof("✅ SDP offer created for client %s (type: %s, length: %d bytes, creation time: %dms)",
 		c.ID, offer.Type, len(offer.SDP), offerCreationTime.Milliseconds())
-
-	// 设置本地描述
-	localDescStart := time.Now()
-	if err := pc.SetLocalDescription(offer); err != nil {
-		localDescTime := time.Since(localDescStart)
-		errorContext := map[string]any{
-			"client_id":           c.ID,
-			"message_id":          message.ID,
-			"processing_time":     time.Since(startTime).Milliseconds(),
-			"pc_creation_time":    pcCreationTime.Milliseconds(),
-			"offer_creation_time": offerCreationTime.Milliseconds(),
-			"local_desc_time":     localDescTime.Milliseconds(),
-			"error_stage":         "local_description_setting",
-			"error_details":       err.Error(),
-			"offer_type":          offer.Type.String(),
-			"offer_sdp_length":    len(offer.SDP),
-			"request_context":     requestContext,
-			"constraints":         constraints,
-			"codec_preferences":   codecPreferences,
-		}
-
-		c.logger.Infof("❌ Failed to set local description for client %s: %v (context: %+v)",
-			c.ID, err, errorContext)
-		c.sendStandardErrorMessage("LOCAL_DESCRIPTION_FAILED",
-			"Failed to set local description",
-			fmt.Sprintf("Error: %v, Context: %+v", err, errorContext))
-		c.recordMessageProcessingMetrics("request-offer", time.Since(startTime), false)
-		return
-	}
-	localDescTime := time.Since(localDescStart)
-
-	c.logger.Infof("✅ Local description set for client %s (time: %dms)",
-		c.ID, localDescTime.Milliseconds())
 
 	// 发送 Offer
 	sdpData := &protocol.SDPData{
@@ -822,9 +758,7 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 			"client_id":             c.ID,
 			"message_id":            message.ID,
 			"total_processing_time": totalProcessingTime.Milliseconds(),
-			"pc_creation_time":      pcCreationTime.Milliseconds(),
 			"offer_creation_time":   offerCreationTime.Milliseconds(),
-			"local_desc_time":       localDescTime.Milliseconds(),
 			"send_time":             sendTime.Milliseconds(),
 			"error_stage":           "offer_sending",
 			"error_details":         err.Error(),
@@ -854,9 +788,7 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 			"client_id":             c.ID,
 			"message_id":            message.ID,
 			"total_processing_time": totalProcessingTime.Milliseconds(),
-			"pc_creation_time":      pcCreationTime.Milliseconds(),
 			"offer_creation_time":   offerCreationTime.Milliseconds(),
-			"local_desc_time":       localDescTime.Milliseconds(),
 			"send_time":             sendTime.Milliseconds(),
 			"offer_type":            offer.Type.String(),
 			"offer_sdp_length":      len(offer.SDP),
@@ -881,19 +813,11 @@ func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage)
 		return
 	}
 
-	// 获取 PeerConnection
-	if c.Server.peerConnectionManager == nil {
-		c.logger.Infof("❌ PeerConnection manager not available for client %s", c.ID)
-		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
-			"PeerConnection manager is not available", "")
-		return
-	}
-
-	pc, exists := c.Server.peerConnectionManager.GetPeerConnection(c.ID)
-	if !exists {
-		c.logger.Infof("❌ PeerConnection not found for client %s", c.ID)
-		c.sendStandardErrorMessage("PEER_CONNECTION_NOT_FOUND",
-			"PeerConnection not found", "")
+	// 使用 MinimalWebRTCManager 设置远程描述
+	if c.Server.webrtcManager == nil {
+		c.logger.Infof("❌ WebRTC manager not available for client %s", c.ID)
+		c.sendStandardErrorMessage("WEBRTC_MANAGER_UNAVAILABLE",
+			"WebRTC manager is not available", "")
 		return
 	}
 
@@ -903,7 +827,7 @@ func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage)
 		SDP:  sdpData.SDP.SDP,
 	}
 
-	if err := pc.SetRemoteDescription(answer); err != nil {
+	if err := c.Server.webrtcManager.SetRemoteDescription(answer); err != nil {
 		c.logger.Infof("❌ Failed to set remote description for client %s: %v", c.ID, err)
 		c.sendStandardErrorMessage("REMOTE_DESCRIPTION_FAILED",
 			"Failed to set remote description", err.Error())
@@ -948,35 +872,37 @@ func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMe
 		return
 	}
 
-	// 获取 PeerConnection 管理器
-	if c.Server.peerConnectionManager == nil {
+	// 获取 WebRTC 管理器
+	if c.Server.webrtcManager == nil {
 		processingTime := time.Since(startTime)
-		c.logger.Infof("❌ ICE candidate processing failed for client %s after %v: PeerConnection manager not available", c.ID, processingTime)
-		c.sendStandardErrorMessage("PEER_CONNECTION_UNAVAILABLE",
-			"PeerConnection manager is not available", "")
+		c.logger.Infof("❌ ICE candidate processing failed for client %s after %v: WebRTC manager not available", c.ID, processingTime)
+		c.sendStandardErrorMessage("WEBRTC_MANAGER_UNAVAILABLE",
+			"WebRTC manager is not available", "")
 		return
 	}
 
-	// 转换为标准的候选数据格式
-	candidateData := map[string]interface{}{
-		"candidate": iceData.Candidate.Candidate,
+	// 转换为 WebRTC ICE candidate 格式
+	candidate := webrtc.ICECandidateInit{
+		Candidate: iceData.Candidate.Candidate,
 	}
 
 	if iceData.Candidate.SDPMid != nil {
-		candidateData["sdpMid"] = *iceData.Candidate.SDPMid
+		candidate.SDPMid = iceData.Candidate.SDPMid
 	}
 
 	if iceData.Candidate.SDPMLineIndex != nil {
-		candidateData["sdpMLineIndex"] = float64(*iceData.Candidate.SDPMLineIndex)
+		// Convert *int to *uint16
+		sdpMLineIndex := uint16(*iceData.Candidate.SDPMLineIndex)
+		candidate.SDPMLineIndex = &sdpMLineIndex
 	}
 
 	// 记录详细的候选信息
 	c.logger.Infof("🔍 ICE candidate details for client %s: candidate='%s', sdpMid='%v', sdpMLineIndex='%v'",
 		c.ID, iceData.Candidate.Candidate, iceData.Candidate.SDPMid, iceData.Candidate.SDPMLineIndex)
 
-	// 直接调用PeerConnection管理器的HandleICECandidate方法
-	c.logger.Infof("🔧 Delegating ICE candidate processing to PeerConnection manager for client %s", c.ID)
-	if err := c.Server.peerConnectionManager.HandleICECandidate(c.ID, candidateData); err != nil {
+	// 直接调用 MinimalWebRTCManager 的 AddICECandidate 方法
+	c.logger.Infof("🔧 Delegating ICE candidate processing to WebRTC manager for client %s", c.ID)
+	if err := c.Server.webrtcManager.AddICECandidate(candidate); err != nil {
 		processingTime := time.Since(startTime)
 
 		// 检查是否是网络问题
@@ -987,7 +913,7 @@ func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMe
 		} else {
 			c.logger.Infof("❌ ICE candidate processing failed for client %s after %v: %v", c.ID, processingTime, err)
 		}
-		c.logger.Infof("❌ Failed candidate details: %+v", candidateData)
+		c.logger.Infof("❌ Failed candidate details: %+v", candidate)
 
 		// 记录错误到客户端统计
 		c.recordError(&SignalingError{
@@ -1413,8 +1339,8 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 				selkiesICE := map[string]any{
 					"ice": map[string]any{
 						"candidate":     candidate.String(),
-						"sdpMid":        candidate.SDPMid,
-						"sdpMLineIndex": candidate.SDPMLineIndex,
+						"sdpMid":        candidate.ToJSON().SDPMid,
+						"sdpMLineIndex": candidate.ToJSON().SDPMLineIndex,
 					},
 				}
 				if iceBytes, err := json.Marshal(selkiesICE); err == nil {
@@ -1432,8 +1358,8 @@ func (c *SignalingClient) handleOfferRequest(message SignalingMessage) {
 					Timestamp: time.Now().Unix(),
 					Data: map[string]interface{}{
 						"candidate":     candidate.String(),
-						"sdpMid":        candidate.SDPMid,
-						"sdpMLineIndex": candidate.SDPMLineIndex,
+						"sdpMid":        candidate.ToJSON().SDPMid,
+						"sdpMLineIndex": candidate.ToJSON().SDPMLineIndex,
 					},
 				}
 

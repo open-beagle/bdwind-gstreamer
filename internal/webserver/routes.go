@@ -87,6 +87,10 @@ func (ws *WebServer) setupBasicRoutes() {
 	ws.router.HandleFunc("/api/components", ws.handleComponentList).Methods("GET")
 	ws.router.HandleFunc("/api/components/{name}", ws.handleComponentStatus).Methods("GET")
 	ws.router.HandleFunc("/api/components/{name}/stats", ws.handleComponentStats).Methods("GET")
+	
+	// Implementation control endpoints
+	ws.router.HandleFunc("/api/implementation/status", ws.handleImplementationStatus).Methods("GET")
+	ws.router.HandleFunc("/api/implementation/info", ws.handleImplementationInfo).Methods("GET")
 }
 
 // createStaticFileHandler 创建新的静态文件处理器，集成StaticFileRouter和RoutePriorityManager

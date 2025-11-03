@@ -111,6 +111,7 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 	// 初始化组件
 	tempLogger.Info("About to initialize WebRTC components")
 	logger.Trace("Initializing WebRTC components")
+	tempLogger.Info("Calling manager.initializeComponents()...")
 	if err := manager.initializeComponents(); err != nil {
 		tempLogger.Errorf("Failed to initialize WebRTC components: %v", err)
 		logger.Errorf("Failed to initialize WebRTC components: %v", err)
@@ -126,10 +127,10 @@ func NewManager(ctx context.Context, cfg *ManagerConfig) (*Manager, error) {
 
 // initializeComponents 初始化所有WebRTC组件
 func (m *Manager) initializeComponents() error {
-	m.logger.Trace("Starting WebRTC components initialization")
+	m.logger.Info("Starting WebRTC components initialization")
 
 	// 1. 创建SDP生成器
-	m.logger.Trace("Step 1: Creating SDP generator")
+	m.logger.Info("Step 1: Creating SDP generator")
 	sdpConfig := &SDPConfig{
 		Codec: string(m.config.GStreamer.Encoding.Codec),
 	}
@@ -137,7 +138,7 @@ func (m *Manager) initializeComponents() error {
 	m.logger.Debugf("SDP generator created with codec: %s", m.config.GStreamer.Encoding.Codec)
 
 	// 2. 创建媒体流
-	m.logger.Trace("Step 2: Creating MediaStream")
+	m.logger.Info("Step 2: Creating MediaStream")
 	mediaStreamConfig := &MediaStreamConfig{
 		VideoEnabled:    true,
 		AudioEnabled:    false, // 暂时禁用音频
@@ -197,26 +198,22 @@ func (m *Manager) initializeComponents() error {
 		stats.TotalTracks, stats.ActiveTracks)
 
 	// 3. Create WebRTC media subscriber (replaces GStreamer bridge)
-	m.logger.Trace("Step 3: Creating WebRTC media subscriber")
+	m.logger.Info("Step 3: Creating WebRTC media subscriber")
 
 	// Generate unique subscriber ID
+	m.logger.Info("Generating unique subscriber ID...")
 	subscriberID := uint64(time.Now().UnixNano())
+	m.logger.Infof("Generated subscriber ID: %d", subscriberID)
+	
+	m.logger.Info("Calling NewWebRTCMediaSubscriber...")
 	m.mediaSubscriber = NewWebRTCMediaSubscriber(subscriberID, m.mediaStream, m.logger)
+	m.logger.Info("WebRTC media subscriber created successfully")
 
-	// Subscribe to video stream from GStreamer
-	m.logger.Debug("Registering WebRTC media subscriber with GStreamer...")
-	m.logger.Tracef("About to call AddVideoSubscriber on media provider")
-	m.subscriberID, err = m.mediaProvider.AddVideoSubscriber(m.mediaSubscriber)
-	m.logger.Tracef("AddVideoSubscriber call completed")
-	if err != nil {
-		m.logger.Errorf("Failed to add video subscriber to GStreamer: %v", err)
-		return fmt.Errorf("failed to add video subscriber: %w", err)
-	}
-
-	m.logger.Debugf("WebRTC media subscriber created and registered with GStreamer (ID: %d)", m.subscriberID)
+	// Note: Subscriber registration is deferred to Start() method to avoid deadlocks during creation
+	m.logger.Debug("WebRTC media subscriber created - registration deferred to Start() method")
 
 	// 4. 创建信令服务器
-	m.logger.Trace("Step 4: Creating signaling server")
+	m.logger.Info("Step 4: Creating signaling server")
 	signalingConfig := &SignalingEncoderConfig{
 		Codec: string(m.config.GStreamer.Encoding.Codec),
 	}
@@ -229,7 +226,7 @@ func (m *Manager) initializeComponents() error {
 	m.logger.Debug("Signaling server created successfully")
 
 	// 5. 创建HTTP处理器
-	m.logger.Trace("Step 5: Creating WebRTC handlers")
+	m.logger.Info("Step 5: Creating WebRTC handlers")
 	m.handlers = newWebRTCHandlers(m)
 	m.logger.Debug("WebRTC handlers created successfully")
 
@@ -300,6 +297,24 @@ func (m *Manager) Start(ctx context.Context) error {
 		len(m.config.WebRTC.ICEServers))
 
 	m.startTime = time.Now()
+
+	// Register WebRTC media subscriber with GStreamer (moved from initializeComponents to avoid deadlock)
+	m.logger.Debug("Registering WebRTC media subscriber with GStreamer...")
+	m.logger.Debugf("Media provider type: %T", m.mediaProvider)
+	
+	// Check if media provider is ready
+	if provider, ok := m.mediaProvider.(interface{ IsRunning() bool }); ok {
+		m.logger.Debugf("Media provider running status: %v", provider.IsRunning())
+	}
+	
+	m.logger.Debug("About to call AddVideoSubscriber on media provider")
+	var err error
+	m.subscriberID, err = m.mediaProvider.AddVideoSubscriber(m.mediaSubscriber)
+	if err != nil {
+		m.logger.Errorf("Failed to add video subscriber to GStreamer: %v", err)
+		return fmt.Errorf("failed to add video subscriber: %w", err)
+	}
+	m.logger.Infof("WebRTC media subscriber registered with GStreamer (ID: %d)", m.subscriberID)
 
 	// 验证组件状态
 	m.logger.Debug("Verifying component availability before startup...")

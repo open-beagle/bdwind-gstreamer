@@ -277,7 +277,7 @@ GET /metrics
 
 ```javascript
 // 连接 WebSocket
-const ws = new WebSocket("ws://localhost:8080/ws");
+const ws = new WebSocket("ws://localhost:8080/api/signaling");
 
 // 发送消息
 ws.send(

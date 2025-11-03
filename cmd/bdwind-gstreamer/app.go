@@ -11,7 +11,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/open-beagle/bdwind-gstreamer/internal/bridge"
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/factory"
 	"github.com/open-beagle/bdwind-gstreamer/internal/gstreamer"
 	"github.com/open-beagle/bdwind-gstreamer/internal/metrics"
 	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc"
@@ -28,6 +30,9 @@ type BDWindApp struct {
 	logger       *logrus.Entry
 	startTime    time.Time
 
+	// go-gst 媒体桥接器（新架构）
+	mediaBridge *bridge.GoGstMediaBridge
+
 	// Context lifecycle management fields
 	rootCtx    context.Context
 	cancelFunc context.CancelFunc
@@ -43,6 +48,15 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 
 	logger.Info("Creating BDWind application...")
 
+	// 直接使用 go-gst 简化实现
+	logger.Info("Using go-gst implementation")
+	return NewGoGstBDWindApp(cfg, logger)
+}
+
+// NewGoGstBDWindApp 创建使用 go-gst 实现的BDWind应用
+func NewGoGstBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) {
+	logger.Info("Creating go-gst BDWind application...")
+
 	// Create root context for lifecycle management
 	logger.Debug("Creating root context for lifecycle management...")
 	rootCtx, cancelFunc := context.WithCancel(context.Background())
@@ -51,41 +65,32 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 	sigChan := make(chan os.Signal, 1)
 	logger.Debug("Signal channel created")
 
-	// 创建GStreamer管理器 (必须先创建，因为WebRTC需要它作为MediaProvider)
-	logger.Info("Creating GStreamer manager...")
-	gstreamerMgrConfig := &gstreamer.ManagerConfig{
-		Config: cfg.GStreamer,
-	}
-
-	gstreamerMgr, err := gstreamer.NewManager(rootCtx, gstreamerMgrConfig)
-	if err != nil {
-		logger.Errorf("Failed to create GStreamer manager: %v", err)
-		cancelFunc() // Clean up context on error
-		return nil, fmt.Errorf("failed to create GStreamer manager: %w", err)
-	}
-	logger.Info("GStreamer manager created successfully")
-
-	// 创建WebRTC管理器 (使用GStreamer作为MediaProvider)
+	// 创建 WebRTC 管理器
 	logger.Info("Creating WebRTC manager...")
-	webrtcMgrConfig := &webrtc.ManagerConfig{
-		Config:        cfg,
-		MediaProvider: gstreamerMgr, // 使用GStreamer管理器作为媒体提供者
-	}
-
-	webrtcMgr, err := webrtc.NewManager(rootCtx, webrtcMgrConfig)
+	webrtcMgr, err := webrtc.NewMinimalWebRTCManager(cfg.WebRTC)
 	if err != nil {
 		logger.Errorf("Failed to create WebRTC manager: %v", err)
-		cancelFunc() // Clean up context on error
+		cancelFunc()
 		return nil, fmt.Errorf("failed to create WebRTC manager: %w", err)
 	}
 	logger.Info("WebRTC manager created successfully")
 
-	// 创建webserver管理器（包含认证功能）
+	// 使用工厂创建 go-gst 媒体桥接器
+	logger.Info("Creating go-gst media bridge...")
+	mediaBridge, err := factory.CreateMediaBridge(cfg, webrtcMgr)
+	if err != nil {
+		logger.Errorf("Failed to create media bridge: %v", err)
+		cancelFunc()
+		return nil, fmt.Errorf("failed to create media bridge: %w", err)
+	}
+	logger.Info("Go-gst media bridge created successfully")
+
+	// 创建webserver管理器
 	logger.Info("Creating webserver manager...")
 	webserverMgr, err := webserver.NewManager(rootCtx, cfg.WebServer)
 	if err != nil {
 		logger.Errorf("Failed to create webserver manager: %v", err)
-		cancelFunc() // Clean up context on error
+		cancelFunc()
 		return nil, fmt.Errorf("failed to create webserver manager: %w", err)
 	}
 	logger.Info("Webserver manager created successfully")
@@ -95,17 +100,68 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 	metricsMgr, err := metrics.NewManager(rootCtx, cfg.Metrics)
 	if err != nil {
 		logger.Errorf("Failed to create metrics manager: %v", err)
-		cancelFunc() // Clean up context on error
+		cancelFunc()
 		return nil, fmt.Errorf("failed to create metrics manager: %w", err)
 	}
 	logger.Info("Metrics manager created successfully")
 
-	logger.Debug("Assembling application components...")
+	logger.Debug("Assembling go-gst application components...")
 	app := &BDWindApp{
 		config:       cfg,
 		webserverMgr: webserverMgr,
-		webrtcMgr:    webrtcMgr,
-		gstreamerMgr: gstreamerMgr,
+		webrtcMgr:    nil, // 使用 mediaBridge 中的 WebRTC
+		gstreamerMgr: nil, // 使用 mediaBridge 中的 GStreamer
+		metricsMgr:   metricsMgr,
+		logger:       logger,
+		startTime:    time.Now(),
+		rootCtx:      rootCtx,
+		cancelFunc:   cancelFunc,
+		sigChan:      sigChan,
+		mediaBridge:  mediaBridge, // 添加媒体桥接器
+	}
+
+	logger.Info("Go-gst BDWind application created successfully")
+	return app, nil
+}
+
+// NewSimplifiedBDWindApp 创建使用简化实现的BDWind应用
+func NewSimplifiedBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) {
+	logger.Info("Creating simplified BDWind application...")
+
+	// Create root context for lifecycle management
+	logger.Debug("Creating root context for lifecycle management...")
+	rootCtx, cancelFunc := context.WithCancel(context.Background())
+
+	// Create signal channel for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	logger.Debug("Signal channel created")
+
+	// 创建webserver管理器（包含认证功能）
+	logger.Info("Creating webserver manager...")
+	webserverMgr, err := webserver.NewManager(rootCtx, cfg.WebServer)
+	if err != nil {
+		logger.Errorf("Failed to create webserver manager: %v", err)
+		cancelFunc()
+		return nil, fmt.Errorf("failed to create webserver manager: %w", err)
+	}
+	logger.Info("Webserver manager created successfully")
+
+	// 创建监控管理器
+	logger.Info("Creating metrics manager...")
+	metricsMgr, err := metrics.NewManager(rootCtx, cfg.Metrics)
+	if err != nil {
+		logger.Errorf("Failed to create metrics manager: %v", err)
+		cancelFunc()
+		return nil, fmt.Errorf("failed to create metrics manager: %w", err)
+	}
+	logger.Info("Metrics manager created successfully")
+
+	logger.Debug("Assembling simplified application components...")
+	app := &BDWindApp{
+		config:       cfg,
+		webserverMgr: webserverMgr,
+		webrtcMgr:    nil, // 简化实现中WebRTC由简化适配器管理
+		gstreamerMgr: nil, // 简化实现中GStreamer由简化适配器管理
 		metricsMgr:   metricsMgr,
 		logger:       logger,
 		startTime:    time.Now(),
@@ -114,7 +170,7 @@ func NewBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, error) 
 		sigChan:      sigChan,
 	}
 
-	logger.Info("BDWind application created successfully")
+	logger.Info("Simplified BDWind application created successfully")
 	return app, nil
 }
 
@@ -127,11 +183,13 @@ func (app *BDWindApp) connectGStreamerToWebRTC() error {
 	app.logger.Debug("Verifying component availability for sample callback chain")
 
 	// Get the desktop capture from GStreamer manager
-	capture := app.gstreamerMgr.GetCapture()
-	if capture == nil {
-		// Error级别: 关键连接状态 - 链路中断
-		app.logger.Error("Sample callback chain failed: desktop capture not available")
-		return fmt.Errorf("desktop capture not available")
+	if app.gstreamerMgr != nil {
+		capture := app.gstreamerMgr.GetCapture()
+		if capture == nil {
+			// Error级别: 关键连接状态 - 链路中断
+			app.logger.Error("Sample callback chain failed: desktop capture not available")
+			return fmt.Errorf("desktop capture not available")
+		}
 	}
 	// Debug级别: 记录回调建立详情 - 组件验证结果
 	app.logger.Debug("GStreamer desktop capture component verified")
@@ -167,6 +225,11 @@ func (app *BDWindApp) Start() error {
 	startupStartTime := time.Now()
 	app.logger.Info("Starting BDWind-GStreamer v1.0.0...")
 
+	// 检查是否使用 go-gst 架构
+	if app.mediaBridge != nil {
+		return app.startGoGstArchitecture()
+	}
+
 	// 记录应用配置摘要
 	app.logger.Debugf("Application configuration: webserver_port=%d, webserver_tls=%v, metrics_external=%v",
 		app.config.WebServer.Port, app.config.WebServer.EnableTLS, app.config.Metrics.External.Enabled)
@@ -194,11 +257,25 @@ func (app *BDWindApp) Start() error {
 		}
 	}
 
-	managers := []managerInfo{
-		{"metrics", app.metricsMgr},
-		{"gstreamer", app.gstreamerMgr},
-		{"webrtc", app.webrtcMgr},
-		{"webserver", app.webserverMgr},
+	var managers []managerInfo
+
+	// Choose components based on implementation type
+	if app.config.Implementation.UseSimplified {
+		// Simplified implementation: only metrics and webserver
+		managers = []managerInfo{
+			{"metrics", app.metricsMgr},
+			{"webserver", app.webserverMgr},
+		}
+		app.logger.Info("Using simplified component startup sequence: metrics → webserver")
+	} else {
+		// Complex implementation: all components
+		managers = []managerInfo{
+			{"metrics", app.metricsMgr},
+			{"gstreamer", app.gstreamerMgr},
+			{"webrtc", app.webrtcMgr},
+			{"webserver", app.webserverMgr},
+		}
+		app.logger.Info("Using complex component startup sequence: metrics → gstreamer → webrtc → webserver")
 	}
 
 	app.logger.Infof("Starting %d components in sequence: metrics → gstreamer → webrtc → webserver", len(managers))
@@ -210,7 +287,7 @@ func (app *BDWindApp) Start() error {
 	// Start components in order
 	for i, mgr := range managers {
 		app.logger.Infof("Starting %s manager (%d/%d)...", mgr.name, i+1, len(managers))
-		
+
 		// Special handling for webserver - register components first
 		if mgr.name == "webserver" {
 			app.logger.Debug("Registering components with webserver before starting...")
@@ -232,8 +309,8 @@ func (app *BDWindApp) Start() error {
 			app.logger.Debug("Component registration completed successfully")
 		}
 
-		// Special handling for GStreamer - configure logging first
-		if mgr.name == "gstreamer" {
+		// Special handling for GStreamer - configure logging first (only for complex implementation)
+		if mgr.name == "gstreamer" && !app.config.Implementation.UseSimplified {
 			app.logger.Debug("Configuring GStreamer logging...")
 			if err := app.configureGStreamerLogging(); err != nil {
 				app.logger.Warnf("Failed to configure GStreamer logging: %v", err)
@@ -268,9 +345,9 @@ func (app *BDWindApp) Start() error {
 		duration := time.Since(managerStartTime)
 		startupTimings[mgr.name] = duration
 		startedManagers = append(startedManagers, mgr.name)
-		
+
 		app.logger.Infof("%s manager started successfully in %v", mgr.name, duration)
-		
+
 		// Verify component is running
 		if mgr.manager.IsRunning() {
 			app.logger.Debugf("%s manager confirmed running", mgr.name)
@@ -279,13 +356,17 @@ func (app *BDWindApp) Start() error {
 		}
 	}
 
-	// Connect GStreamer to WebRTC after all components are started
-	app.logger.Debug("Establishing GStreamer to WebRTC connection...")
-	if err := app.connectGStreamerToWebRTC(); err != nil {
-		app.logger.Warnf("Failed to connect GStreamer to WebRTC: %v", err)
-		app.logger.Warn("Media streaming may be affected - continuing startup")
+	// Connect GStreamer to WebRTC after all components are started (only for complex implementation)
+	if !app.config.Implementation.UseSimplified {
+		app.logger.Debug("Establishing GStreamer to WebRTC connection...")
+		if err := app.connectGStreamerToWebRTC(); err != nil {
+			app.logger.Warnf("Failed to connect GStreamer to WebRTC: %v", err)
+			app.logger.Warn("Media streaming may be affected - continuing startup")
+		} else {
+			app.logger.Debug("GStreamer to WebRTC connection established successfully")
+		}
 	} else {
-		app.logger.Debug("GStreamer to WebRTC connection established successfully")
+		app.logger.Debug("Skipping GStreamer to WebRTC connection (simplified implementation)")
 	}
 
 	// Final application startup summary
@@ -294,7 +375,7 @@ func (app *BDWindApp) Start() error {
 
 	// Log component status summary
 	app.logger.Infof("All %d components started: %v", len(startedManagers), startedManagers)
-	
+
 	// Log detailed timing breakdown at DEBUG level
 	app.logger.Debugf("Component startup timings: metrics=%v, gstreamer=%v, webrtc=%v, webserver=%v",
 		startupTimings["metrics"], startupTimings["gstreamer"],
@@ -303,11 +384,61 @@ func (app *BDWindApp) Start() error {
 	// Log service endpoints
 	webserverAddr := app.webserverMgr.GetAddress()
 	app.logger.Infof("Application ready - Web interface: %s", webserverAddr)
-	
+
 	if app.config.Metrics.External.Enabled {
 		metricsEndpoint := app.config.Metrics.GetExternalEndpoint()
 		app.logger.Infof("Metrics endpoint: %s", metricsEndpoint)
 	}
+
+	return nil
+}
+
+// startGoGstArchitecture 启动 go-gst 架构
+func (app *BDWindApp) startGoGstArchitecture() error {
+	app.logger.Info("Starting go-gst architecture...")
+
+	// Setup signal handling for graceful shutdown
+	app.logger.Debug("Setting up signal handling for graceful shutdown...")
+	signal.Notify(app.sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start signal handler goroutine
+	app.wg.Add(1)
+	go app.handleSignals()
+	app.logger.Debug("Signal handler started")
+
+	// 启动组件顺序：metrics → mediaBridge → webserver
+	app.logger.Info("Starting components: metrics → mediaBridge → webserver")
+
+	// 1. 启动 metrics
+	app.logger.Info("Starting metrics manager (1/3)...")
+	if err := app.metricsMgr.Start(app.rootCtx); err != nil {
+		return fmt.Errorf("failed to start metrics manager: %w", err)
+	}
+	app.logger.Info("Metrics manager started successfully")
+
+	// 2. 启动 mediaBridge (包含 GStreamer 和 WebRTC)
+	app.logger.Info("Starting go-gst media bridge (2/3)...")
+	if err := app.mediaBridge.Start(); err != nil {
+		app.metricsMgr.Stop(app.rootCtx)
+		return fmt.Errorf("failed to start media bridge: %w", err)
+	}
+	app.logger.Info("Go-gst media bridge started successfully")
+
+	// 3. 启动 webserver
+	app.logger.Info("Starting webserver manager (3/3)...")
+	if err := app.webserverMgr.Start(app.rootCtx); err != nil {
+		app.mediaBridge.Stop()
+		app.metricsMgr.Stop(app.rootCtx)
+		return fmt.Errorf("failed to start webserver manager: %w", err)
+	}
+	app.logger.Info("Webserver manager started successfully")
+
+	// 显示服务信息
+	webserverAddr := app.webserverMgr.GetAddress()
+	app.logger.Infof("🚀 Go-gst BDWind-GStreamer started successfully!")
+	app.logger.Infof("🌐 Web interface: %s", webserverAddr)
+	app.logger.Infof("🎥 Display: %s", app.config.GStreamer.Capture.DisplayID)
+	app.logger.Infof("🎬 Codec: %s", app.config.GStreamer.Encoding.Codec)
 
 	return nil
 }
@@ -357,11 +488,32 @@ func (app *BDWindApp) Stop(ctx context.Context) error {
 		}
 	}
 
-	managers := []managerInfo{
-		{"metrics", app.metricsMgr}, // First to stop - ensure data collection completes
-		{"webserver", app.webserverMgr},
-		{"webrtc", app.webrtcMgr},
-		{"gstreamer", app.gstreamerMgr}, // Last to stop - may block
+	var managers []managerInfo
+
+	// Check if using go-gst architecture
+	if app.mediaBridge != nil {
+		// Go-gst architecture: only metrics and webserver
+		managers = []managerInfo{
+			{"metrics", app.metricsMgr}, // First to stop - ensure data collection completes
+			{"webserver", app.webserverMgr},
+		}
+		app.logger.Debug("Using go-gst component shutdown sequence: metrics → webserver")
+	} else if app.config.Implementation.UseSimplified {
+		// Simplified implementation: only metrics and webserver
+		managers = []managerInfo{
+			{"metrics", app.metricsMgr}, // First to stop - ensure data collection completes
+			{"webserver", app.webserverMgr},
+		}
+		app.logger.Debug("Using simplified component shutdown sequence: metrics → webserver")
+	} else {
+		// Complex implementation: all components
+		managers = []managerInfo{
+			{"metrics", app.metricsMgr}, // First to stop - ensure data collection completes
+			{"webserver", app.webserverMgr},
+			{"webrtc", app.webrtcMgr},
+			{"gstreamer", app.gstreamerMgr}, // Last to stop - may block
+		}
+		app.logger.Debug("Using complex component shutdown sequence: metrics → webserver → webrtc → gstreamer")
 	}
 
 	// Collect all errors but continue stopping other components
@@ -436,6 +588,17 @@ func (app *BDWindApp) Stop(ctx context.Context) error {
 	overallShutdownDuration := time.Since(overallShutdownStart)
 	app.logger.Tracef("=== Component Shutdown Sequence Completed ===")
 	app.logger.Tracef("Overall shutdown sequence duration: %v", overallShutdownDuration)
+
+	// Handle mediaBridge separately for go-gst architecture
+	if app.mediaBridge != nil {
+		app.logger.Info("Stopping go-gst media bridge...")
+		if err := app.mediaBridge.Stop(); err != nil {
+			app.logger.Errorf("Failed to stop media bridge: %v", err)
+			errors = append(errors, fmt.Errorf("failed to stop media bridge: %w", err))
+		} else {
+			app.logger.Info("Go-gst media bridge stopped successfully")
+		}
+	}
 
 	// Log shutdown statistics summary
 	app.logShutdownStats(shutdownStats)
@@ -683,6 +846,50 @@ func (app *BDWindApp) GetRootContext() context.Context {
 	return app.rootCtx
 }
 
+// registerSimplifiedComponentsWithWebServer registers simplified components with the WebServer
+func (app *BDWindApp) registerSimplifiedComponentsWithWebServer(webServer *webserver.WebServer, registeredComponents *[]string, registrationErrors *[]error) error {
+	app.logger.Debug("Registering simplified components...")
+
+	// Create simplified adapter
+	simplifiedAdapter, err := webserver.NewSimplifiedAdapter(app.config)
+	if err != nil {
+		app.logger.Errorf("Failed to create simplified adapter: %v", err)
+		*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to create simplified adapter: %w", err))
+		return err
+	}
+
+	// Register the simplified adapter as the main component
+	if err := webServer.RegisterComponent("simplified", simplifiedAdapter); err != nil {
+		app.logger.Errorf("Failed to register simplified adapter: %v", err)
+		*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to register simplified adapter: %w", err))
+		return err
+	}
+
+	// Start the simplified adapter
+	if err := simplifiedAdapter.Start(app.rootCtx); err != nil {
+		app.logger.Errorf("Failed to start simplified adapter: %v", err)
+		*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to start simplified adapter: %w", err))
+		return err
+	}
+
+	*registeredComponents = append(*registeredComponents, "simplified")
+	app.logger.Debug("Simplified adapter registered and started successfully")
+
+	// Still register metrics if available
+	if mgr, ok := interface{}(app.metricsMgr).(webserver.ComponentManager); ok {
+		if err := webServer.RegisterComponent("metrics", mgr); err != nil {
+			app.logger.Warnf("Failed to register metrics component: %v", err)
+			*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to register metrics component: %w", err))
+		} else {
+			*registeredComponents = append(*registeredComponents, "metrics")
+			app.logger.Debug("Metrics component registered successfully")
+		}
+	}
+
+	app.logger.Infof("Simplified components registered: %v", *registeredComponents)
+	return nil
+}
+
 // registerComponentsWithWebServer registers all components with the WebServer for route setup
 func (app *BDWindApp) registerComponentsWithWebServer() error {
 	app.logger.Debugf("Starting component registration with webserver")
@@ -697,6 +904,15 @@ func (app *BDWindApp) registerComponentsWithWebServer() error {
 	registrationResults := make(map[string]bool)
 	var registrationErrors []error
 	var registeredComponents []string
+
+	// Check if we should use simplified implementation
+	if app.config.Implementation.UseSimplified {
+		app.logger.Info("Using simplified implementation for component registration")
+		return app.registerSimplifiedComponentsWithWebServer(webServer, &registeredComponents, &registrationErrors)
+	}
+
+	// Use complex implementation (existing logic)
+	app.logger.Info("Using complex implementation for component registration")
 
 	// Try to register metrics component
 	app.logger.Debugf("Attempting to register metrics component")
@@ -753,7 +969,7 @@ func (app *BDWindApp) registerComponentsWithWebServer() error {
 
 	if successCount > 0 {
 		// Format component names as comma-separated string instead of Go slice format
-		componentNames := fmt.Sprintf("%s", registeredComponents[0])
+		componentNames := registeredComponents[0]
 		for i := 1; i < len(registeredComponents); i++ {
 			componentNames += ", " + registeredComponents[i]
 		}

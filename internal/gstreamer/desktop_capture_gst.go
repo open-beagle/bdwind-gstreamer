@@ -3,10 +3,12 @@ package gstreamer
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-gst/go-gst/gst"
+	"github.com/go-gst/go-gst/gst/app"
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
@@ -24,7 +26,7 @@ type DesktopCaptureGst struct {
 	// Internal pipeline management (not exposed)
 	pipeline *gst.Pipeline
 	source   *gst.Element
-	sink     *gst.Element
+	sink     *app.Sink
 	bus      *gst.Bus
 
 	// Sample output channel (decoupled from other components)
@@ -78,27 +80,12 @@ func NewDesktopCaptureGst(cfg config.DesktopCaptureConfig) (*DesktopCaptureGst, 
 	// Create logger
 	logger := logrus.WithField("component", "desktop-capture-gst")
 
-	// Initialize memory manager with appropriate configuration
-	memConfig := MemoryManagerConfig{
-		BufferPoolSize:       100,
-		GCInterval:           30 * time.Second,
-		LeakDetectionEnabled: true,
-		MaxObjectRefs:        1000,
-		CleanupInterval:      5 * time.Minute,
-	}
+	// 修复：简化内存管理，避免复杂的后台任务导致崩溃
+	// 暂时禁用复杂的内存管理器，使用简单的引用管理
+	var memoryManager *MemoryManager = nil
+	var lifecycleManager *ObjectLifecycleManager = nil
 
-	memoryManager := NewMemoryManager(&memConfig, logger)
-
-	// Initialize object lifecycle manager
-	lifecycleConfig := ObjectLifecycleConfig{
-		CleanupInterval:    30 * time.Second,
-		ObjectRetention:    5 * time.Minute,
-		EnableValidation:   true,
-		ValidationInterval: 60 * time.Second,
-		EnableStackTrace:   false, // Disable for performance in production
-		LogObjectEvents:    false, // Disable for performance in production
-	}
-	lifecycleManager := NewObjectLifecycleManager(lifecycleConfig)
+	logger.Debug("Using simplified memory management to avoid crashes")
 
 	dc := &DesktopCaptureGst{
 		config:           cfg,
@@ -134,16 +121,17 @@ func (dc *DesktopCaptureGst) initializePipeline() error {
 	}
 	dc.pipeline = pipeline
 
-	// Track pipeline object
-	if dc.memoryManager != nil {
-		dc.memoryManager.RegisterObject(pipeline)
-	}
+	// 修复：简化内存管理 - 跳过对象注册
+	// if dc.memoryManager != nil {
+	//     dc.memoryManager.RegisterObject(pipeline)
+	// }
 
 	// Get bus for message handling
 	dc.bus = pipeline.GetPipelineBus()
-	if dc.bus != nil && dc.memoryManager != nil {
-		dc.memoryManager.RegisterObject(dc.bus)
-	}
+	// 修复：简化内存管理 - 跳过总线对象注册
+	// if dc.bus != nil && dc.memoryManager != nil {
+	//     dc.memoryManager.RegisterObject(dc.bus)
+	// }
 
 	// Create and configure source element based on display server
 	if err := dc.createSourceElement(); err != nil {
@@ -313,11 +301,12 @@ func (dc *DesktopCaptureGst) configureWaylandSource() error {
 }
 
 // createAndGetProcessingElements creates video processing elements and returns them
-func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gst.Element, *gst.Element, *gst.Element, error) {
+// 修正：添加队列元素解决管道构建警告
+func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gst.Element, *gst.Element, *gst.Element, *gst.Element, error) {
 	// Create video convert element
 	videoConvert, err := gst.NewElement("videoconvert")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create videoconvert: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create videoconvert: %w", err)
 	}
 
 	// Track video convert element
@@ -328,7 +317,7 @@ func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gs
 	// Create video scale element
 	videoScale, err := gst.NewElement("videoscale")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create videoscale: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create videoscale: %w", err)
 	}
 
 	// Track video scale element
@@ -336,10 +325,26 @@ func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gs
 		dc.memoryManager.RegisterObject(videoScale)
 	}
 
+	// 关键修正：创建队列元素解决管道构建警告
+	queue, err := gst.NewElement("queue")
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create queue: %w", err)
+	}
+
+	// Track queue element
+	if dc.memoryManager != nil {
+		dc.memoryManager.RegisterObject(queue)
+	}
+
+	// Configure queue properties for better performance
+	queue.SetProperty("max-size-buffers", uint(2))
+	queue.SetProperty("max-size-bytes", uint(0))
+	queue.SetProperty("max-size-time", uint64(0))
+
 	// Create video rate element for frame rate control
 	videoRate, err := gst.NewElement("videorate")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create videorate: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create videorate: %w", err)
 	}
 
 	// Track video rate element
@@ -349,13 +354,13 @@ func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gs
 
 	// Configure video rate to drop frames only
 	if err := videoRate.SetProperty("drop-only", true); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to set drop-only: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to set drop-only: %w", err)
 	}
 
 	// Create caps filter for format specification
 	capsFilter, err := gst.NewElement("capsfilter")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create capsfilter: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create capsfilter: %w", err)
 	}
 
 	// Track caps filter element
@@ -367,7 +372,7 @@ func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gs
 	capsStr := dc.buildCapsString()
 	caps := gst.NewCapsFromString(capsStr)
 	if caps == nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create caps from string '%s'", capsStr)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to create caps from string '%s'", capsStr)
 	}
 
 	// Track caps object
@@ -376,19 +381,19 @@ func (dc *DesktopCaptureGst) createAndGetProcessingElements() (*gst.Element, *gs
 	}
 
 	if err := capsFilter.SetProperty("caps", caps); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to set caps: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to set caps: %w", err)
 	}
 
 	// Add all elements to pipeline with error handling
-	elements := []*gst.Element{videoConvert, videoScale, videoRate, capsFilter}
+	elements := []*gst.Element{videoConvert, videoScale, queue, videoRate, capsFilter}
 	for i, element := range elements {
 		if err := dc.pipeline.Add(element); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("failed to add element %d to pipeline: %w", i, err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("failed to add element %d to pipeline: %w", i, err)
 		}
 	}
 
 	dc.logger.Debugf("Created processing elements with caps: %s", capsStr)
-	return videoConvert, videoScale, videoRate, capsFilter, nil
+	return videoConvert, videoScale, queue, videoRate, capsFilter, nil
 }
 
 // buildCapsString builds the caps string based on configuration
@@ -411,7 +416,7 @@ func (dc *DesktopCaptureGst) buildCapsString() string {
 
 // createSinkElement creates and configures the appsink element
 func (dc *DesktopCaptureGst) createSinkElement() error {
-	sink, err := gst.NewElement("appsink")
+	sink, err := app.NewAppSink()
 	if err != nil {
 		return fmt.Errorf("failed to create appsink: %w", err)
 	}
@@ -419,25 +424,16 @@ func (dc *DesktopCaptureGst) createSinkElement() error {
 
 	// Track sink element
 	if dc.memoryManager != nil {
-		dc.memoryManager.RegisterObject(sink)
+		dc.memoryManager.RegisterObject(sink.Element)
 	}
 
 	// Configure appsink properties with error handling
-	properties := map[string]interface{}{
-		"emit-signals": true,
-		"sync":         false,
-		"max-buffers":  uint(1),
-		"drop":         true,
-	}
-
-	for name, value := range properties {
-		if err := sink.SetProperty(name, value); err != nil {
-			return fmt.Errorf("failed to set property %s: %w", name, err)
-		}
-	}
+	sink.SetEmitSignals(false) // 使用回调而不是信号
+	sink.SetDrop(true)
+	sink.SetMaxBuffers(1)
 
 	// Add to pipeline
-	if err := dc.pipeline.Add(sink); err != nil {
+	if err := dc.pipeline.Add(sink.Element); err != nil {
 		return fmt.Errorf("failed to add sink to pipeline: %w", err)
 	}
 
@@ -447,8 +443,8 @@ func (dc *DesktopCaptureGst) createSinkElement() error {
 
 // linkElements links all pipeline elements together
 func (dc *DesktopCaptureGst) linkElements() error {
-	// Create processing elements and get references
-	videoConvert, videoScale, videoRate, capsFilter, err := dc.createAndGetProcessingElements()
+	// Create processing elements and get references (包含新的队列元素)
+	videoConvert, videoScale, queue, videoRate, capsFilter, err := dc.createAndGetProcessingElements()
 	if err != nil {
 		return fmt.Errorf("failed to get processing elements: %w", err)
 	}
@@ -463,9 +459,14 @@ func (dc *DesktopCaptureGst) linkElements() error {
 		return fmt.Errorf("failed to link videoconvert to videoscale: %w", err)
 	}
 
-	// Link videoscale -> videorate
-	if err := videoScale.Link(videoRate); err != nil {
-		return fmt.Errorf("failed to link videoscale to videorate: %w", err)
+	// 关键修正：Link videoscale -> queue (解决管道构建警告)
+	if err := videoScale.Link(queue); err != nil {
+		return fmt.Errorf("failed to link videoscale to queue: %w", err)
+	}
+
+	// Link queue -> videorate
+	if err := queue.Link(videoRate); err != nil {
+		return fmt.Errorf("failed to link queue to videorate: %w", err)
 	}
 
 	// Link videorate -> capsfilter
@@ -474,11 +475,11 @@ func (dc *DesktopCaptureGst) linkElements() error {
 	}
 
 	// Link capsfilter -> sink
-	if err := capsFilter.Link(dc.sink); err != nil {
+	if err := capsFilter.Link(dc.sink.Element); err != nil {
 		return fmt.Errorf("failed to link capsfilter to sink: %w", err)
 	}
 
-	dc.logger.Debug("Successfully linked all pipeline elements")
+	dc.logger.Debug("Successfully linked all pipeline elements with queue")
 	return nil
 }
 
@@ -491,8 +492,12 @@ func (dc *DesktopCaptureGst) Start() error {
 		return fmt.Errorf("desktop capture already running")
 	}
 
-	// Connect to new-sample signal
-	dc.sink.Connect("new-sample", dc.onNewSample)
+	// Set appsink callbacks
+	dc.sink.SetCallbacks(&app.SinkCallbacks{
+		NewSampleFunc: func(sink *app.Sink) gst.FlowReturn {
+			return dc.onNewSample(sink)
+		},
+	})
 
 	// Start bus message monitoring
 	go dc.monitorBusMessages()
@@ -505,10 +510,14 @@ func (dc *DesktopCaptureGst) Start() error {
 		return fmt.Errorf("failed to set pipeline to playing state: %w", err)
 	}
 
-	// Wait for state change to complete
-	ret, _ := dc.pipeline.GetState(gst.StatePlaying, gst.ClockTimeNone)
+	// Wait for state change to complete with timeout
+	timeout := gst.ClockTime(10 * time.Second) // 10 second timeout
+	ret, _ := dc.pipeline.GetState(gst.StatePlaying, timeout)
 	if ret == gst.StateChangeFailure {
 		return fmt.Errorf("failed to reach playing state")
+	} else if ret == gst.StateChangeAsync {
+		dc.logger.Warn("Pipeline state change is still in progress, continuing startup")
+		// Continue anyway - the pipeline might reach playing state later
 	}
 
 	dc.isRunning = true
@@ -550,12 +559,14 @@ func (dc *DesktopCaptureGst) Stop() error {
 		// Unref pipeline and related objects to ensure proper cleanup
 		if dc.bus != nil {
 			dc.logger.Debug("Cleaning up bus object")
-			// Note: go-gst handles reference counting automatically
+			dc.bus.Unref() // 重要：显式释放总线引用
 			dc.bus = nil
 		}
 
 		dc.logger.Debug("Cleaning up pipeline object")
-		// Note: go-gst handles reference counting automatically
+		if dc.pipeline != nil {
+			dc.pipeline.Unref() // 重要：显式释放管道引用
+		}
 		dc.pipeline = nil
 		dc.source = nil
 		dc.sink = nil
@@ -704,88 +715,74 @@ func (dc *DesktopCaptureGst) CheckForMemoryLeaks() []MemoryLeak {
 	return dc.memoryManager.CheckMemoryLeaks()
 }
 
-// onNewSample handles new samples from the appsink with enhanced error handling
-func (dc *DesktopCaptureGst) onNewSample(sink *gst.Element) gst.FlowReturn {
-	// Enhanced safety check for nil sink with context
+// onNewSample handles new samples from the appsink - SIMPLIFIED VERSION
+// 按照 docs/go-gst-appsink-summary.md 的建议，使用正确的 go-gst appsink 方式
+func (dc *DesktopCaptureGst) onNewSample(sink *app.Sink) gst.FlowReturn {
+	// 基本验证
 	if sink == nil {
-		dc.logger.WithFields(logrus.Fields{
-			"component": "desktop-capture",
-			"method":    "onNewSample",
-			"error":     "nil_sink",
-		}).Error("Received nil sink in onNewSample callback")
-		dc.handleSampleError("nil_sink", fmt.Errorf("received nil sink"))
 		return gst.FlowError
 	}
 
-	// Pull sample from appsink with enhanced error handling
-	sample, err := sink.Emit("pull-sample")
-	if err != nil {
-		dc.logger.WithFields(logrus.Fields{
-			"component":    "desktop-capture",
-			"method":       "onNewSample",
-			"error":        "pull_sample_failed",
-			"sink_name":    sink.GetName(),
-			"error_detail": err.Error(),
-		}).Warn("Failed to pull sample from sink")
-		dc.handleSampleError("pull_sample_failed", err)
-		return dc.handleSampleFailure(err)
-	}
-
-	// Enhanced nil sample check with context
+	// 使用 PullSample() 获取样本
+	sample := sink.PullSample()
 	if sample == nil {
-		dc.logger.WithFields(logrus.Fields{
-			"component": "desktop-capture",
-			"method":    "onNewSample",
-			"warning":   "nil_sample",
-			"sink_name": sink.GetName(),
-		}).Debug("Received nil sample from sink - this may be normal during state transitions")
-		return gst.FlowOK // Continue processing, this might be normal
+		return gst.FlowEOS
 	}
 
-	// Enhanced type assertion with detailed error context
-	gstSample, ok := sample.(*gst.Sample)
-	if !ok {
-		actualType := "unknown"
-		if sample != nil {
-			actualType = fmt.Sprintf("%T", sample)
-		}
-		dc.logger.WithFields(logrus.Fields{
-			"component":     "desktop-capture",
-			"method":        "onNewSample",
-			"error":         "type_assertion_failed",
-			"expected_type": "*gst.Sample",
-			"actual_type":   actualType,
-			"sink_name":     sink.GetName(),
-		}).Error("Sample type assertion failed")
-		dc.handleSampleError("type_assertion_failed", fmt.Errorf("expected *gst.Sample, got %T", sample))
+	// 确保样本被正确释放
+	defer sample.Unref()
+
+	// 获取缓冲区
+	buffer := sample.GetBuffer()
+	if buffer == nil {
 		return gst.FlowError
 	}
 
-	// Convert to internal sample format with graceful degradation
-	internalSample, err := dc.convertGstSampleWithRecovery(gstSample)
-	if err != nil {
-		dc.logger.WithFields(logrus.Fields{
-			"component":    "desktop-capture",
-			"method":       "onNewSample",
-			"error":        "sample_conversion_failed",
-			"error_detail": err.Error(),
-			"sink_name":    sink.GetName(),
-		}).Warn("Failed to convert sample, attempting recovery")
+	// 映射缓冲区数据
+	mapInfo := buffer.Map(gst.MapRead)
+	if mapInfo == nil {
+		return gst.FlowError
+	}
+	defer buffer.Unmap()
 
-		// Attempt graceful degradation
-		return dc.handleSampleConversionFailure(gstSample, err)
+	// 获取真实的 H.264 数据
+	data := mapInfo.AsUint8Slice()
+	if len(data) == 0 {
+		return gst.FlowOK
 	}
 
-	// Enhanced sample delivery with error tracking
-	delivered := dc.deliverSample(internalSample)
-	if !delivered {
-		dc.logger.WithFields(logrus.Fields{
-			"component":   "desktop-capture",
-			"method":      "onNewSample",
-			"warning":     "sample_dropped",
-			"sample_size": len(internalSample.Data),
-			"reason":      "channel_full",
-		}).Debug("Sample dropped due to full channel")
+	// 创建数据副本，避免引用 GStreamer 内存
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	// 创建内部样本（简化时间戳处理）
+	internalSample := &Sample{
+		Data:      dataCopy,
+		Timestamp: time.Now(),            // 使用当前时间
+		Duration:  time.Millisecond * 33, // 假设30fps，约33ms每帧
+		Format: SampleFormat{
+			MediaType: MediaTypeVideo,
+			Codec:     "h264",
+			Width:     dc.config.Width,
+			Height:    dc.config.Height,
+		},
+	}
+
+	// 投递样本到通道
+	select {
+	case dc.sampleChan <- internalSample:
+		// 成功投递
+	default:
+		// 通道满，丢弃样本
+		dc.logger.Debug("Sample dropped due to full channel")
+	}
+
+	// 调用样本回调（如果存在）
+	if dc.sampleCallback != nil {
+		if err := dc.sampleCallback(internalSample); err != nil {
+			dc.logger.Warnf("Sample callback error: %v", err)
+			return gst.FlowError
+		}
 	}
 
 	return gst.FlowOK
@@ -1409,6 +1406,26 @@ func (dc *DesktopCaptureGst) monitorBusMessages() {
 					dc.logger.Warn("Error channel full, unable to report pipeline error")
 				}
 
+				// 修复：避免无限恢复循环
+				// 检查是否是 X11 显示器访问错误
+				if strings.Contains(err.Error(), "Could not open X display") {
+					dc.logger.Error("X11 display access error detected - stopping recovery attempts")
+					// 不触发恢复，避免无限循环
+					return
+				}
+
+				// 限制恢复频率，避免无限循环
+				dc.stats.mu.Lock()
+				lastRecovery := dc.stats.lastRecoveryTime
+				recoveryAttempts := dc.stats.recoveryAttempts
+				dc.stats.mu.Unlock()
+
+				// 如果最近1秒内已经尝试过恢复，或者恢复次数过多，则跳过
+				if time.Since(lastRecovery) < time.Second || recoveryAttempts > 5 {
+					dc.logger.Warn("Skipping recovery to prevent infinite loop")
+					return
+				}
+
 				// Trigger recovery for critical errors
 				go dc.triggerPipelineRecovery("pipeline_error")
 
@@ -1536,6 +1553,9 @@ func (dc *DesktopCaptureGst) monitorBusMessages() {
 					"source":       sourceName,
 				}).Trace("Other bus message received")
 			}
+
+			// 重要：释放消息对象，防止内存泄漏
+			msg.Unref()
 		}
 	}
 }
@@ -2332,7 +2352,7 @@ func (ew *elementWrapper) GetInternal() interface{} {
 
 func (dc *DesktopCaptureGst) GetAppsink() Element {
 	// Return a wrapper around the go-gst element to maintain interface compatibility
-	return &elementWrapper{element: dc.sink}
+	return &elementWrapper{element: dc.sink.Element}
 }
 
 // SetFrameRate dynamically sets the capture frame rate (implements DesktopCapture interface)

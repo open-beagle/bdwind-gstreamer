@@ -416,12 +416,13 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Info("Starting GStreamer manager...")
 
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
 	if m.running {
+		m.mutex.Unlock()
 		m.logger.Warn("GStreamer manager already running, skipping start")
 		return fmt.Errorf("GStreamer manager already running")
 	}
+	// Release mutex early to avoid deadlock with goroutines
+	m.mutex.Unlock()
 
 	// 记录GStreamer配置信息
 	m.logger.Debugf("GStreamer configuration: display=%s, codec=%s, resolution=%dx%d@%dfps, bitrate=%dkbps",
@@ -438,64 +439,107 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Debugf("Component status: capture=%v, encoder=%v, error_handler=%v, http_handlers=%v, stream_publisher=%v",
 		m.capture != nil, m.encoder != nil, m.errorHandler != nil, m.handlers != nil, m.streamPublisher != nil)
 
-	// 启动桌面捕获组件
+	// 启动桌面捕获组件 (异步启动以避免阻塞主启动序列)
 	if m.capture != nil {
 		m.logger.Debug("Starting desktop capture component...")
 		m.logger.Tracef("Display ID: %s, capture region: %dx%d", 
 			m.config.Capture.DisplayID, m.config.Capture.Width, m.config.Capture.Height)
 
-		if err := m.startDesktopCaptureWithContext(); err != nil {
-			m.logger.Errorf("Failed to start desktop capture: %v", err)
-			m.logger.Warn("Desktop capture failed - continuing without video capture")
-		} else {
-			m.logger.Debug("Desktop capture started successfully")
-			m.logger.Debug("Sample callback chain established")
+		// Start desktop capture in a goroutine with timeout to avoid blocking startup
+		go func() {
+			m.logger.Info("DEBUG: Desktop capture goroutine started")
+			// Use a timeout context for desktop capture startup
+			captureCtx, captureCancel := context.WithTimeout(m.ctx, 15*time.Second)
+			defer captureCancel()
 
-			// 初始化Pipeline状态管理器
-			m.logger.Debug("Initializing pipeline state manager...")
-			if err := m.initializePipelineStateManagerForCapture(); err != nil {
-				m.logger.Errorf("Failed to initialize pipeline state manager: %v", err)
-				m.logger.Warn("Pipeline state management disabled - continuing without monitoring")
-			} else {
-				m.logger.Debug("Pipeline state manager initialized successfully")
+			done := make(chan error, 1)
+			go func() {
+				m.logger.Info("DEBUG: About to call startDesktopCaptureWithContext")
+				done <- m.startDesktopCaptureWithContext()
+			}()
+
+			select {
+			case err := <-done:
+				m.logger.Info("DEBUG: Desktop capture goroutine completed")
+				if err != nil {
+					m.logger.Errorf("Failed to start desktop capture: %v", err)
+					m.logger.Warn("Desktop capture failed - continuing without video capture")
+				} else {
+					m.logger.Debug("Desktop capture started successfully")
+					m.logger.Debug("Sample callback chain established")
+
+					// 初始化Pipeline状态管理器
+					m.logger.Debug("Initializing pipeline state manager...")
+					if err := m.initializePipelineStateManagerForCapture(); err != nil {
+						m.logger.Errorf("Failed to initialize pipeline state manager: %v", err)
+						m.logger.Warn("Pipeline state management disabled - continuing without monitoring")
+					} else {
+						m.logger.Debug("Pipeline state manager initialized successfully")
+					}
+				}
+			case <-captureCtx.Done():
+				m.logger.Warn("Desktop capture startup timed out after 15 seconds - continuing without video capture")
 			}
-		}
+			m.logger.Info("DEBUG: Desktop capture goroutine exiting")
+		}()
+
+		// Don't wait for desktop capture to complete - continue with startup
+		m.logger.Debug("Desktop capture startup initiated asynchronously")
 	} else {
 		m.logger.Warn("Desktop capture component not available")
 	}
 
-	// 启动视频编码器
+	// 启动视频编码器 (异步启动以避免阻塞)
+	m.logger.Info("DEBUG: About to start video encoder")
 	if m.encoder != nil {
 		m.logger.Debug("Starting video encoder...")
 		m.logger.Tracef("Encoder codec: %s, bitrate: %dkbps, hardware: %v", 
 			m.config.Encoding.Codec, m.config.Encoding.Bitrate, m.config.Encoding.UseHardware)
 		
-		if err := m.encoder.Start(); err != nil {
-			m.logger.Errorf("Failed to start video encoder: %v", err)
-			m.logger.Warn("Video encoder failed - continuing without encoding")
-		} else {
-			m.logger.Debug("Video encoder started successfully")
-		}
+		// Start encoder asynchronously to avoid blocking startup
+		go func() {
+			m.logger.Info("DEBUG: Encoder goroutine started")
+			if err := m.encoder.Start(); err != nil {
+				m.logger.Errorf("Failed to start video encoder: %v", err)
+				m.logger.Warn("Video encoder failed - continuing without encoding")
+			} else {
+				m.logger.Debug("Video encoder started successfully")
+			}
+			m.logger.Info("DEBUG: Encoder goroutine completed")
+		}()
+		
+		m.logger.Debug("Video encoder startup initiated asynchronously")
 	} else {
 		m.logger.Warn("Video encoder component not available")
 	}
+	m.logger.Info("DEBUG: Video encoder section completed")
 
 	// 启动流发布器
+	m.logger.Info("DEBUG: About to check stream publisher")
 	if m.streamPublisher != nil {
 		m.logger.Debug("Starting stream publisher...")
+		m.logger.Info("DEBUG: About to call IsRunning()")
 		if !m.streamPublisher.IsRunning() {
 			m.logger.Warn("Stream publisher not running - media distribution may be affected")
 		} else {
+			m.logger.Info("DEBUG: About to call GetSubscriberCount()")
 			subscriberCount := m.streamPublisher.GetSubscriberCount()
 			m.logger.Debugf("Stream publisher active with %d subscribers", subscriberCount)
 		}
+		m.logger.Info("DEBUG: Stream publisher check completed")
 	}
 
 	// 启动配置监控
 	m.logger.Debug("Starting configuration monitoring...")
+	m.logger.Info("DEBUG: About to call MonitorLoggingConfigChanges")
 	m.MonitorLoggingConfigChanges(m.configChangeChannel)
+	m.logger.Info("DEBUG: MonitorLoggingConfigChanges completed")
 
+	m.logger.Info("DEBUG: About to set running = true")
+	m.mutex.Lock()
 	m.running = true
+	m.mutex.Unlock()
+	m.logger.Info("DEBUG: Set running = true")
 	duration := time.Since(startTime)
 	
 	// 记录最终状态
@@ -514,6 +558,10 @@ func (m *Manager) Start(ctx context.Context) error {
 	// 记录组件摘要
 	m.logger.Infof("GStreamer ready: display capture from %s, %s encoding", 
 		m.config.Capture.DisplayID, m.config.Encoding.Codec)
+
+	// Add explicit completion log to help debug startup sequence
+	m.logger.Info("GStreamer manager Start() method completing successfully")
+	m.logger.Info("DEBUG: About to return from GStreamer Start() method")
 
 	return nil
 }
@@ -1732,9 +1780,15 @@ func (m *Manager) AdaptToNetworkCondition(condition NetworkCondition) error {
 // AddVideoSubscriber adds a video stream subscriber and returns its unique ID
 // Implements MediaStreamProvider interface
 func (m *Manager) AddVideoSubscriber(subscriber VideoStreamSubscriber) (uint64, error) {
+	m.logger.Debug("AddVideoSubscriber called on GStreamer manager")
+	
 	if m.streamPublisher == nil {
+		m.logger.Error("Stream publisher not initialized")
 		return 0, fmt.Errorf("stream publisher not initialized")
 	}
+	
+	m.logger.Debugf("Stream publisher status: running=%v", m.streamPublisher.IsRunning())
+	m.logger.Debug("Calling AddVideoSubscriber on stream publisher...")
 
 	id, err := m.streamPublisher.AddVideoSubscriber(subscriber)
 	if err != nil {

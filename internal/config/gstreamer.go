@@ -4,7 +4,7 @@ import (
 	"fmt"
 )
 
-// GStreamerConfig GStreamer配置模块
+// GStreamerConfig GStreamer配置模块 - 只支持 go-gst 实现
 type GStreamerConfig struct {
 	Capture  DesktopCaptureConfig `yaml:"capture" json:"capture"`
 	Encoding EncoderConfig        `yaml:"encoding" json:"encoding"`
