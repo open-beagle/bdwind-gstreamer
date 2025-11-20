@@ -208,6 +208,7 @@
   <script>
     let ws = null;
     let pc = null;
+    let serverIceServers = []; // 存储服务器提供的ICE服务器配置
     const video = document.getElementById('remoteVideo');
     const statusSpan = document.getElementById('status');
     const statusIndicator = document.getElementById('statusIndicator');
@@ -277,24 +278,10 @@
       ws = new WebSocket(`ws://${window.location.host}/api/signaling`);
 
       ws.onopen = function () {
-        log('WebSocket 连接成功', 'success');
+        log('✅ WebSocket 连接成功', 'success');
         updateStatus('已连接到信令服务器', 'connected');
-
-        // Create peer connection
-        createPeerConnection();
-
-        // Request offer after a short delay
-        setTimeout(() => {
-          log('请求 WebRTC offer...', 'info');
-          ws.send(JSON.stringify({
-            type: 'request-offer',
-            timestamp: Date.now(),
-            constraints: {
-              video: true,
-              audio: false
-            }
-          }));
-        }, 1000);
+        log('⏳ 等待服务器配置...', 'info');
+        // 不要立即创建PeerConnection，等待welcome消息
       };
 
       ws.onmessage = function (event) {
@@ -310,7 +297,38 @@
               handleIceCandidate(message);
               break;
             case 'welcome':
-              log('收到欢迎消息', 'success');
+              log('✅ 收到欢迎消息', 'success');
+              // 提取ICE服务器配置
+              if (message.data && message.data.session_config && message.data.session_config.ice_servers) {
+                serverIceServers = message.data.session_config.ice_servers.map(server => ({
+                  urls: server.urls,
+                  username: server.username,
+                  credential: server.credential
+                }));
+                log(`📡 服务器提供了 ${serverIceServers.length} 个 ICE 服务器`, 'success');
+                serverIceServers.forEach((server, i) => {
+                  log(`   ICE Server ${i + 1}: ${JSON.stringify(server.urls)}`, 'info');
+                });
+              } else {
+                log('⚠️ 欢迎消息中没有ICE服务器配置，将使用默认配置', 'warning');
+              }
+              
+              // 收到welcome消息后，创建PeerConnection并请求offer
+              log('🔧 使用服务器配置创建 PeerConnection...', 'info');
+              createPeerConnection();
+              
+              // Request offer after a short delay
+              setTimeout(() => {
+                log('📞 请求 WebRTC offer...', 'info');
+                ws.send(JSON.stringify({
+                  type: 'request-offer',
+                  timestamp: Date.now(),
+                  constraints: {
+                    video: true,
+                    audio: false
+                  }
+                }));
+              }, 500);
               break;
             case 'pong':
               log('收到 pong 响应', 'info');
@@ -340,18 +358,19 @@
     function createPeerConnection() {
       log('创建 PeerConnection...', 'info');
 
+      // 使用服务器提供的ICE服务器配置
       const config = {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { 
-            urls: 'turn:openrelay.metered.ca:80',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-          }
-        ],
-        iceCandidatePoolSize: 10
+        iceServers: serverIceServers,
+        iceCandidatePoolSize: 10,
+        iceTransportPolicy: 'all',  // 使用所有候选
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
       };
+
+      log(`使用 ${config.iceServers.length} 个 ICE 服务器:`, 'info');
+      config.iceServers.forEach((server, i) => {
+        log(`  ICE Server ${i + 1}: ${JSON.stringify(server.urls)}`, 'info');
+      });
 
       pc = new RTCPeerConnection(config);
 
@@ -457,8 +476,24 @@
     }
 
     async function handleIceCandidate(message) {
-      const candidateData = message.data.candidate;
-      log(`处理 ICE 候选: ${candidateData.candidate.substring(0, 50)}...`, 'info');
+      log(`📥 收到服务器 ICE 候选消息`, 'info');
+      
+      const candidateData = message.data;
+      
+      // 详细日志
+      log(`   完整消息: ${JSON.stringify(message, null, 2)}`, 'info');
+      log(`   candidateData类型: ${typeof candidateData}`, 'info');
+      log(`   candidateData.candidate类型: ${typeof candidateData?.candidate}`, 'info');
+      
+      // 检查数据格式
+      if (!candidateData || !candidateData.candidate) {
+        log(`❌ ICE 候选数据格式错误: ${JSON.stringify(candidateData)}`, 'error');
+        return;
+      }
+      
+      log(`   候选字符串: ${candidateData.candidate.substring(0, 80)}...`, 'info');
+      log(`   sdpMid: ${candidateData.sdpMid}`, 'info');
+      log(`   sdpMLineIndex: ${candidateData.sdpMLineIndex}`, 'info');
 
       try {
         await pc.addIceCandidate({
@@ -466,9 +501,10 @@
           sdpMid: candidateData.sdpMid,
           sdpMLineIndex: candidateData.sdpMLineIndex
         });
-        log('ICE 候选添加成功', 'success');
+        log('✅ ICE 候选添加成功', 'success');
       } catch (error) {
-        log(`添加 ICE 候选失败: ${error}`, 'error');
+        log(`❌ 添加 ICE 候选失败: ${error.message}`, 'error');
+        log(`   错误详情: ${JSON.stringify(error)}`, 'error');
       }
     }
 

@@ -291,8 +291,14 @@ func (r *SignalingRouter) handleBusinessMessage(connInfo *ConnectionInfo, messag
 		data["timestamp"] = message.Timestamp
 	}
 
+	// 确定使用的客户端ID
+	targetID := connInfo.ClientID
+	if targetID == "" {
+		targetID = connInfo.ID
+	}
+
 	// 调用业务消息处理器
-	if err := r.businessMessageHandler(connInfo.ClientID, string(message.Type), data); err != nil {
+	if err := r.businessMessageHandler(targetID, string(message.Type), data); err != nil {
 		r.logger.Errorf("Business message handler error for client %s: %v", connInfo.ID, err)
 		r.sendError(connInfo, "BUSINESS_HANDLER_ERROR", fmt.Sprintf("Failed to process message: %v", err))
 		return

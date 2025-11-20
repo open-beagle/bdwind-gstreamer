@@ -231,7 +231,10 @@ func (m *MinimalGoGstManager) setupAppsink() error {
 
 // onNewSample 处理新的视频样本 (修正版本)
 func (m *MinimalGoGstManager) onNewSample(sink *app.Sink) gst.FlowReturn {
-	m.logger.Debug("New sample received from appsink")
+	// 只在第一帧时打印，避免刷屏
+	if m.frameCount == 0 {
+		m.logger.Info("🎬 First sample received from appsink, video pipeline is working")
+	}
 
 	// 获取样本 (关键修正)
 	sample := sink.PullSample()
@@ -268,6 +271,17 @@ func (m *MinimalGoGstManager) onNewSample(sink *app.Sink) gst.FlowReturn {
 	m.bytesReceived += uint64(len(data))
 	m.lastFrameTime = time.Now()
 
+	// 第一帧时打印详细信息
+	if m.frameCount == 1 {
+		m.logger.Infof("📊 GStreamer first frame: size=%d bytes (%d KB)", len(data), len(data)/1024)
+	}
+
+	// 每300帧（约10秒）打印一次统计信息，避免刷屏
+	if m.frameCount%300 == 0 {
+		m.logger.Infof("📊 GStreamer stats: frame=%d, total_bytes=%d MB, current_frame_size=%d bytes",
+			m.frameCount, m.bytesReceived/(1024*1024), len(data))
+	}
+
 	// 复制数据并调用回调
 	if m.videoCallback != nil {
 		dataCopy := make([]byte, len(data))
@@ -277,8 +291,13 @@ func (m *MinimalGoGstManager) onNewSample(sink *app.Sink) gst.FlowReturn {
 		duration := time.Millisecond * 33 // 默认 30fps
 
 		if err := m.videoCallback(dataCopy, duration); err != nil {
-			m.logger.Errorf("Video callback error: %v", err)
+			m.logger.Errorf("❌ Video callback error: %v", err)
 			return gst.FlowError
+		}
+	} else {
+		// 只在第一次警告，避免刷屏
+		if m.frameCount == 1 {
+			m.logger.Error("⚠️ Video callback is nil, data not sent to WebRTC!")
 		}
 	}
 

@@ -3,6 +3,7 @@ package webrtc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 )
 
 // WebRTCManager WebRTC管理器 - 参考Selkies设计
@@ -35,6 +37,15 @@ type WebRTCManager struct {
 	// 上下文控制
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// 事件总线
+	eventBus events.EventBus
+
+	currentSessionID string
+	pcSessionID      string // 当前PeerConnection关联的会话ID
+
+	// 统计信息
+	videoFrameCount uint64
 }
 
 // NewWebRTCManager 创建WebRTC管理器
@@ -91,6 +102,20 @@ func NewWebRTCManagerFromSimpleConfig(cfg *config.SimpleConfig) (*WebRTCManager,
 	return manager, nil
 }
 
+// SetEventBus 设置事件总线
+func (m *WebRTCManager) SetEventBus(bus events.EventBus) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.eventBus = bus
+}
+
+// SetCurrentSessionID 设置当前会话ID
+func (m *WebRTCManager) SetCurrentSessionID(sessionID string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.currentSessionID = sessionID
+}
+
 // Start 启动WebRTC管理器
 func (m *WebRTCManager) Start(ctx context.Context) error {
 	m.mutex.Lock()
@@ -104,21 +129,11 @@ func (m *WebRTCManager) Start(ctx context.Context) error {
 	m.logger.Info("Starting WebRTC manager...")
 	m.startTime = time.Now()
 
-	// 创建并配置PeerConnection
-	if err := m.createPeerConnection(); err != nil {
-		return fmt.Errorf("failed to create peer connection: %w", err)
-	}
-
-	// 创建视频轨道
-	if err := m.createVideoTrack(); err != nil {
-		return fmt.Errorf("failed to create video track: %w", err)
-	}
-
-	// 设置ICE candidate处理
-	m.setupICEHandling()
+	// 不在启动时创建PeerConnection，而是在收到客户端请求时创建
+	// PeerConnection会在CreateOffer时按需创建
 
 	m.running = true
-	m.logger.Info("WebRTC manager started successfully")
+	m.logger.Info("WebRTC manager started successfully (PeerConnection will be created on demand)")
 	return nil
 }
 
@@ -131,7 +146,10 @@ func (m *WebRTCManager) createPeerConnection() error {
 		ICEServers: iceServers,
 	}
 
-	m.logger.Debugf("Creating PeerConnection with %d ICE servers", len(iceServers))
+	m.logger.Infof("🔧 Creating PeerConnection with %d ICE servers", len(iceServers))
+	for i, server := range iceServers {
+		m.logger.Infof("   ICE Server %d: %v", i+1, server.URLs)
+	}
 
 	var err error
 	m.peerConnection, err = webrtc.NewPeerConnection(config)
@@ -139,7 +157,7 @@ func (m *WebRTCManager) createPeerConnection() error {
 		return fmt.Errorf("failed to create peer connection: %w", err)
 	}
 
-	m.logger.Debug("PeerConnection created successfully")
+	m.logger.Info("✅ PeerConnection created successfully")
 	return nil
 }
 
@@ -181,6 +199,11 @@ func (m *WebRTCManager) convertICEServers() []webrtc.ICEServer {
 func (m *WebRTCManager) recreatePeerConnection() error {
 	m.logger.Debug("Recreating PeerConnection...")
 
+	// 清空ICE candidates
+	m.mutex.Lock()
+	m.iceCandidates = make([]webrtc.ICECandidate, 0)
+	m.mutex.Unlock()
+
 	// 关闭现有连接
 	if m.peerConnection != nil {
 		m.peerConnection.Close()
@@ -212,6 +235,47 @@ func (m *WebRTCManager) setupICEHandling() {
 			// 存储ICE candidate供后续使用
 			m.mutex.Lock()
 			m.iceCandidates = append(m.iceCandidates, *candidate)
+
+			// 发布事件
+			if m.eventBus != nil {
+				// 将 ICECandidateInit 转换为 map[string]interface{}
+				candidateInit := candidate.ToJSON()
+
+				// 过滤IPv6候选，只使用IPv4
+				candidateStr := candidateInit.Candidate
+				if strings.Contains(candidateStr, ":") && !strings.Contains(candidateStr, ".") {
+					// 这是IPv6地址（包含:但不包含.），跳过
+					m.logger.Debugf("Skipping IPv6 candidate: %s", candidateStr[:50])
+					m.mutex.Unlock()
+					return
+				}
+
+				m.logger.Infof("📡 Publishing ICE candidate: %s", candidateStr[:80])
+
+				candidateMap := map[string]interface{}{
+					"candidate": candidateInit.Candidate,
+				}
+				if candidateInit.SDPMid != nil {
+					candidateMap["sdpMid"] = *candidateInit.SDPMid
+				}
+				if candidateInit.SDPMLineIndex != nil {
+					candidateMap["sdpMLineIndex"] = *candidateInit.SDPMLineIndex
+				}
+				if candidateInit.UsernameFragment != nil {
+					candidateMap["usernameFragment"] = *candidateInit.UsernameFragment
+				}
+
+				event := events.NewWebRTCEvent(
+					events.EventOnICECandidate,
+					m.currentSessionID,
+					m.currentSessionID, // PeerID same as SessionID for now
+					map[string]interface{}{
+						"candidate": candidateMap,
+					},
+				)
+				// 异步发布，不阻塞回调
+				go m.eventBus.Publish(event)
+			}
 			m.mutex.Unlock()
 		}
 	})
@@ -317,12 +381,27 @@ func (m *WebRTCManager) SendVideoDataWithTimestamp(data []byte, duration time.Du
 		return fmt.Errorf("WebRTC manager not running")
 	}
 
+	// 如果videoTrack不可用（没有客户端连接），静默忽略
+	// 这样GStreamer可以继续运行，等客户端连接后再发送数据
 	if m.videoTrack == nil {
-		return fmt.Errorf("video track not available")
+		return nil // 静默忽略，不返回错误
 	}
 
 	if len(data) == 0 {
 		return fmt.Errorf("empty video data")
+	}
+
+	// 添加计数器用于统计
+	m.videoFrameCount++
+
+	// 第一帧时打印，确认数据流开始
+	if m.videoFrameCount == 1 {
+		m.logger.Infof("📹 WebRTC video: first frame sent, size=%d bytes (%d KB)", len(data), len(data)/1024)
+	}
+
+	// 每300帧（约10秒）打印一次统计信息
+	if m.videoFrameCount%300 == 0 {
+		m.logger.Infof("📹 WebRTC video: sent %d frames, current size=%d bytes", m.videoFrameCount, len(data))
 	}
 
 	// 创建WebRTC sample with custom duration
@@ -333,7 +412,10 @@ func (m *WebRTCManager) SendVideoDataWithTimestamp(data []byte, duration time.Du
 
 	// 直接发送到WebRTC轨道
 	if err := m.videoTrack.WriteSample(sample); err != nil {
-		m.logger.Debugf("Failed to write video sample with timestamp: %v", err)
+		// 只记录前10次错误，避免刷屏
+		if m.videoFrameCount <= 10 {
+			m.logger.Errorf("❌ Failed to write video sample (frame %d): %v", m.videoFrameCount, err)
+		}
 		return fmt.Errorf("failed to write video sample: %w", err)
 	}
 
@@ -350,10 +432,21 @@ func (m *WebRTCManager) GetVideoTrack() *webrtc.TrackLocalStaticSample {
 // CreateOffer 创建SDP offer
 func (m *WebRTCManager) CreateOffer() (*webrtc.SessionDescription, error) {
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
 
-	if !m.running || m.peerConnection == nil {
-		return nil, fmt.Errorf("WebRTC manager not running or peer connection not initialized")
+	if !m.running {
+		m.mutex.Unlock()
+		return nil, fmt.Errorf("WebRTC manager not running")
+	}
+
+	// 如果PeerConnection不存在，创建新的
+	if m.peerConnection == nil {
+		m.logger.Info("PeerConnection not exists, creating new one for this session")
+		m.mutex.Unlock()
+		if err := m.recreatePeerConnection(); err != nil {
+			return nil, fmt.Errorf("failed to create peer connection: %w", err)
+		}
+		m.mutex.Lock()
+		m.pcSessionID = m.currentSessionID
 	}
 
 	// 检查当前连接状态
@@ -365,16 +458,30 @@ func (m *WebRTCManager) CreateOffer() (*webrtc.SessionDescription, error) {
 		localDesc := m.peerConnection.LocalDescription()
 		if localDesc != nil {
 			m.logger.Debug("Returning existing local offer")
+			m.mutex.Unlock()
 			return localDesc, nil
 		}
 	}
 
-	// 如果连接状态不是 stable，需要重新创建 PeerConnection
+	// 检查是否需要重建连接
+	needsRecreate := false
 	if signalingState != webrtc.SignalingStateStable {
-		m.logger.Debugf("Signaling state is %s, recreating PeerConnection", signalingState)
+		m.logger.Debugf("Signaling state is %s, need to recreate PeerConnection", signalingState)
+		needsRecreate = true
+	} else if m.pcSessionID != m.currentSessionID {
+		m.logger.Infof("Session ID changed from %s to %s, need to recreate PeerConnection", m.pcSessionID, m.currentSessionID)
+		needsRecreate = true
+	}
+
+	// 如果需要重建，释放锁后执行
+	if needsRecreate {
+		m.mutex.Unlock()
 		if err := m.recreatePeerConnection(); err != nil {
 			return nil, fmt.Errorf("failed to recreate peer connection: %w", err)
 		}
+		m.mutex.Lock()
+		// 更新关联的会话ID
+		m.pcSessionID = m.currentSessionID
 	}
 
 	m.logger.Debug("Creating SDP offer...")
@@ -382,16 +489,19 @@ func (m *WebRTCManager) CreateOffer() (*webrtc.SessionDescription, error) {
 	offer, err := m.peerConnection.CreateOffer(nil)
 	if err != nil {
 		m.logger.Errorf("Failed to create SDP offer: %v", err)
+		m.mutex.Unlock()
 		return nil, fmt.Errorf("failed to create offer: %w", err)
 	}
 
 	// 设置本地描述
 	if err := m.peerConnection.SetLocalDescription(offer); err != nil {
 		m.logger.Errorf("Failed to set local description: %v", err)
+		m.mutex.Unlock()
 		return nil, fmt.Errorf("failed to set local description: %w", err)
 	}
 
 	m.logger.Debug("SDP offer created and set as local description")
+	m.mutex.Unlock()
 	return &offer, nil
 }
 

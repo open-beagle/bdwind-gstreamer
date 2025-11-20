@@ -145,7 +145,8 @@ fi
 
 # 使用修复的编译选项进行强制重编译
 echo "🔨 开始强制重编译..."
-go build -a -ldflags="-s -w" -o .tmp/bdwind-gstreamer ./cmd/bdwind-gstreamer
+# 调试模式：移除 -s -w 保留调试符号，移除 -a 加快编译速度
+go build -o .tmp/bdwind-gstreamer ./cmd/bdwind-gstreamer
 
 if [ $? -eq 0 ]; then
     echo "✅ 强制重编译成功"

@@ -12,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/bridge"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 	"github.com/open-beagle/bdwind-gstreamer/internal/factory"
 	"github.com/open-beagle/bdwind-gstreamer/internal/gstreamer"
@@ -89,6 +90,7 @@ func NewGoGstBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, er
 		cancelFunc()
 		return nil, fmt.Errorf("failed to create WebRTC manager: %w", err)
 	}
+	webrtcMgr.SetEventBus(eventBus)
 	logger.Info("WebRTC manager created successfully")
 
 	// 创建信令事件处理器
@@ -121,6 +123,51 @@ func NewGoGstBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, er
 		return nil, fmt.Errorf("failed to create webserver manager: %w", err)
 	}
 	logger.Info("Webserver manager created successfully")
+
+	// 设置WebRTC配置到信令服务器
+	logger.Info("Configuring signaling server with WebRTC config...")
+	webserverMgr.GetSignalingServer().SetWebRTCConfig(cfg.WebRTC)
+	logger.Infof("Signaling server configured with %d ICE servers", len(cfg.WebRTC.ICEServers))
+
+	// 配置信令消息处理器
+	logger.Info("Configuring signaling message handler...")
+	signalingClients := make(map[string]*webrtc.SignalingClient)
+	var clientsMutex sync.Mutex
+
+	webserverMgr.SetSignalingMessageHandler(func(clientID string, messageType string, data map[string]interface{}) error {
+		clientsMutex.Lock()
+		client, ok := signalingClients[clientID]
+		if !ok {
+			// 创建新的信令客户端
+			sendFunc := func(msg *protocol.StandardMessage) error {
+				return webserverMgr.GetSignalingServer().SendMessageByClientID(clientID, msg)
+			}
+			client = webrtc.NewSignalingClient(clientID, "bdwind", sendFunc, eventBus)
+			signalingClients[clientID] = client
+			logger.Infof("Created new signaling client handler for %s", clientID)
+		}
+		clientsMutex.Unlock()
+
+		// 构造标准消息
+		msg := &protocol.StandardMessage{
+			Type: protocol.MessageType(messageType),
+			Data: data,
+		}
+
+		// 尝试从数据中恢复元数据
+		if peerID, ok := data["peer_id"].(string); ok {
+			msg.PeerID = peerID
+		}
+		if timestamp, ok := data["timestamp"].(int64); ok {
+			msg.Timestamp = timestamp
+		} else if timestamp, ok := data["timestamp"].(float64); ok {
+			msg.Timestamp = int64(timestamp)
+		}
+
+		// 处理消息
+		client.HandleMessage(msg)
+		return nil
+	})
 
 	// 创建监控管理器
 	logger.Info("Creating metrics manager...")

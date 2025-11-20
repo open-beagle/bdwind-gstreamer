@@ -66,6 +66,7 @@ type StreamSession struct {
 // 只负责WebSocket连接管理和消息路由，不处理WebRTC逻辑
 type SignalingServer struct {
 	connections   map[*websocket.Conn]*ConnectionInfo
+	connectionMap map[string]*ConnectionInfo // 新增：按ID索引的连接映射
 	streamClients map[string]*StreamClientInfo
 	uiClients     map[string]*UIClientInfo
 	sessions      map[string]*StreamSession
@@ -76,6 +77,9 @@ type SignalingServer struct {
 	running       bool
 	ctx           context.Context
 	cancel        context.CancelFunc
+
+	// WebRTC配置
+	webrtcConfig *config.WebRTCConfig
 
 	// 业务消息处理回调
 	businessMessageHandler func(clientID string, messageType string, data map[string]interface{}) error
@@ -93,6 +97,7 @@ func NewSignalingServer() *SignalingServer {
 
 	server := &SignalingServer{
 		connections:   make(map[*websocket.Conn]*ConnectionInfo),
+		connectionMap: make(map[string]*ConnectionInfo), // 初始化
 		streamClients: make(map[string]*StreamClientInfo),
 		uiClients:     make(map[string]*UIClientInfo),
 		sessions:      make(map[string]*StreamSession),
@@ -149,6 +154,14 @@ func (s *SignalingServer) SetupRoutes(router *mux.Router) error {
 	return nil
 }
 
+// SetWebRTCConfig 设置WebRTC配置
+func (s *SignalingServer) SetWebRTCConfig(cfg *config.WebRTCConfig) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.webrtcConfig = cfg
+	s.logger.Infof("WebRTC config set with %d ICE servers", len(cfg.ICEServers))
+}
+
 // Start 启动信令服务器
 func (s *SignalingServer) Start(ctx context.Context) error {
 	s.mutex.Lock()
@@ -194,6 +207,7 @@ func (s *SignalingServer) Stop(ctx context.Context) error {
 
 	// 清空映射
 	s.connections = make(map[*websocket.Conn]*ConnectionInfo)
+	s.connectionMap = make(map[string]*ConnectionInfo)
 	s.streamClients = make(map[string]*StreamClientInfo)
 	s.uiClients = make(map[string]*UIClientInfo)
 	s.sessions = make(map[string]*StreamSession)
@@ -286,9 +300,22 @@ func (s *SignalingServer) registerConnection(conn *websocket.Conn, info *Connect
 	defer s.mutex.Unlock()
 
 	s.connections[conn] = info
+	s.connectionMap[info.ID] = info
 	s.totalConnections++
 
 	s.logger.Infof("Connection registered: %s from %s", info.ID, info.RemoteAddr)
+
+	// 准备ICE服务器配置
+	var iceServers []protocol.ICEServer
+	if s.webrtcConfig != nil {
+		for _, server := range s.webrtcConfig.ICEServers {
+			iceServers = append(iceServers, protocol.ICEServer{
+				URLs:       server.URLs,
+				Username:   server.Username,
+				Credential: server.Credential,
+			})
+		}
+	}
 
 	// 发送欢迎消息
 	welcome := &protocol.StandardMessage{
@@ -300,9 +327,15 @@ func (s *SignalingServer) registerConnection(conn *websocket.Conn, info *Connect
 			ClientID:   info.ID,
 			ServerTime: time.Now().Unix(),
 			Protocol:   string(protocol.ProtocolVersionGStreamer10),
+			SessionConfig: &protocol.SessionConfig{
+				HeartbeatInterval: 30,
+				MaxMessageSize:    1024 * 1024,
+				ICEServers:        iceServers,
+			},
 		},
 	}
 
+	s.logger.Infof("📤 Sending welcome with %d ICE servers to client %s", len(iceServers), info.ID)
 	s.sendMessage(info, welcome)
 }
 
@@ -330,7 +363,9 @@ func (s *SignalingServer) unregisterConnection(conn *websocket.Conn) {
 	}
 
 	// 从连接映射中移除
+	// 从连接映射中移除
 	delete(s.connections, conn)
+	delete(s.connectionMap, info.ID)
 	close(info.Send)
 
 	s.logger.Infof("Connection unregistered: %s (connected for: %v)", info.ID, duration)
@@ -416,6 +451,40 @@ func (s *SignalingServer) sendMessage(info *ConnectionInfo, message *protocol.St
 	default:
 		return fmt.Errorf("send channel full")
 	}
+}
+
+// SendMessageByClientID 通过客户端ID发送消息
+func (s *SignalingServer) SendMessageByClientID(clientID string, message *protocol.StandardMessage) error {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// 查找目标连接
+	var targetInfo *ConnectionInfo
+
+	// 先在推流客户端中查找
+	if streamClient, exists := s.streamClients[clientID]; exists {
+		targetInfo = streamClient.ConnectionInfo
+	}
+
+	// 再在UI客户端中查找
+	if targetInfo == nil {
+		if uiClient, exists := s.uiClients[clientID]; exists {
+			targetInfo = uiClient.ConnectionInfo
+		}
+	}
+
+	// 最后在通用连接映射中查找
+	if targetInfo == nil {
+		if info, exists := s.connectionMap[clientID]; exists {
+			targetInfo = info
+		}
+	}
+
+	if targetInfo == nil {
+		return fmt.Errorf("client not found: %s", clientID)
+	}
+
+	return s.sendMessage(targetInfo, message)
 }
 
 // RegisterStreamClient 注册推流客户端

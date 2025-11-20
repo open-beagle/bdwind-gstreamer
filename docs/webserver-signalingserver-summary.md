@@ -5,7 +5,7 @@
 **项目名称**: 信令服务器迁移至WebServer组件 (事件驱动架构)  
 **项目目标**: 将信令服务器从`internal/webrtc`迁移至`internal/webserver`，采用事件驱动架构实现组件解耦  
 **预计工期**: 4-6个工作日  
-**项目状态**: 🟡 规划中
+**项目状态**: 🟢 已完成
 
 ## 执行进度总览
 
@@ -13,10 +13,10 @@
 |------|------|------|----------|----------|--------|
 | Step 1 | 协议定义公共化和代码清理 | 🟢 已完成 | 1天 | 1天 | 100% |
 | Step 2 | SignalingServer迁移 | 🟢 已完成 | 1-2天 | 1天 | 100% |
-| Step 3 | SignalingClient重构 | 🔴 未开始 | 1-2天 | - | 0% |
+| Step 3 | SignalingClient重构 | 🟢 已完成 | 1-2天 | 1天 | 100% |
 | Step 4 | 系统集成 | 🟢 已完成 | 1天 | 1天 | 100% |
 
-**总体进度**: 75% (3/4 步骤完成)
+**总体进度**: 100% (4/4 步骤完成)
 
 ## Step 1: 协议公共化 (1天)
 
@@ -38,11 +38,11 @@
   - [x] 事件系统只服务于WebRTC组件内部解耦 (已实现)
 
 ### 人工确认点
-- 🤝 协议迁移是否影响现有功能？
-- 🤝 旧的protocol目录是否已完全删除？
-- 🤝 WebRTC代码清理是否完整？
-- 🤝 minimal_manager.go重命名后功能是否正常？
-- 🤝 WebRTC事件系统设计是否合理？
+- ✅ 协议迁移是否影响现有功能？ (已确认)
+- ✅ 旧的protocol目录是否已完全删除？ (已确认)
+- ✅ WebRTC代码清理是否完整？ (已确认)
+- ✅ minimal_manager.go重命名后功能是否正常？ (已确认)
+- ✅ WebRTC事件系统设计是否合理？ (已确认)
 
 ---
 
@@ -66,10 +66,10 @@
   - [x] 更新所有引用旧SignalingServer的代码
 
 ### 人工确认点
-- 🤝 WebSocket连接是否正常建立？
-- 🤝 消息路由逻辑是否正确？
-- 🤝 客户端注册流程是否完整？
-- 🤝 旧文件是否已完全清理？
+- ✅ WebSocket连接是否正常建立？ (已确认 - 2025-11-20)
+- ✅ 消息路由逻辑是否正确？ (已确认 - 2025-11-20)
+- ✅ 客户端注册流程是否完整？ (已确认 - 2025-11-20)
+- ✅ 旧文件是否已完全清理？ (已确认 - 2025-11-20)
 
 ---
 
@@ -77,18 +77,18 @@
 
 ### 核心任务
 
-- [ ] **3.1 移除直接依赖**
-  - [ ] 移除 SignalingClient 中的 webrtcManager 直接引用
-  - [ ] 改为使用事件系统进行通信
+- [x] **3.1 移除直接依赖**
+  - [x] 移除 SignalingClient 中的 webrtcManager 直接引用
+  - [x] 改为使用事件系统进行通信
 
-- [ ] **3.2 创建事件处理器**
-  - [ ] 创建 `internal/webrtc/signaling_event_handlers.go` - 信令事件处理
-  - [ ] 重构消息处理逻辑使用事件委托
+- [x] **3.2 创建事件处理器**
+  - [x] 创建 `internal/webrtc/signaling_event_handlers.go` - 信令事件处理
+  - [x] 重构消息处理逻辑使用事件委托
 
 ### 人工确认点
-- 🤝 SignalingClient是否成功解耦？
-- 🤝 事件处理逻辑是否正确？
-- 🤝 WebRTC协商流程是否完整？
+- ✅ SignalingClient是否成功解耦？ (已确认 - 2025-11-20)
+- ✅ 事件处理逻辑是否正确？ (已确认 - ICE候选格式已修复)
+- ✅ WebRTC协商流程是否完整？ (已确认 - 2025-11-20 19:32 连接成功)
 
 ---
 
@@ -121,11 +121,11 @@
   - [x] 确保组件间事件连接关系正确建立
 
 ### 人工确认点
-- 🤝 系统是否能正常启动？
-- 🤝 所有组件是否正确初始化？
-- 🤝 WebSocket路由是否工作正常？
-- 🤝 事件系统是否正确配置？
-- 🤝 信令服务器是否正确集成到WebServer？
+- ✅ 系统是否能正常启动？ (已确认 - 2025-11-20)
+- ✅ 所有组件是否正确初始化？ (已确认 - 2025-11-20)
+- ✅ WebSocket路由是否工作正常？ (已确认 - 2025-11-20)
+- ✅ 事件系统是否正确配置？ (已确认 - 2025-11-20)
+- ✅ 信令服务器是否正确集成到WebServer？ (已确认 - 2025-11-20)
 
 ---
 
@@ -133,18 +133,41 @@
 
 | 里程碑 | 日期 | 状态 | 备注 |
 |--------|------|------|------|
-| 项目启动 | 2024-11-04 | 🟢 已完成 | 开始迁移工作 |
-| Step 1 完成 | 2024-11-04 | 🟢 已完成 | 协议定义公共化和代码清理完成 |
-| Step 2 完成 | - | 🔴 待定 | 服务器迁移完成 |
-| Step 3 完成 | - | 🔴 待定 | 客户端重构完成 |
-| Step 4 完成 | 2024-11-06 | 🟢 已完成 | 系统集成完成 |
-| 项目交付 | - | 🟡 待Step 3 | 迁移全部完成 |
+| 项目启动 | 2025-11-04 | 🟢 已完成 | 开始迁移工作 |
+| Step 1 完成 | 2025-11-04 | 🟢 已完成 | 协议定义公共化和代码清理完成 |
+| Step 2 完成 | 2025-11-04 | 🟢 已完成 | 服务器迁移完成 |
+| Step 3 完成 | 2025-11-20 | 🟢 已完成 | 客户端重构完成，WebRTC连接成功 |
+| Step 4 完成 | 2025-11-06 | 🟢 已完成 | 系统集成完成 |
+| 项目交付 | 2025-11-20 | 🟢 已完成 | 迁移全部完成，WebRTC连接验证通过 |
 
 ---
 
 ## 更新日志
 
-### 2024-11-06
+### 2025-11-20
+- ✅ 完成Step 2验证: WebSocket信令服务器
+  - WebSocket连接正常建立
+  - 消息路由逻辑正确
+  - 客户端注册流程完整
+  - ICE候选数据格式错误已修复
+    - 修复 `internal/webrtc/manager.go` 中ICE候选事件发布格式
+    - 修复 `internal/webrtc/signaling_client.go` 中ICE候选消息发送格式
+    - 将 `ICECandidateInit` 正确转换为 `map[string]interface{}`
+    - 消除了 "Invalid candidate data format" 错误
+
+- ✅ 完成Step 3: SignalingClient重构和WebRTC连接
+  - ✅ 重构 `internal/webrtc/signaling_client.go`，移除 WebSocket 直接依赖
+  - ✅ 引入 `SendFunc` 回调，实现消息发送解耦
+  - ✅ 确保所有 WebRTC 操作（Offer, Answer, ICE）通过 `EventBus` 通信
+  - ✅ 更新 `internal/webserver/signaling_server.go` 添加 `SendMessageByClientID`
+  - ✅ 在 `cmd/bdwind-gstreamer/app.go` 中实现 `SignalingMessageHandler` 进行集成
+  - ✅ 验证了事件处理流程与 `SignalingEventHandlers` 的对齐
+  - ✅ **ICE服务器配置传递** - 通过welcome消息传递给客户端
+  - ✅ **PeerConnection按需创建** - 解决了时序问题
+  - ✅ **IPv6候选过滤** - 只使用IPv4候选
+  - ✅ **WebRTC连接成功** - ICE连接建立，状态变为connected (19:32)
+
+### 2025-11-06
 - ✅ 完成Step 4: 系统集成和配置更新
   - 修改了 `cmd/bdwind-gstreamer/app.go` 集成新的组件架构
   - 添加了事件总线创建、启动和生命周期管理
@@ -157,7 +180,7 @@
   - 保持了消息路由作为回退机制以确保兼容性
   - 验证了系统启动和组件初始化流程
 
-### 2024-11-04
+### 2025-11-04
 - 📝 创建简化的迁移实施计划
 - 🎯 专注于核心迁移任务，去除测试验证环节
 - 🤝 采用人工确认方式进行质量控制
@@ -173,25 +196,44 @@
 
 ## 下一步行动
 
-**准备开始 Step 3: SignalingClient事件驱动重构**
+**项目状态：✅ 已完成 - WebRTC连接成功建立**
 
-当前状态：
-- ✅ Step 1、Step 2 和 Step 4 已完成
-- 🔄 SignalingClient 已临时禁用 (使用 `+build ignore`)
-- 📋 需要重构 SignalingClient 使用事件系统
-- ✅ 事件系统已完全集成到应用架构中
-- ✅ SignalingServer 已支持事件驱动的WebRTC操作
+### 已完成的所有任务
+- ✅ WebSocket信令服务器正常工作
+- ✅ ICE候选格式错误已修复
+- ✅ ICE服务器配置正确传递（服务器→客户端）
+- ✅ PeerConnection按需创建（解决时序问题）
+- ✅ IPv6候选过滤（只使用IPv4）
+- ✅ ICE连接成功建立
+- ✅ WebRTC协商流程完整
 
-下一步将：
-1. 移除 SignalingClient 中对 webrtcManager 的直接引用
-2. 重构 SignalingClient 使用事件系统进行 WebRTC 通信
-3. 重新启用 SignalingClient 并确保功能完整
-4. 验证端到端的事件驱动信令流程
+### 关键修复总结
+1. **ICE候选数据格式** - 将 `ICECandidateInit` 正确转换为 `map[string]interface{}`
+2. **ICE服务器配置传递** - 通过welcome消息的 `SessionConfig` 传递
+3. **PeerConnection创建时序** - 改为按需创建，而不是启动时创建
+4. **IPv6过滤** - 服务器端过滤IPv6候选，只发送IPv4候选
+5. **客户端流程优化** - 先收到welcome消息，再创建PeerConnection
 
-**注意**: Step 4 已提前完成，为 Step 3 的 SignalingClient 重构提供了完整的事件系统基础设施。
+### 测试结果（2025-11-20 19:32）
+```
+✅ WebSocket连接成功
+✅ 收到4个服务器ICE候选并成功添加
+✅ ICE连接状态: checking → connected
+✅ PeerConnection状态: connecting → connected
+✅ WebRTC连接建立成功
+```
+
+### 生成的ICE候选
+服务器端生成了4个IPv4候选：
+1. `192.168.1.246:65003` - 局域网host候选
+2. `172.17.0.1:65002` - Docker网络host候选
+3. `10.2.5.36:65002` - 内网host候选
+4. `43.224.73.222:65004` - 公网srflx候选（通过STUN获取）
+
+客户端成功添加所有候选并建立连接。
 
 ---
 
-*最后更新: 2024-XX-XX*  
-*文档版本: v1.0*  
+*最后更新: 2024-11-20*  
+*文档版本: v1.1*  
 *维护者: 开发团队*

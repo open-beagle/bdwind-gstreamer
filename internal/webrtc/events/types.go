@@ -13,6 +13,7 @@ const (
 	EventCreateOffer     EventType = "webrtc.create_offer"
 	EventProcessAnswer   EventType = "webrtc.process_answer"
 	EventAddICECandidate EventType = "webrtc.add_ice_candidate"
+	EventOnICECandidate  EventType = "webrtc.on_ice_candidate"
 
 	// 媒体流事件
 	EventStartStreaming EventType = "media.start_streaming"

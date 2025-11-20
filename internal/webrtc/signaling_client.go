@@ -1,12 +1,11 @@
 package webrtc
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
@@ -14,16 +13,17 @@ import (
 	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 )
 
+// SendFunc 定义发送消息的函数类型
+type SendFunc func(message *protocol.StandardMessage) error
+
 // SignalingClient 信令客户端
+// 负责处理 WebRTC 相关的业务逻辑，通过 EventBus 与 WebRTCManager 交互
 type SignalingClient struct {
 	ID               string
 	AppName          string
-	Conn             *websocket.Conn
-	Send             chan []byte
+	SendFunc         SendFunc // 发送消息的回调函数
 	LastSeen         time.Time
 	ConnectedAt      time.Time
-	RemoteAddr       string
-	UserAgent        string
 	State            ClientState
 	MessageCount     int64
 	ErrorCount       int64
@@ -49,29 +49,32 @@ const (
 )
 
 // NewSignalingClient 创建新的信令客户端
-func NewSignalingClient(appName string, conn *websocket.Conn, eventBus events.EventBus) *SignalingClient {
-	clientID := generateSignalingClientID()
+func NewSignalingClient(id string, appName string, sendFunc SendFunc, eventBus events.EventBus) *SignalingClient {
 	now := time.Now()
 
-	return &SignalingClient{
-		ID:           clientID,
+	client := &SignalingClient{
+		ID:           id,
 		AppName:      appName,
-		Conn:         conn,
-		Send:         make(chan []byte, 256),
+		SendFunc:     sendFunc,
 		LastSeen:     now,
 		ConnectedAt:  now,
-		RemoteAddr:   conn.RemoteAddr().String(),
-		UserAgent:    conn.Subprotocol(),
-		State:        ClientStateConnecting,
+		State:        ClientStateConnected,
 		MessageCount: 0,
 		ErrorCount:   0,
-		logger:       config.GetLoggerWithPrefix(fmt.Sprintf("signaling-client-%s", clientID)),
+		logger:       config.GetLoggerWithPrefix(fmt.Sprintf("signaling-client-%s", id)),
 		eventBus:     eventBus,
 	}
+
+	// 订阅本地 ICE candidate 事件
+	if eventBus != nil {
+		eventBus.Subscribe(events.EventOnICECandidate, events.EventHandlerFunc(client.handleOnICECandidate))
+	}
+
+	return client
 }
 
-// setState 设置客户端状态
-func (c *SignalingClient) setState(state ClientState) {
+// SetState 设置客户端状态
+func (c *SignalingClient) SetState(state ClientState) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -83,8 +86,8 @@ func (c *SignalingClient) setState(state ClientState) {
 	}
 }
 
-// getState 获取客户端状态
-func (c *SignalingClient) getState() ClientState {
+// GetState 获取客户端状态
+func (c *SignalingClient) GetState() ClientState {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.State
@@ -108,294 +111,27 @@ func (c *SignalingClient) incrementMessageCount() {
 	c.MessageCount++
 }
 
-// sendMessage 发送消息给客户端
-func (c *SignalingClient) sendMessage(message *protocol.StandardMessage) error {
-	messageBytes, err := json.Marshal(message)
-	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	if len(messageBytes) > MaxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max: %d)", len(messageBytes), MaxMessageSize)
-	}
-
-	select {
-	case c.Send <- messageBytes:
-		return nil
-	default:
-		return ErrSignalingSendChannelFull
-	}
-}
-
-// sendStandardMessage 发送标准化消息给客户端
-func (c *SignalingClient) sendStandardMessage(message *protocol.StandardMessage) error {
+// HandleMessage 处理接收到的消息
+func (c *SignalingClient) HandleMessage(message *protocol.StandardMessage) {
 	if message == nil {
-		return fmt.Errorf("message is nil")
-	}
-
-	// 获取客户端协议版本
-	c.mutex.RLock()
-	clientProtocol := c.Protocol
-	c.mutex.RUnlock()
-
-	// 如果未检测到协议，使用默认协议
-	if clientProtocol == "" {
-		clientProtocol = protocol.ProtocolVersionGStreamer10
-	}
-
-	// 使用消息路由器格式化消息 - TODO: Refactor in Step 3
-	messageBytes, err := json.Marshal(message)
-	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	if len(messageBytes) > MaxMessageSize {
-		return fmt.Errorf("message too large: %d bytes (max: %d)", len(messageBytes), MaxMessageSize)
-	}
-
-	select {
-	case c.Send <- messageBytes:
-		c.logger.Infof("📤 Standard message sent to client %s: type=%s, protocol=%s",
-			c.ID, message.Type, clientProtocol)
-		return nil
-	default:
-		return ErrSignalingSendChannelFull
-	}
-}
-
-// sendError 发送错误消息给客户端
-func (c *SignalingClient) sendError(signalingError *protocol.MessageError) {
-	errorMessage := &protocol.StandardMessage{
-		Version:   protocol.ProtocolVersionGStreamer10,
-		Type:      protocol.MessageTypeError,
-		ID:        generateMessageID(),
-		PeerID:    c.ID,
-		Timestamp: time.Now().Unix(),
-		Error:     signalingError,
-	}
-
-	if err := c.sendMessage(errorMessage); err != nil {
-		c.logger.Infof("Failed to send error message to client %s: %v", c.ID, err)
-	}
-}
-
-// readPump 读取客户端消息
-func (c *SignalingClient) readPump() {
-	defer func() {
-		c.setState(ClientStateDisconnected)
-		c.logger.Infof("Client %s read pump exiting (connected for %v, messages: %d, errors: %d)",
-			c.ID, time.Since(c.ConnectedAt), c.MessageCount, c.ErrorCount)
-		// Client disconnection will be handled by the signaling server
-		c.Conn.Close()
-	}()
-
-	// 设置读取超时为更长时间，避免频繁超时
-	c.Conn.SetReadDeadline(time.Now().Add(300 * time.Second)) // 5分钟
-	c.Conn.SetPongHandler(func(string) error {
-		c.Conn.SetReadDeadline(time.Now().Add(300 * time.Second))
-		c.LastSeen = time.Now()
-		c.logger.Infof("🏓 Pong received from client %s", c.ID)
-		return nil
-	})
-
-	c.logger.Infof("Client %s read pump started", c.ID)
-
-	for {
-		messageType, messageBytes, err := c.Conn.ReadMessage()
-		if err != nil {
-			// 详细的错误处理和记录
-			var signalingError *protocol.MessageError
-
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
-				c.logger.Infof("WebSocket unexpected close error for client %s: %v", c.ID, err)
-				signalingError = &SignalingError{
-					Code:    protocol.ErrorCodeConnectionLost,
-					Message: "WebSocket connection lost unexpectedly",
-					Details: err.Error(),
-					Type:    "connection_error",
-				}
-			} else if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				c.logger.Infof("WebSocket connection closed normally for client %s: %v", c.ID, err)
-				signalingError = &SignalingError{
-					Code:    protocol.ErrorCodeConnectionLost,
-					Message: "WebSocket connection closed",
-					Details: err.Error(),
-					Type:    "connection_info",
-				}
-			} else {
-				c.logger.Infof("WebSocket read error for client %s: %v", c.ID, err)
-				signalingError = &protocol.MessageError{
-					Code:    protocol.ErrorCodeConnectionFailed,
-					Message: "WebSocket read error",
-					Details: err.Error(),
-					Type:    "connection_error",
-				}
-			}
-
-			c.recordError(signalingError)
-			break
-		}
-
-		c.LastSeen = time.Now()
-
-		// 检查消息大小
-		if len(messageBytes) > MaxMessageSize {
-			c.logger.Infof("Message too large from client %s: %d bytes (max: %d)", c.ID, len(messageBytes), MaxMessageSize)
-			signalingError := &SignalingError{
-				Code:    ErrorCodeMessageTooLarge,
-				Message: fmt.Sprintf("Message too large: %d bytes (max: %d)", len(messageBytes), MaxMessageSize),
-				Type:    "validation_error",
-			}
-			c.recordError(signalingError)
-			c.sendError(signalingError)
-			continue
-		}
-
-		// 只处理文本消息
-		if messageType == websocket.TextMessage {
-			c.logger.Infof("📨 Raw message received from client %s (length: %d bytes)", c.ID, len(messageBytes))
-
-			// 增加消息计数
-			c.incrementMessageCount()
-
-			// 使用消息路由器处理消息
-			c.handleMessageWithRouter(messageBytes)
-		} else {
-			c.logger.Infof("Received non-text message from client %s (type: %d, length: %d)", c.ID, messageType, len(messageBytes))
-			signalingError := &SignalingError{
-				Code:    ErrorCodeInvalidMessage,
-				Message: "Only text messages are supported",
-				Details: fmt.Sprintf("Received message type: %d", messageType),
-				Type:    "validation_error",
-			}
-			c.recordError(signalingError)
-			c.sendError(signalingError)
-		}
-	}
-}
-
-// writePump 向客户端发送消息
-func (c *SignalingClient) writePump() {
-	ticker := time.NewTicker(240 * time.Second) // 4分钟ping一次，避免过于频繁
-	defer func() {
-		c.setState(ClientStateDisconnecting)
-		c.logger.Infof("Client %s write pump exiting", c.ID)
-		ticker.Stop()
-		c.Conn.Close()
-	}()
-
-	c.logger.Infof("Client %s write pump started", c.ID)
-
-	for {
-		select {
-		case message, ok := <-c.Send:
-			c.Conn.SetWriteDeadline(time.Now().Add(30 * time.Second)) // 增加写入超时时间
-			if !ok {
-				c.logger.Infof("Send channel closed for client %s", c.ID)
-				c.Conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Server shutting down"))
-				return
-			}
-
-			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				c.logger.Infof("❌ WebSocket write error for client %s: %v", c.ID, err)
-				signalingError := &SignalingError{
-					Code:    ErrorCodeConnectionFailed,
-					Message: "WebSocket write error",
-					Details: err.Error(),
-					Type:    "connection_error",
-				}
-				c.recordError(signalingError)
-				return
-			}
-
-			c.logger.Infof("📤 Message sent to client %s (length: %d bytes)", c.ID, len(message))
-
-		case <-ticker.C:
-			c.Conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				c.logger.Infof("❌ WebSocket ping failed for client %s: %v", c.ID, err)
-				signalingError := &SignalingError{
-					Code:    ErrorCodeConnectionTimeout,
-					Message: "WebSocket ping failed",
-					Details: err.Error(),
-					Type:    "connection_error",
-				}
-				c.recordError(signalingError)
-				return
-			}
-			c.logger.Infof("🏓 Ping sent to client %s", c.ID)
-		}
-	}
-}
-
-// handleMessageWithRouter 使用消息路由器处理客户端消息
-func (c *SignalingClient) handleMessageWithRouter(messageBytes []byte) {
-	startTime := time.Now()
-
-	// 如果是第一条消息且未检测协议，进行协议自动检测
-	if c.MessageCount == 1 && !c.ProtocolDetected {
-		c.autoDetectProtocol(messageBytes)
-	}
-
-	// Simplified message handling for event-driven architecture
-	// TODO: Implement proper message routing in Step 4
-	processingTime := time.Since(startTime)
-	c.logger.Infof("📨 Processing message from client %s (length: %d bytes, processing time: %dms)",
-		c.ID, len(messageBytes), processingTime.Milliseconds())
-
-	// For now, create a basic standard message for compatibility
-	var message protocol.StandardMessage
-	if err := json.Unmarshal(messageBytes, &message); err != nil {
-		c.logger.Infof("❌ Failed to parse message from client %s: %v", c.ID, err)
-		c.handleProtocolError("MESSAGE_PARSING_FAILED", err.Error())
+		c.logger.Warnf("Received nil message for client %s", c.ID)
 		return
 	}
 
-	// Handle the standard message
-	c.handleStandardMessage(&message, protocol.ProtocolVersionGStreamer10)
-}
-
-// autoDetectProtocol 自动检测客户端协议
-func (c *SignalingClient) autoDetectProtocol(messageBytes []byte) {
-	// 简化的协议检测，使用默认协议
 	c.mutex.Lock()
-	c.Protocol = protocol.ProtocolVersionGStreamer10
-	c.ProtocolDetected = true
+	c.LastSeen = time.Now()
+	c.MessageCount++
+	// 如果未检测到协议，默认使用 GStreamer1.0
+	if !c.ProtocolDetected {
+		c.Protocol = protocol.ProtocolVersionGStreamer10
+		c.ProtocolDetected = true
+	}
 	c.mutex.Unlock()
-
-	c.logger.Infof("🔍 Protocol set for client %s: %s (default)", c.ID, c.Protocol)
-
-	// 通过事件总线发布协议检测事件
-	if c.eventBus != nil {
-		protocolEvent := events.NewSignalingEvent(
-			events.EventSignalingMessage,
-			c.ID,
-			"protocol-detected",
-			c.ID,
-			map[string]interface{}{
-				"protocol": c.Protocol,
-				"method":   "default",
-			},
-		)
-		c.eventBus.Publish(protocolEvent)
-	}
-}
-
-// handleStandardMessage 处理标准化消息
-func (c *SignalingClient) handleStandardMessage(message *protocol.StandardMessage, originalProtocol protocol.ProtocolVersion) {
-	if message == nil {
-		c.logger.Infof("❌ Received nil standard message from client %s", c.ID)
-		return
-	}
 
 	startTime := time.Now()
 	messageType := string(message.Type)
 
-	c.logger.Infof("📨 Processing standard message from client %s: type=%s, protocol=%s",
-		c.ID, message.Type, originalProtocol)
-
-	// 更新客户端最后活动时间
-	c.LastSeen = time.Now()
+	c.logger.Infof("📨 Processing message from client %s: type=%s", c.ID, messageType)
 
 	var success bool = true
 
@@ -422,6 +158,37 @@ func (c *SignalingClient) handleStandardMessage(message *protocol.StandardMessag
 	processingTime := time.Since(startTime)
 	c.logger.Infof("📨 Message processed for client %s: type=%s, time=%dms, success=%t",
 		c.ID, messageType, processingTime.Milliseconds(), success)
+}
+
+// sendStandardMessage 发送标准化消息给客户端
+func (c *SignalingClient) sendStandardMessage(message *protocol.StandardMessage) error {
+	if message == nil {
+		return fmt.Errorf("message is nil")
+	}
+
+	if c.SendFunc == nil {
+		return fmt.Errorf("send function is not set")
+	}
+
+	// 获取客户端协议版本
+	c.mutex.RLock()
+	clientProtocol := c.Protocol
+	c.mutex.RUnlock()
+
+	// 如果未检测到协议，使用默认协议
+	if clientProtocol == "" {
+		clientProtocol = protocol.ProtocolVersionGStreamer10
+	}
+
+	c.logger.Infof("📤 Sending standard message to client %s: type=%s, protocol=%s",
+		c.ID, message.Type, clientProtocol)
+
+	return c.SendFunc(message)
+}
+
+// sendError 发送错误消息给客户端
+func (c *SignalingClient) sendError(signalingError *protocol.MessageError) {
+	c.sendStandardErrorMessage(signalingError.Code, signalingError.Message, signalingError.Details)
 }
 
 // handleHelloMessage 处理 HELLO 消息
@@ -692,64 +459,6 @@ func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMe
 	c.logger.Infof("✅ ICE candidate processed successfully for client %s", c.ID)
 }
 
-// handleProtocolNegotiationMessage 处理协议协商消息
-func (c *SignalingClient) handleProtocolNegotiationMessage(message *protocol.StandardMessage) {
-	c.logger.Infof("🤝 Received protocol negotiation from client %s", c.ID)
-
-	// 创建简单的协议协商响应
-	response := &protocol.StandardMessage{
-		Version:   protocol.ProtocolVersionGStreamer10,
-		Type:      protocol.MessageType("protocol-negotiation-response"),
-		ID:        generateMessageID(),
-		PeerID:    c.ID,
-		Timestamp: time.Now().Unix(),
-		Data: map[string]interface{}{
-			"success":           true,
-			"selected_protocol": protocol.ProtocolVersionGStreamer10,
-			"capabilities":      []string{"webrtc", "input", "stats"},
-		},
-	}
-
-	// 发送协商响应
-	if err := c.sendStandardMessage(response); err != nil {
-		c.logger.Infof("❌ Failed to send protocol negotiation response to client %s: %v", c.ID, err)
-	} else {
-		c.logger.Infof("✅ Protocol negotiation completed for client %s", c.ID)
-	}
-}
-
-// handleProtocolError 处理协议错误
-func (c *SignalingClient) handleProtocolError(errorCode, errorMessage string) {
-	c.logger.Infof("❌ Protocol error for client %s: %s - %s", c.ID, errorCode, errorMessage)
-
-	// 简化的协议降级处理
-	if c.Protocol != "" {
-		c.logger.Infof("🔄 Protocol error for client %s, maintaining current protocol: %s", c.ID, c.Protocol)
-
-		// 发送协议错误通知
-		errorNotification := &protocol.StandardMessage{
-			Version:   protocol.ProtocolVersionGStreamer10,
-			Type:      protocol.MessageType("protocol-error"),
-			ID:        generateMessageID(),
-			PeerID:    c.ID,
-			Timestamp: time.Now().Unix(),
-			Data: map[string]interface{}{
-				"error_code": errorCode,
-				"message":    errorMessage,
-				"protocol":   c.Protocol,
-			},
-		}
-
-		if err := c.sendStandardMessage(errorNotification); err != nil {
-			c.logger.Infof("❌ Failed to send protocol error notification to client %s: %v", c.ID, err)
-		}
-		return
-	}
-
-	// 如果无法降级，发送错误消息
-	c.sendStandardErrorMessage(errorCode, errorMessage, "Protocol error occurred")
-}
-
 // sendStandardErrorMessage 发送标准错误消息
 func (c *SignalingClient) sendStandardErrorMessage(code, message, details string) {
 	c.logger.Infof("🚨 Sending error to client %s - Code: %s, Message: %s", c.ID, code, message)
@@ -777,4 +486,42 @@ func (c *SignalingClient) sendStandardErrorMessage(code, message, details string
 			Type:    "error_send_failure",
 		})
 	}
+}
+
+// handleOnICECandidate 处理本地生成的 ICE candidate 事件
+func (c *SignalingClient) handleOnICECandidate(ctx context.Context, event events.Event) (*events.EventResult, error) {
+	// 检查是否是当前会话的 candidate
+	if event.SessionID() != c.ID {
+		return nil, nil // 忽略其他会话的事件
+	}
+
+	c.logger.Debugf("Handling OnICECandidate event for session: %s", event.SessionID())
+
+	// 提取 candidate 数据
+	eventData := event.Data()
+	candidateData, ok := eventData["candidate"].(map[string]interface{})
+	if !ok {
+		c.logger.Error("Invalid candidate data format in event")
+		return nil, fmt.Errorf("invalid candidate data format")
+	}
+
+	// 构造发送给客户端的消息
+	// 将 candidateData 的内容直接放到 Data 中，而不是嵌套在 candidate 字段下
+	iceMessage := &protocol.StandardMessage{
+		Version:   protocol.ProtocolVersionGStreamer10,
+		Type:      protocol.MessageTypeICECandidate,
+		ID:        generateMessageID(),
+		PeerID:    c.ID,
+		Timestamp: time.Now().Unix(),
+		Data:      candidateData, // 直接使用 candidateData
+	}
+
+	// 发送给客户端
+	if err := c.sendStandardMessage(iceMessage); err != nil {
+		c.logger.Errorf("Failed to send ICE candidate to client: %v", err)
+		return nil, err
+	}
+
+	c.logger.Infof("📤 Sent ICE candidate to client %s", c.ID)
+	return events.SuccessResult("ICE candidate sent to client", nil), nil
 }

@@ -55,6 +55,9 @@ func (h *SignalingEventHandlers) HandleCreateOffer(ctx context.Context, event ev
 			fmt.Errorf("WebRTC manager not available")
 	}
 
+	// 设置当前会话ID
+	h.webrtcManager.SetCurrentSessionID(event.SessionID())
+
 	// 创建 SDP Offer
 	offer, err := h.webrtcManager.CreateOffer()
 	if err != nil {
