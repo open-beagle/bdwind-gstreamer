@@ -14,15 +14,16 @@ import (
 // Manager webserver组件管理器
 // 实现 ComponentManager 接口，管理web服务器功能
 type Manager struct {
-	config    *config.WebServerConfig
-	server    *http.Server
-	webServer *WebServer
-	logger    *logrus.Entry
-	running   bool
-	startTime time.Time
-	mutex     sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
+	config          *config.WebServerConfig
+	server          *http.Server
+	webServer       *WebServer
+	signalingServer *SignalingServer
+	logger          *logrus.Entry
+	running         bool
+	startTime       time.Time
+	mutex           sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
 }
 
 // NewManager 创建新的webserver管理器
@@ -49,15 +50,19 @@ func NewManager(ctx context.Context, cfg *config.WebServerConfig) (*Manager, err
 		return nil, fmt.Errorf("failed to create webserver: %w", err)
 	}
 
+	// 创建信令服务器实例
+	signalingServer := NewSignalingServer()
+
 	// 创建子context
 	childCtx, cancel := context.WithCancel(ctx)
 
 	return &Manager{
-		config:    cfg,
-		webServer: webServer,
-		logger:    logger,
-		ctx:       childCtx,
-		cancel:    cancel,
+		config:          cfg,
+		webServer:       webServer,
+		signalingServer: signalingServer,
+		logger:          logger,
+		ctx:             childCtx,
+		cancel:          cancel,
 	}, nil
 }
 
@@ -76,7 +81,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// 记录配置信息
 	addr := fmt.Sprintf("%s:%d", m.config.Host, m.config.Port)
-	m.logger.Debugf("Webserver configuration: host=%s, port=%d, tls=%v, auth=%v, cors=%v", 
+	m.logger.Debugf("Webserver configuration: host=%s, port=%d, tls=%v, auth=%v, cors=%v",
 		m.config.Host, m.config.Port, m.config.EnableTLS, m.config.Auth.Enabled, m.config.EnableCORS)
 
 	// TLS配置验证和记录
@@ -84,7 +89,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.logger.Debug("TLS enabled, validating certificate files...")
 		m.logger.Debugf("TLS certificate file: %s", m.config.TLS.CertFile)
 		m.logger.Debugf("TLS key file: %s", m.config.TLS.KeyFile)
-		
+
 		// 验证TLS文件是否存在
 		if m.config.TLS.CertFile == "" || m.config.TLS.KeyFile == "" {
 			m.logger.Error("TLS enabled but certificate or key file not specified")
@@ -93,6 +98,22 @@ func (m *Manager) Start(ctx context.Context) error {
 	} else {
 		m.logger.Debug("TLS disabled, using HTTP")
 	}
+
+	// 启动信令服务器
+	m.logger.Debug("Starting signaling server...")
+	if err := m.signalingServer.Start(ctx); err != nil {
+		m.logger.Errorf("Failed to start signaling server: %v", err)
+		return fmt.Errorf("failed to start signaling server: %w", err)
+	}
+	m.logger.Debug("Signaling server started successfully")
+
+	// 注册信令服务器到webserver
+	m.logger.Debug("Registering signaling server with webserver...")
+	if err := m.webServer.RegisterComponent("signaling", m.signalingServer); err != nil {
+		m.logger.Errorf("Failed to register signaling server: %v", err)
+		return fmt.Errorf("failed to register signaling server: %w", err)
+	}
+	m.logger.Debug("Signaling server registered successfully")
 
 	// 获取处理器
 	m.logger.Debug("Setting up webserver handler...")
@@ -157,10 +178,10 @@ func (m *Manager) Start(ctx context.Context) error {
 	// 标记为运行状态
 	m.running = true
 	m.startTime = time.Now()
-	
+
 	duration := time.Since(startTime)
 	m.logger.Infof("Webserver started successfully on %s://%s in %v", protocol, addr, duration)
-	
+
 	// 记录服务状态
 	m.logger.Infof("Webserver ready to accept connections")
 	if m.config.Auth.Enabled {
@@ -187,6 +208,16 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// 取消context以通知所有子组件停止
 	if m.cancel != nil {
 		m.cancel()
+	}
+
+	// 停止信令服务器
+	if m.signalingServer != nil {
+		m.logger.Debug("Stopping signaling server...")
+		if err := m.signalingServer.Stop(ctx); err != nil {
+			m.logger.Errorf("Error stopping signaling server: %v", err)
+		} else {
+			m.logger.Debug("Signaling server stopped successfully")
+		}
 	}
 
 	// 优雅关闭HTTP服务器
@@ -249,6 +280,11 @@ func (m *Manager) GetStats() map[string]interface{} {
 		"tls_enabled":  m.config.EnableTLS,
 		"auth_enabled": m.config.Auth.Enabled,
 		"cors_enabled": m.config.EnableCORS,
+	}
+
+	// 添加信令服务器统计信息
+	if m.signalingServer != nil {
+		stats["signaling_server"] = m.signalingServer.GetStats()
 	}
 
 	return stats
@@ -323,4 +359,18 @@ func (m *Manager) IsTLSEnabled() bool {
 // IsCORSEnabled 检查CORS是否启用
 func (m *Manager) IsCORSEnabled() bool {
 	return m.config.EnableCORS
+}
+
+// GetSignalingServer 获取信令服务器实例
+func (m *Manager) GetSignalingServer() *SignalingServer {
+	return m.signalingServer
+}
+
+// SetSignalingMessageHandler 设置信令消息处理回调
+// 这允许主程序处理业务逻辑，而 WebServer 只负责消息路由
+func (m *Manager) SetSignalingMessageHandler(handler func(clientID string, messageType string, data map[string]interface{}) error) {
+	if m.signalingServer != nil {
+		m.signalingServer.SetBusinessMessageHandler(handler)
+		m.logger.Debug("Signaling message handler configured for webserver manager")
+	}
 }

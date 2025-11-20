@@ -1,6 +1,6 @@
-# WebRTC Protocol Adapters
+# Common Protocol Adapters
 
-This package implements protocol adapters for WebRTC signaling, providing standardized message handling and protocol conversion between different signaling formats.
+This package implements protocol adapters for signaling, providing standardized message handling and protocol conversion between different signaling formats.
 
 ## Overview
 
@@ -203,7 +203,7 @@ type ValidationError struct {
 
 Run the test suite:
 ```bash
-go test -v ./internal/webrtc/protocol
+go test -v ./internal/common/protocol
 ```
 
 ### Test Coverage

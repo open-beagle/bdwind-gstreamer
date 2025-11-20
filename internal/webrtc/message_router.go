@@ -6,8 +6,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
-	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 )
 
 // MessageRouter 消息路由器

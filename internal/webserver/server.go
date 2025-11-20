@@ -838,7 +838,7 @@ func (ws *WebServer) handleImplementationInfo(w http.ResponseWriter, r *http.Req
 					"Single media bridge",
 					"Simplified error handling",
 				},
-				"components": []string{"SimpleGStreamerManager", "MinimalWebRTCManager", "SimpleMediaBridge"},
+				"components": []string{"SimpleGStreamerManager", "WebRTCManager", "SimpleMediaBridge"},
 			},
 			"complex": map[string]interface{}{
 				"description": "Full-featured GStreamer and WebRTC implementation",

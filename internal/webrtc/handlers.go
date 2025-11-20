@@ -18,12 +18,12 @@ import (
 
 // webrtcHandlers WebRTC组件的HTTP处理器
 type webrtcHandlers struct {
-	manager *Manager
+	manager *WebRTCManager
 	logger  *logrus.Entry
 }
 
 // newWebRTCHandlers 创建WebRTC处理器实例
-func newWebRTCHandlers(manager *Manager) *webrtcHandlers {
+func newWebRTCHandlers(manager *WebRTCManager) *webrtcHandlers {
 	return &webrtcHandlers{
 		manager: manager,
 		logger:  config.GetLoggerWithPrefix("webrtc-handlers"),
@@ -225,21 +225,13 @@ func (h *webrtcHandlers) handleWebSocket(w http.ResponseWriter, r *http.Request)
 	h.logger.Trace("  - 连接状态: 已建立")
 	h.logger.Trace("  - 准备传递给信令服务器: 是")
 
-	// 获取当前活跃连接数
-	currentClientCount := h.manager.signaling.GetClientCount()
-	h.logger.Trace("连接统计:")
-	h.logger.Tracef("  - 当前活跃连接数: %d", currentClientCount)
-	h.logger.Tracef("  - 新连接后预期连接数: %d", currentClientCount+1)
+	// TODO: Signaling server will be implemented in task 2
+	// For now, just log the connection and close it
+	h.logger.Trace("WebSocket connection established, but signaling server not yet migrated")
+	h.logger.Trace("Connection will be closed - signaling server migration pending")
 
-	// 不要在这里关闭连接，让信令服务器管理连接生命周期
-	// 处理WebSocket连接
-	h.logger.Trace("将WebSocket连接传递给信令服务器处理...")
-	h.logger.Trace("信令服务器状态:")
-	h.logger.Tracef("  - 信令服务器对象: %p", h.manager.signaling)
-	h.logger.Tracef("  - 传递时间: %s", time.Now().Format("2006-01-02 15:04:05.000"))
-
-	// 调用信令服务器处理连接
-	h.manager.signaling.HandleWebSocketConnection(conn)
+	// Close the connection for now since signaling server is not yet migrated
+	conn.Close()
 
 	h.logger.Trace("WebSocket连接已成功传递给信令服务器处理")
 }
@@ -277,10 +269,11 @@ func (h *webrtcHandlers) handleSignaling(w http.ResponseWriter, r *http.Request)
 	h.logger.Trace("  - 握手超时: 10s")
 	h.logger.Trace("  - 跨域策略: 允许所有")
 
-	// 不要在这里关闭连接，让信令服务器管理连接生命周期
-	// 处理特定应用的信令连接
-	h.logger.Tracef("将应用信令连接传递给信令服务器处理: app=%s", appName)
-	h.manager.signaling.HandleAppConnection(conn, appName)
+	// TODO: App-specific signaling will be implemented in task 2
+	h.logger.Tracef("App signaling connection for %s - signaling server not yet migrated", appName)
+
+	// Close the connection for now since signaling server is not yet migrated
+	conn.Close()
 }
 
 // REST API处理器
@@ -292,8 +285,8 @@ func (h *webrtcHandlers) handlePeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 从信令服务器获取实际的客户端信息
-	clientCount := h.manager.signaling.GetClientCount()
+	// TODO: Client count will be available after signaling server migration in task 2
+	clientCount := 0 // Placeholder until signaling server is migrated
 
 	// 构造对等连接列表（这里是示例数据，实际应该从信令服务器获取）
 	peers := []map[string]any{
@@ -319,22 +312,18 @@ func (h *webrtcHandlers) handlePeerInfo(w http.ResponseWriter, r *http.Request) 
 	vars := mux.Vars(r)
 	peerID := vars["id"]
 
-	// 获取媒体流统计信息
-	mediaStats := h.manager.mediaStream.GetStats()
-	// TODO: Fix bridge stats - bridge field doesn't exist
-	// bridgeStats := h.manager.bridge.GetStats()
-
+	// TODO: Media stream stats will be available after signaling server migration in task 2
+	// For now, return placeholder data
 	info := map[string]any{
 		"id":         peerID,
 		"state":      "connected",
 		"created_at": time.Now().Unix() - 300,
 		"remote_ip":  "192.168.1.100",
 		"stats": map[string]any{
-			"video_frames_sent": mediaStats.VideoFramesSent,
-			"video_bytes_sent":  mediaStats.VideoBytesSent,
-			"audio_frames_sent": mediaStats.AudioFramesSent,
-			"audio_bytes_sent":  mediaStats.AudioBytesSent,
-			// TODO: Add bridge stats when available
+			"video_frames_sent":    0,
+			"video_bytes_sent":     0,
+			"audio_frames_sent":    0,
+			"audio_bytes_sent":     0,
 			"bridge_video_samples": 0,
 			"bridge_audio_samples": 0,
 		},
@@ -503,13 +492,13 @@ func (h *webrtcHandlers) handleUpdateConfig(w http.ResponseWriter, r *http.Reque
 
 // convertICEServersToFrontendFormat 转换ICE服务器配置为前端格式
 func (h *webrtcHandlers) convertICEServersToFrontendFormat() ([]map[string]any, error) {
-	if h.manager.config.WebRTC.ICEServers == nil {
+	if h.manager.config.ICEServers == nil {
 		return nil, fmt.Errorf("ICE servers configuration is nil")
 	}
 
-	iceServers := make([]map[string]any, 0, len(h.manager.config.WebRTC.ICEServers))
+	iceServers := make([]map[string]any, 0, len(h.manager.config.ICEServers))
 
-	for i, server := range h.manager.config.WebRTC.ICEServers {
+	for i, server := range h.manager.config.ICEServers {
 		if len(server.URLs) == 0 {
 			h.logger.Tracef("Warning: ICE server %d has no URLs, skipping", i)
 			continue
@@ -538,33 +527,25 @@ func (h *webrtcHandlers) convertICEServersToFrontendFormat() ([]map[string]any, 
 
 // getVideoCodec 获取视频编解码器配置
 func (h *webrtcHandlers) getVideoCodec() string {
-	if h.manager.config.GStreamer.Encoding.Codec != "" {
-		return string(h.manager.config.GStreamer.Encoding.Codec)
-	}
+	// TODO: Video codec configuration will be available after full config migration
 	return "h264" // 默认编解码器
 }
 
 // getVideoWidth 获取视频宽度配置
 func (h *webrtcHandlers) getVideoWidth() int {
-	if h.manager.config.GStreamer.Capture.Width > 0 {
-		return h.manager.config.GStreamer.Capture.Width
-	}
+	// TODO: Video width configuration will be available after full config migration
 	return 1920 // 默认宽度
 }
 
 // getVideoHeight 获取视频高度配置
 func (h *webrtcHandlers) getVideoHeight() int {
-	if h.manager.config.GStreamer.Capture.Height > 0 {
-		return h.manager.config.GStreamer.Capture.Height
-	}
+	// TODO: Video height configuration will be available after full config migration
 	return 1080 // 默认高度
 }
 
 // getVideoFPS 获取视频帧率配置
 func (h *webrtcHandlers) getVideoFPS() int {
-	if h.manager.config.GStreamer.Capture.FrameRate > 0 {
-		return h.manager.config.GStreamer.Capture.FrameRate
-	}
+	// TODO: Video FPS configuration will be available after full config migration
 	return 30 // 默认帧率
 }
 
@@ -702,7 +683,7 @@ func (h *webrtcHandlers) handleGetDiagnostics(w http.ResponseWriter, r *http.Req
 		},
 		"webrtc": map[string]interface{}{
 			"manager_running": h.manager.IsRunning(),
-			"client_count":    h.manager.signaling.GetClientCount(),
+			"client_count":    0, // TODO: Will be available after signaling server migration
 		},
 		"system": map[string]interface{}{
 			"timestamp": time.Now().Unix(),
@@ -781,8 +762,8 @@ func (h *webrtcHandlers) handleHealth(w http.ResponseWriter, r *http.Request) {
 				"running": h.manager.IsRunning(),
 			},
 			"signaling": map[string]interface{}{
-				"status":       "running",
-				"client_count": h.manager.signaling.GetClientCount(),
+				"status":       "pending_migration", // TODO: Will be "running" after signaling server migration
+				"client_count": 0,                   // TODO: Will be available after signaling server migration
 			},
 		},
 	}
@@ -880,13 +861,13 @@ func (h *webrtcHandlers) handleICEServers(w http.ResponseWriter, r *http.Request
 
 // convertICEServersToSelkiesFormat 转换ICE服务器配置为 selkies 格式
 func (h *webrtcHandlers) convertICEServersToSelkiesFormat() ([]map[string]any, error) {
-	if h.manager.config.WebRTC.ICEServers == nil {
+	if h.manager.config.ICEServers == nil {
 		return nil, fmt.Errorf("ICE servers configuration is nil")
 	}
 
-	iceServers := make([]map[string]any, 0, len(h.manager.config.WebRTC.ICEServers))
+	iceServers := make([]map[string]any, 0, len(h.manager.config.ICEServers))
 
-	for i, server := range h.manager.config.WebRTC.ICEServers {
+	for i, server := range h.manager.config.ICEServers {
 		if len(server.URLs) == 0 {
 			h.logger.Tracef("Warning: ICE server %d has no URLs, skipping", i)
 			continue

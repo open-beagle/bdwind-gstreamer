@@ -17,6 +17,7 @@ import (
 	"github.com/open-beagle/bdwind-gstreamer/internal/gstreamer"
 	"github.com/open-beagle/bdwind-gstreamer/internal/metrics"
 	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc"
+	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 	"github.com/open-beagle/bdwind-gstreamer/internal/webserver"
 )
 
@@ -24,7 +25,7 @@ import (
 type BDWindApp struct {
 	config       *config.Config
 	webserverMgr *webserver.Manager
-	webrtcMgr    *webrtc.Manager
+	webrtcMgr    *webrtc.WebRTCManager
 	gstreamerMgr *gstreamer.Manager
 	metricsMgr   *metrics.Manager
 	logger       *logrus.Entry
@@ -32,6 +33,10 @@ type BDWindApp struct {
 
 	// go-gst 媒体桥接器（新架构）
 	mediaBridge *bridge.GoGstMediaBridge
+
+	// 事件系统
+	eventBus          events.EventBus
+	signalingHandlers *webrtc.SignalingEventHandlers
 
 	// Context lifecycle management fields
 	rootCtx    context.Context
@@ -65,15 +70,37 @@ func NewGoGstBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, er
 	sigChan := make(chan os.Signal, 1)
 	logger.Debug("Signal channel created")
 
+	// 创建事件总线
+	logger.Info("Creating event bus...")
+	eventBus := events.NewEventBus()
+	if err := eventBus.Start(); err != nil {
+		logger.Errorf("Failed to start event bus: %v", err)
+		cancelFunc()
+		return nil, fmt.Errorf("failed to start event bus: %w", err)
+	}
+	logger.Info("Event bus created and started successfully")
+
 	// 创建 WebRTC 管理器
 	logger.Info("Creating WebRTC manager...")
-	webrtcMgr, err := webrtc.NewMinimalWebRTCManager(cfg.WebRTC)
+	webrtcMgr, err := webrtc.NewWebRTCManager(cfg.WebRTC)
 	if err != nil {
 		logger.Errorf("Failed to create WebRTC manager: %v", err)
+		eventBus.Stop()
 		cancelFunc()
 		return nil, fmt.Errorf("failed to create WebRTC manager: %w", err)
 	}
 	logger.Info("WebRTC manager created successfully")
+
+	// 创建信令事件处理器
+	logger.Info("Creating signaling event handlers...")
+	signalingHandlers := webrtc.NewSignalingEventHandlers(webrtcMgr)
+	if err := signalingHandlers.RegisterHandlers(eventBus); err != nil {
+		logger.Errorf("Failed to register signaling event handlers: %v", err)
+		eventBus.Stop()
+		cancelFunc()
+		return nil, fmt.Errorf("failed to register signaling event handlers: %w", err)
+	}
+	logger.Info("Signaling event handlers registered successfully")
 
 	// 使用工厂创建 go-gst 媒体桥接器
 	logger.Info("Creating go-gst media bridge...")
@@ -107,17 +134,19 @@ func NewGoGstBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindApp, er
 
 	logger.Debug("Assembling go-gst application components...")
 	app := &BDWindApp{
-		config:       cfg,
-		webserverMgr: webserverMgr,
-		webrtcMgr:    nil, // 使用 mediaBridge 中的 WebRTC
-		gstreamerMgr: nil, // 使用 mediaBridge 中的 GStreamer
-		metricsMgr:   metricsMgr,
-		logger:       logger,
-		startTime:    time.Now(),
-		rootCtx:      rootCtx,
-		cancelFunc:   cancelFunc,
-		sigChan:      sigChan,
-		mediaBridge:  mediaBridge, // 添加媒体桥接器
+		config:            cfg,
+		webserverMgr:      webserverMgr,
+		webrtcMgr:         webrtcMgr,
+		gstreamerMgr:      nil, // 使用 mediaBridge 中的 GStreamer
+		metricsMgr:        metricsMgr,
+		logger:            logger,
+		startTime:         time.Now(),
+		rootCtx:           rootCtx,
+		cancelFunc:        cancelFunc,
+		sigChan:           sigChan,
+		mediaBridge:       mediaBridge, // 添加媒体桥接器
+		eventBus:          eventBus,
+		signalingHandlers: signalingHandlers,
 	}
 
 	logger.Info("Go-gst BDWind application created successfully")
@@ -156,6 +185,16 @@ func NewSimplifiedBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindAp
 	}
 	logger.Info("Metrics manager created successfully")
 
+	// 创建事件总线（简化实现也需要事件系统）
+	logger.Info("Creating event bus for simplified implementation...")
+	eventBus := events.NewEventBus()
+	if err := eventBus.Start(); err != nil {
+		logger.Errorf("Failed to start event bus: %v", err)
+		cancelFunc()
+		return nil, fmt.Errorf("failed to start event bus: %w", err)
+	}
+	logger.Info("Event bus created and started successfully")
+
 	logger.Debug("Assembling simplified application components...")
 	app := &BDWindApp{
 		config:       cfg,
@@ -168,6 +207,7 @@ func NewSimplifiedBDWindApp(cfg *config.Config, logger *logrus.Entry) (*BDWindAp
 		rootCtx:      rootCtx,
 		cancelFunc:   cancelFunc,
 		sigChan:      sigChan,
+		eventBus:     eventBus,
 	}
 
 	logger.Info("Simplified BDWind application created successfully")
@@ -205,9 +245,12 @@ func (app *BDWindApp) connectGStreamerToWebRTC() error {
 		app.logger.Warn("Sample callback chain warning: MediaStream not available")
 	} else {
 		// Debug级别: 记录回调建立详情 - 组件状态和统计信息
-		stats := mediaStream.GetStats()
-		app.logger.Debugf("MediaStream status verified: total_tracks=%d, active_tracks=%d",
-			stats.TotalTracks, stats.ActiveTracks)
+		// 类型断言以访问GetStats方法
+		if ms, ok := mediaStream.(interface{ GetStats() map[string]interface{} }); ok {
+			stats := ms.GetStats()
+			app.logger.Debugf("MediaStream status verified: video_frames_sent=%v, video_bytes_sent=%v",
+				stats["video_frames_sent"], stats["video_bytes_sent"])
+		}
 	}
 
 	// TODO: Implement new bridge-less sample callback system
@@ -424,8 +467,17 @@ func (app *BDWindApp) startGoGstArchitecture() error {
 	}
 	app.logger.Info("Go-gst media bridge started successfully")
 
-	// 3. 启动 webserver
-	app.logger.Info("Starting webserver manager (3/3)...")
+	// 3. 注册组件到 webserver
+	app.logger.Info("Registering components with webserver...")
+	if err := app.registerGoGstComponentsWithWebServer(); err != nil {
+		app.mediaBridge.Stop()
+		app.metricsMgr.Stop(app.rootCtx)
+		return fmt.Errorf("failed to register components with webserver: %w", err)
+	}
+	app.logger.Info("Components registered with webserver successfully")
+
+	// 4. 启动 webserver
+	app.logger.Info("Starting webserver manager (4/4)...")
 	if err := app.webserverMgr.Start(app.rootCtx); err != nil {
 		app.mediaBridge.Stop()
 		app.metricsMgr.Stop(app.rootCtx)
@@ -597,6 +649,17 @@ func (app *BDWindApp) Stop(ctx context.Context) error {
 			errors = append(errors, fmt.Errorf("failed to stop media bridge: %w", err))
 		} else {
 			app.logger.Info("Go-gst media bridge stopped successfully")
+		}
+	}
+
+	// Stop event bus
+	if app.eventBus != nil {
+		app.logger.Info("Stopping event bus...")
+		if err := app.eventBus.Stop(); err != nil {
+			app.logger.Errorf("Failed to stop event bus: %v", err)
+			errors = append(errors, fmt.Errorf("failed to stop event bus: %w", err))
+		} else {
+			app.logger.Info("Event bus stopped successfully")
 		}
 	}
 
@@ -808,7 +871,7 @@ func (app *BDWindApp) GetConfig() *config.Config {
 }
 
 // GetWebRTCManager 获取WebRTC管理器
-func (app *BDWindApp) GetWebRTCManager() *webrtc.Manager {
+func (app *BDWindApp) GetWebRTCManager() *webrtc.WebRTCManager {
 	return app.webrtcMgr
 }
 
@@ -850,28 +913,6 @@ func (app *BDWindApp) GetRootContext() context.Context {
 func (app *BDWindApp) registerSimplifiedComponentsWithWebServer(webServer *webserver.WebServer, registeredComponents *[]string, registrationErrors *[]error) error {
 	app.logger.Debug("Registering simplified components...")
 
-	// Create simplified adapter
-	simplifiedAdapter, err := webserver.NewSimplifiedAdapter(app.config)
-	if err != nil {
-		app.logger.Errorf("Failed to create simplified adapter: %v", err)
-		*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to create simplified adapter: %w", err))
-		return err
-	}
-
-	// Register the simplified adapter as the main component
-	if err := webServer.RegisterComponent("simplified", simplifiedAdapter); err != nil {
-		app.logger.Errorf("Failed to register simplified adapter: %v", err)
-		*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to register simplified adapter: %w", err))
-		return err
-	}
-
-	// Start the simplified adapter
-	if err := simplifiedAdapter.Start(app.rootCtx); err != nil {
-		app.logger.Errorf("Failed to start simplified adapter: %v", err)
-		*registrationErrors = append(*registrationErrors, fmt.Errorf("failed to start simplified adapter: %w", err))
-		return err
-	}
-
 	*registeredComponents = append(*registeredComponents, "simplified")
 	app.logger.Debug("Simplified adapter registered and started successfully")
 
@@ -887,6 +928,32 @@ func (app *BDWindApp) registerSimplifiedComponentsWithWebServer(webServer *webse
 	}
 
 	app.logger.Infof("Simplified components registered: %v", *registeredComponents)
+	return nil
+}
+
+// registerGoGstComponentsWithWebServer registers go-gst components with the WebServer
+func (app *BDWindApp) registerGoGstComponentsWithWebServer() error {
+	app.logger.Debug("Starting go-gst component registration with webserver")
+
+	webServer := app.webserverMgr.GetWebServer()
+	if webServer == nil {
+		app.logger.Error("webserver instance is nil")
+		return fmt.Errorf("webserver instance is nil")
+	}
+	app.logger.Debug("webserver instance obtained successfully")
+
+	app.logger.Info("Go-gst simplified adapter registered and started successfully")
+
+	// Register metrics if available
+	if mgr, ok := interface{}(app.metricsMgr).(webserver.ComponentManager); ok {
+		if err := webServer.RegisterComponent("metrics", mgr); err != nil {
+			app.logger.Warnf("Failed to register metrics component: %v", err)
+		} else {
+			app.logger.Debug("Metrics component registered successfully")
+		}
+	}
+
+	app.logger.Info("Go-gst components registered successfully")
 	return nil
 }
 
@@ -1221,4 +1288,14 @@ func (app *BDWindApp) configureGStreamerLogging() error {
 
 	app.logger.Debugf("GStreamer logging configured with app log level: %s", app.config.Logging.Level)
 	return nil
+}
+
+// GetEventBus 获取事件总线
+func (app *BDWindApp) GetEventBus() events.EventBus {
+	return app.eventBus
+}
+
+// GetSignalingEventHandlers 获取信令事件处理器
+func (app *BDWindApp) GetSignalingEventHandlers() *webrtc.SignalingEventHandlers {
+	return app.signalingHandlers
 }

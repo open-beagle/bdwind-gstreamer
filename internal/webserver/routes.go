@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/gorilla/mux"
+
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
 )
 
@@ -87,7 +88,7 @@ func (ws *WebServer) setupBasicRoutes() {
 	ws.router.HandleFunc("/api/components", ws.handleComponentList).Methods("GET")
 	ws.router.HandleFunc("/api/components/{name}", ws.handleComponentStatus).Methods("GET")
 	ws.router.HandleFunc("/api/components/{name}/stats", ws.handleComponentStats).Methods("GET")
-	
+
 	// Implementation control endpoints
 	ws.router.HandleFunc("/api/implementation/status", ws.handleImplementationStatus).Methods("GET")
 	ws.router.HandleFunc("/api/implementation/info", ws.handleImplementationInfo).Methods("GET")

@@ -8,8 +8,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
 	"github.com/open-beagle/bdwind-gstreamer/internal/config"
-	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/protocol"
 )
 
 // ProtocolNegotiator 协议协商器

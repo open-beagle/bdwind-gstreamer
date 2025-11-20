@@ -11,7 +11,7 @@ import (
 )
 
 // CreateMediaBridge 直接创建 go-gst 媒体桥接器
-func CreateMediaBridge(cfg *config.Config, webrtcMgr *webrtc.MinimalWebRTCManager) (*bridge.GoGstMediaBridge, error) {
+func CreateMediaBridge(cfg *config.Config, webrtcMgr *webrtc.WebRTCManager) (*bridge.GoGstMediaBridge, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}

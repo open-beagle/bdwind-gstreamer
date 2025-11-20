@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -17,7 +18,7 @@ type GoGstMediaBridge struct {
 	config    *config.Config
 	logger    *logrus.Entry
 	gstreamer *gstreamer.MinimalGoGstManager
-	webrtc    *webrtc.MinimalWebRTCManager
+	webrtc    *webrtc.WebRTCManager
 
 	// 状态管理
 	running   bool
@@ -31,7 +32,7 @@ type GoGstMediaBridge struct {
 }
 
 // NewGoGstMediaBridge 创建 go-gst 媒体桥接器
-func NewGoGstMediaBridge(cfg *config.Config, webrtcMgr *webrtc.MinimalWebRTCManager) (*GoGstMediaBridge, error) {
+func NewGoGstMediaBridge(cfg *config.Config, webrtcMgr *webrtc.WebRTCManager) (*GoGstMediaBridge, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
@@ -79,7 +80,7 @@ func (b *GoGstMediaBridge) Start() error {
 	}
 
 	// 启动 WebRTC
-	if err := b.webrtc.Start(); err != nil {
+	if err := b.webrtc.Start(context.Background()); err != nil {
 		b.gstreamer.Stop() // 回滚
 		return fmt.Errorf("failed to start WebRTC: %w", err)
 	}
@@ -146,7 +147,7 @@ func (b *GoGstMediaBridge) Stop() error {
 	b.logger.Info("Stopping go-gst media bridge...")
 
 	// 停止 WebRTC
-	if err := b.webrtc.Stop(); err != nil {
+	if err := b.webrtc.Stop(context.Background()); err != nil {
 		b.logger.Errorf("Failed to stop WebRTC: %v", err)
 	}
 
@@ -231,6 +232,6 @@ func (b *GoGstMediaBridge) GetGStreamerManager() *gstreamer.MinimalGoGstManager 
 }
 
 // GetWebRTCManager 获取 WebRTC 管理器
-func (b *GoGstMediaBridge) GetWebRTCManager() *webrtc.MinimalWebRTCManager {
+func (b *GoGstMediaBridge) GetWebRTCManager() *webrtc.WebRTCManager {
 	return b.webrtc
 }
