@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
 )
 
 // 中间件

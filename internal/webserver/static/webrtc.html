@@ -200,6 +200,22 @@
         <div class="stat-title">音频轨道</div>
         <div class="stat-value" id="audioTracks">0</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-title">接收字节数</div>
+        <div class="stat-value" id="bytesReceived">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">已解码帧数</div>
+        <div class="stat-value" id="framesDecoded">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">关键帧数</div>
+        <div class="stat-value" id="keyFramesDecoded">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">解码器</div>
+        <div class="stat-value" id="decoderImplementation">-</div>
+      </div>
     </div>
 
     <div class="logs" id="logs"></div>
@@ -232,7 +248,7 @@
       log(`状态更新: ${status}`, type === 'error' ? 'error' : 'info');
     }
 
-    function updateStats() {
+    async function updateStats() {
       if (!pc) return;
 
       document.getElementById('connectionState').textContent = pc.connectionState;
@@ -251,6 +267,42 @@
 
       document.getElementById('videoTracks').textContent = videoTracks;
       document.getElementById('audioTracks').textContent = audioTracks;
+
+      // Get detailed video stats
+      try {
+        const stats = await pc.getStats();
+        let bytesReceived = 0;
+        let framesDecoded = 0;
+        let keyFramesDecoded = 0;
+        let decoderImplementation = '-';
+
+        stats.forEach(report => {
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            bytesReceived = report.bytesReceived || 0;
+            framesDecoded = report.framesDecoded || 0;
+            keyFramesDecoded = report.keyFramesDecoded || 0;
+            decoderImplementation = report.decoderImplementation || '-';
+            
+            // Log detailed stats for debugging
+            if (framesDecoded === 0 && bytesReceived > 0) {
+              console.warn('⚠️ 接收到数据但未解码任何帧！', {
+                bytesReceived,
+                framesDecoded,
+                keyFramesDecoded,
+                decoderImplementation,
+                fullReport: report
+              });
+            }
+          }
+        });
+
+        document.getElementById('bytesReceived').textContent = (bytesReceived / 1024).toFixed(1) + ' KB';
+        document.getElementById('framesDecoded').textContent = framesDecoded;
+        document.getElementById('keyFramesDecoded').textContent = keyFramesDecoded;
+        document.getElementById('decoderImplementation').textContent = decoderImplementation;
+      } catch (error) {
+        console.error('获取统计信息失败:', error);
+      }
     }
 
     function toggleStats() {

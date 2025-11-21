@@ -8,7 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
 )
 
 // SignalingRouter 信令消息路由器

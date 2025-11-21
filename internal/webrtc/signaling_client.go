@@ -8,9 +8,10 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/events"
 	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
-	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
+	webrtcEvents "github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 )
 
 // SendFunc 定义发送消息的函数类型
@@ -67,7 +68,7 @@ func NewSignalingClient(id string, appName string, sendFunc SendFunc, eventBus e
 
 	// 订阅本地 ICE candidate 事件
 	if eventBus != nil {
-		eventBus.Subscribe(events.EventOnICECandidate, events.EventHandlerFunc(client.handleOnICECandidate))
+		eventBus.Subscribe(webrtcEvents.EventOnICECandidate, events.EventHandlerFunc(client.handleOnICECandidate))
 	}
 
 	return client
@@ -267,8 +268,8 @@ func (c *SignalingClient) handleRequestOfferMessage(message *protocol.StandardMe
 	}
 
 	// 创建 CreateOffer 事件
-	createOfferEvent := events.NewWebRTCEvent(
-		events.EventCreateOffer,
+	createOfferEvent := webrtcEvents.NewWebRTCEvent(
+		webrtcEvents.EventCreateOffer,
 		c.ID, // sessionID
 		c.ID, // peerID
 		map[string]interface{}{
@@ -355,8 +356,8 @@ func (c *SignalingClient) handleAnswerMessage(message *protocol.StandardMessage)
 	}
 
 	// 创建 ProcessAnswer 事件
-	processAnswerEvent := events.NewWebRTCEvent(
-		events.EventProcessAnswer,
+	processAnswerEvent := webrtcEvents.NewWebRTCEvent(
+		webrtcEvents.EventProcessAnswer,
 		c.ID, // sessionID
 		c.ID, // peerID
 		map[string]interface{}{
@@ -422,8 +423,8 @@ func (c *SignalingClient) handleICECandidateMessage(message *protocol.StandardMe
 	}
 
 	// 创建 AddICECandidate 事件
-	addICEEvent := events.NewWebRTCEvent(
-		events.EventAddICECandidate,
+	addICEEvent := webrtcEvents.NewWebRTCEvent(
+		webrtcEvents.EventAddICECandidate,
 		c.ID, // sessionID
 		c.ID, // peerID
 		map[string]interface{}{

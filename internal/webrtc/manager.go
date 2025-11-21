@@ -12,8 +12,9 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/sirupsen/logrus"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
-	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/events"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
+	webrtcEvents "github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 )
 
 // WebRTCManager WebRTC管理器 - 参考Selkies设计
@@ -44,6 +45,12 @@ type WebRTCManager struct {
 	currentSessionID string
 	pcSessionID      string // 当前PeerConnection关联的会话ID
 
+	// 会话管理
+	activeSessions map[string]bool // 活跃会话集合
+	sessionMutex   sync.RWMutex
+	reconnectTimer *time.Timer
+	idleTimer      *time.Timer
+
 	// 统计信息
 	videoFrameCount uint64
 }
@@ -64,11 +71,12 @@ func NewWebRTCManager(cfg *config.WebRTCConfig) (*WebRTCManager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &WebRTCManager{
-		config:        cfg,
-		logger:        logrus.WithField("component", "webrtc"),
-		iceCandidates: make([]webrtc.ICECandidate, 0),
-		ctx:           ctx,
-		cancel:        cancel,
+		config:         cfg,
+		logger:         logrus.WithField("component", "webrtc"),
+		iceCandidates:  make([]webrtc.ICECandidate, 0),
+		activeSessions: make(map[string]bool),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	manager.logger.Debug("WebRTCManager created successfully")
@@ -91,11 +99,12 @@ func NewWebRTCManagerFromSimpleConfig(cfg *config.SimpleConfig) (*WebRTCManager,
 	logger := cfg.GetLoggerWithPrefix("webrtc-minimal")
 
 	manager := &WebRTCManager{
-		config:        webrtcConfig,
-		logger:        logger,
-		iceCandidates: make([]webrtc.ICECandidate, 0),
-		ctx:           ctx,
-		cancel:        cancel,
+		config:         webrtcConfig,
+		logger:         logger,
+		iceCandidates:  make([]webrtc.ICECandidate, 0),
+		activeSessions: make(map[string]bool),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	manager.logger.Debug("WebRTCManager created from SimpleConfig")
@@ -265,8 +274,8 @@ func (m *WebRTCManager) setupICEHandling() {
 					candidateMap["usernameFragment"] = *candidateInit.UsernameFragment
 				}
 
-				event := events.NewWebRTCEvent(
-					events.EventOnICECandidate,
+				event := webrtcEvents.NewWebRTCEvent(
+					webrtcEvents.EventOnICECandidate,
 					m.currentSessionID,
 					m.currentSessionID, // PeerID same as SessionID for now
 					map[string]interface{}{
@@ -288,7 +297,143 @@ func (m *WebRTCManager) setupICEHandling() {
 	// 设置ICE连接状态变化回调
 	m.peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		m.logger.Infof("ICE connection state changed: %s", state.String())
+		m.handleICEConnectionStateChange(state)
 	})
+}
+
+// handleICEConnectionStateChange 处理ICE连接状态变化
+func (m *WebRTCManager) handleICEConnectionStateChange(state webrtc.ICEConnectionState) {
+	if m.eventBus == nil {
+		return
+	}
+
+	sessionID := m.currentSessionID
+	if sessionID == "" {
+		return
+	}
+
+	switch state {
+	case webrtc.ICEConnectionStateConnected:
+		m.handleICEConnected(sessionID)
+	case webrtc.ICEConnectionStateDisconnected:
+		m.handleICEDisconnected(sessionID)
+	case webrtc.ICEConnectionStateFailed:
+		m.handleICEFailed(sessionID)
+	case webrtc.ICEConnectionStateClosed:
+		m.handleICEClosed(sessionID)
+	}
+}
+
+// handleICEConnected 处理ICE连接建立
+func (m *WebRTCManager) handleICEConnected(sessionID string) {
+	// 取消重连定时器
+	if m.reconnectTimer != nil {
+		m.reconnectTimer.Stop()
+		m.reconnectTimer = nil
+	}
+
+	// 取消空闲定时器
+	if m.idleTimer != nil {
+		m.idleTimer.Stop()
+		m.idleTimer = nil
+	}
+
+	// 发布会话就绪事件
+	event := events.NewBaseEvent(
+		events.EventWebRTCSessionReady,
+		sessionID,
+		map[string]interface{}{
+			"session_id": sessionID,
+			"client_id":  sessionID,
+			"timestamp":  time.Now(),
+		},
+	)
+	go m.eventBus.Publish(event)
+}
+
+// handleICEDisconnected 处理ICE断开
+func (m *WebRTCManager) handleICEDisconnected(sessionID string) {
+	// 发布会话暂停事件
+	event := events.NewBaseEvent(
+		events.EventWebRTCSessionPaused,
+		sessionID,
+		map[string]interface{}{
+			"session_id": sessionID,
+			"client_id":  sessionID,
+			"reason":     "disconnected",
+			"timestamp":  time.Now(),
+		},
+	)
+	go m.eventBus.Publish(event)
+
+	// 启动重连定时器
+	keepAliveTimeout := m.config.Session.KeepAliveTimeout
+	m.logger.Infof("ICE disconnected, will wait %s for reconnection", keepAliveTimeout)
+
+	m.reconnectTimer = time.AfterFunc(keepAliveTimeout, func() {
+		m.onReconnectTimeout(sessionID)
+	})
+}
+
+// handleICEFailed 处理ICE失败
+func (m *WebRTCManager) handleICEFailed(sessionID string) {
+	// 发布会话失败事件
+	event := events.NewBaseEvent(
+		events.EventWebRTCSessionFailed,
+		sessionID,
+		map[string]interface{}{
+			"session_id": sessionID,
+			"client_id":  sessionID,
+			"reason":     "ice_failed",
+			"timestamp":  time.Now(),
+		},
+	)
+	go m.eventBus.Publish(event)
+
+	// 启动重连定时器（给一个较短的超时）
+	m.reconnectTimer = time.AfterFunc(10*time.Second, func() {
+		m.onReconnectTimeout(sessionID)
+	})
+}
+
+// handleICEClosed 处理ICE关闭
+func (m *WebRTCManager) handleICEClosed(sessionID string) {
+	// 取消所有定时器
+	if m.reconnectTimer != nil {
+		m.reconnectTimer.Stop()
+		m.reconnectTimer = nil
+	}
+	if m.idleTimer != nil {
+		m.idleTimer.Stop()
+		m.idleTimer = nil
+	}
+
+	// 移除会话
+	m.removeSession(sessionID)
+}
+
+// onReconnectTimeout 重连超时处理
+func (m *WebRTCManager) onReconnectTimeout(sessionID string) {
+	m.logger.Warnf("Reconnect timeout for session %s", sessionID)
+
+	// 发布会话超时事件
+	event := events.NewBaseEvent(
+		events.EventWebRTCSessionTimeout,
+		sessionID,
+		map[string]interface{}{
+			"session_id": sessionID,
+			"client_id":  sessionID,
+			"duration":   m.config.Session.KeepAliveTimeout,
+			"timestamp":  time.Now(),
+		},
+	)
+
+	if m.eventBus != nil {
+		go m.eventBus.Publish(event)
+	}
+
+	// 移除会话
+	m.removeSession(sessionID)
 }
 
 // Stop 停止WebRTC
@@ -333,21 +478,24 @@ func (m *WebRTCManager) createVideoTrack() error {
 	return nil
 }
 
-// SendVideoData 发送视频数据 - 直接接收来自GStreamer的编码数据
-func (m *WebRTCManager) SendVideoData(data []byte) error {
+// SendVideoData 实现 VideoDataSink 接口
+// 发送视频数据 - 直接接收来自GStreamer的编码数据
+func (m *WebRTCManager) SendVideoData(data []byte, timestamp time.Duration) error {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
 	m.logger.Debugf("SendVideoData called with %d bytes", len(data))
 
+	// 如果WebRTC未启动，静默忽略（GStreamer可能先启动）
+	// 等WebRTC启动后，后续的帧会正常发送
 	if !m.running {
-		m.logger.Debugf("WebRTC manager not running")
-		return fmt.Errorf("WebRTC manager not running")
+		return nil // 静默忽略，不返回错误
 	}
 
+	// 如果videoTrack不可用（没有客户端连接），静默忽略
+	// 这样GStreamer可以继续运行，等客户端连接后再发送数据
 	if m.videoTrack == nil {
-		m.logger.Debugf("Video track not available")
-		return fmt.Errorf("video track not available")
+		return nil // 静默忽略，不返回错误
 	}
 
 	if len(data) == 0 {
@@ -355,11 +503,10 @@ func (m *WebRTCManager) SendVideoData(data []byte) error {
 		return fmt.Errorf("empty video data")
 	}
 
-	// 创建WebRTC sample
-	// 假设30fps，每帧持续时间约33.33ms
+	// 创建WebRTC sample，使用传入的时间戳
 	sample := media.Sample{
 		Data:     data,
-		Duration: time.Millisecond * 33, // ~30fps
+		Duration: timestamp,
 	}
 
 	// 直接发送到WebRTC轨道
@@ -377,8 +524,10 @@ func (m *WebRTCManager) SendVideoDataWithTimestamp(data []byte, duration time.Du
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
+	// 如果WebRTC未启动，静默忽略（GStreamer可能先启动）
+	// 等WebRTC启动后，后续的帧会正常发送
 	if !m.running {
-		return fmt.Errorf("WebRTC manager not running")
+		return nil // 静默忽略，不返回错误
 	}
 
 	// 如果videoTrack不可用（没有客户端连接），静默忽略
@@ -688,4 +837,110 @@ func (m *WebRTCManager) SetupRoutes(router *mux.Router) error {
 	// 目前为空实现以满足接口要求
 	m.logger.Debug("SetupRoutes called - will be implemented in task 2")
 	return nil
+}
+
+// OnClientConnected 客户端连接处理
+func (m *WebRTCManager) OnClientConnected(sessionID string) {
+	m.sessionMutex.Lock()
+	m.activeSessions[sessionID] = true
+	sessionCount := len(m.activeSessions)
+	m.sessionMutex.Unlock()
+
+	m.logger.Infof("Client connected (session=%s), active sessions: %d", sessionID, sessionCount)
+
+	// 取消空闲定时器
+	if m.idleTimer != nil {
+		m.idleTimer.Stop()
+		m.idleTimer = nil
+	}
+
+	// 发布会话开始事件
+	if m.eventBus != nil {
+		event := events.NewBaseEvent(
+			events.EventWebRTCSessionStarted,
+			sessionID,
+			map[string]interface{}{
+				"session_id": sessionID,
+				"client_id":  sessionID,
+				"timestamp":  time.Now(),
+			},
+		)
+		go m.eventBus.Publish(event)
+	}
+}
+
+// OnClientDisconnected 客户端断开处理
+func (m *WebRTCManager) OnClientDisconnected(sessionID string) {
+	m.removeSession(sessionID)
+}
+
+// removeSession 移除会话
+func (m *WebRTCManager) removeSession(sessionID string) {
+	m.sessionMutex.Lock()
+	delete(m.activeSessions, sessionID)
+	sessionCount := len(m.activeSessions)
+	m.sessionMutex.Unlock()
+
+	m.logger.Infof("Session removed (session=%s), active sessions: %d", sessionID, sessionCount)
+
+	// 发布会话结束事件
+	if m.eventBus != nil {
+		event := events.NewBaseEvent(
+			events.EventWebRTCSessionEnded,
+			sessionID,
+			map[string]interface{}{
+				"session_id":      sessionID,
+				"client_id":       sessionID,
+				"active_sessions": sessionCount,
+				"timestamp":       time.Now(),
+			},
+		)
+		go m.eventBus.Publish(event)
+	}
+
+	// 如果无活跃会话，启动空闲定时器
+	if sessionCount == 0 {
+		m.startIdleTimer(sessionID)
+	}
+}
+
+// startIdleTimer 启动空闲定时器
+func (m *WebRTCManager) startIdleTimer(lastSessionID string) {
+	// 默认5秒空闲超时
+	idleTimeout := 5 * time.Second
+
+	m.logger.Infof("No active sessions, will stop streaming after %s", idleTimeout)
+
+	m.idleTimer = time.AfterFunc(idleTimeout, func() {
+		m.sessionMutex.RLock()
+		sessionCount := len(m.activeSessions)
+		m.sessionMutex.RUnlock()
+
+		// 再次检查是否有新会话
+		if sessionCount == 0 {
+			m.logger.Info("Idle timeout reached, publishing no active sessions event")
+
+			if m.eventBus != nil {
+				event := events.NewBaseEvent(
+					events.EventWebRTCNoActiveSessions,
+					lastSessionID,
+					map[string]interface{}{
+						"last_session_id": lastSessionID,
+						"idle_duration":   idleTimeout,
+						"timestamp":       time.Now(),
+					},
+				)
+				go m.eventBus.Publish(event)
+			}
+		} else {
+			m.logger.Debugf("New sessions connected during idle period, canceling shutdown")
+		}
+	})
+}
+
+// GetActiveSessionCount 获取活跃会话数
+func (m *WebRTCManager) GetActiveSessionCount() int {
+	m.sessionMutex.RLock()
+	defer m.sessionMutex.RUnlock()
+	return len(m.activeSessions)
 }

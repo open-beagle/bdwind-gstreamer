@@ -7,7 +7,8 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/sirupsen/logrus"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/events"
+	webrtcEvents "github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 )
 
 // SignalingEventHandlers WebRTC信令事件处理器
@@ -27,17 +28,17 @@ func NewSignalingEventHandlers(webrtcManager *WebRTCManager) *SignalingEventHand
 // RegisterHandlers 注册事件处理器到事件总线
 func (h *SignalingEventHandlers) RegisterHandlers(eventBus events.EventBus) error {
 	// 注册 CreateOffer 事件处理器
-	if err := eventBus.Subscribe(events.EventCreateOffer, events.EventHandlerFunc(h.HandleCreateOffer)); err != nil {
+	if err := eventBus.Subscribe(webrtcEvents.EventCreateOffer, events.EventHandlerFunc(h.HandleCreateOffer)); err != nil {
 		return fmt.Errorf("failed to subscribe to CreateOffer event: %w", err)
 	}
 
 	// 注册 ProcessAnswer 事件处理器
-	if err := eventBus.Subscribe(events.EventProcessAnswer, events.EventHandlerFunc(h.HandleProcessAnswer)); err != nil {
+	if err := eventBus.Subscribe(webrtcEvents.EventProcessAnswer, events.EventHandlerFunc(h.HandleProcessAnswer)); err != nil {
 		return fmt.Errorf("failed to subscribe to ProcessAnswer event: %w", err)
 	}
 
 	// 注册 AddICECandidate 事件处理器
-	if err := eventBus.Subscribe(events.EventAddICECandidate, events.EventHandlerFunc(h.HandleAddICECandidate)); err != nil {
+	if err := eventBus.Subscribe(webrtcEvents.EventAddICECandidate, events.EventHandlerFunc(h.HandleAddICECandidate)); err != nil {
 		return fmt.Errorf("failed to subscribe to AddICECandidate event: %w", err)
 	}
 

@@ -10,7 +10,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/sirupsen/logrus"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
 )
 
 // PeerConnectionManager 管理WebRTC对等连接

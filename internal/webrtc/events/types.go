@@ -3,10 +3,12 @@ package events
 import (
 	"context"
 	"time"
+
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/events"
 )
 
-// EventType 事件类型
-type EventType string
+// EventType 使用公共事件类型
+type EventType = events.EventType
 
 const (
 	// WebRTC 协商事件

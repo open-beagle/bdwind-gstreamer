@@ -10,7 +10,7 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/sirupsen/logrus"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
 )
 
 // MediaStreamConfig 媒体流配置结构

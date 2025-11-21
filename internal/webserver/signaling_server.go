@@ -13,7 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/open-beagle/bdwind-gstreamer/internal/common/protocol"
-	"github.com/open-beagle/bdwind-gstreamer/internal/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
 )
 
 // ClientType 客户端类型
@@ -84,6 +84,9 @@ type SignalingServer struct {
 	// 业务消息处理回调
 	businessMessageHandler func(clientID string, messageType string, data map[string]interface{}) error
 
+	// 客户端断开连接回调
+	clientDisconnectHandler func(clientID string)
+
 	// 统计信息
 	totalConnections    int64
 	totalMessages       int64
@@ -131,6 +134,15 @@ func (s *SignalingServer) SetBusinessMessageHandler(handler func(clientID string
 	}
 
 	s.logger.Debug("Business message handler configured for signaling server")
+}
+
+// SetClientDisconnectHandler 设置客户端断开连接回调
+func (s *SignalingServer) SetClientDisconnectHandler(handler func(clientID string)) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	s.clientDisconnectHandler = handler
+	s.logger.Debug("Client disconnect handler configured for signaling server")
 }
 
 // 实现 ComponentManager 接口
@@ -363,12 +375,17 @@ func (s *SignalingServer) unregisterConnection(conn *websocket.Conn) {
 	}
 
 	// 从连接映射中移除
-	// 从连接映射中移除
 	delete(s.connections, conn)
 	delete(s.connectionMap, info.ID)
 	close(info.Send)
 
 	s.logger.Infof("Connection unregistered: %s (connected for: %v)", info.ID, duration)
+
+	// 调用断开连接回调
+	if s.clientDisconnectHandler != nil && info.ID != "" {
+		// 异步调用，避免阻塞
+		go s.clientDisconnectHandler(info.ID)
+	}
 }
 
 // readPump 读取消息

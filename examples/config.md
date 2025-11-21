@@ -64,6 +64,8 @@ webrtc:
   ice_servers:
     - urls: ["stun:stun.l.google.com:19302"]
   signaling_path: "/api/signaling"
+  session:
+    keep_alive_timeout: 30s  # 可选：ICE断开后继续推流的时间（默认30秒）
 
 metrics:
   external:
@@ -93,10 +95,18 @@ gstreamer:
   encoding:
     codec: "h264"
     bitrate: 2500
+  # 按需推流配置（可选）
+  on_demand:
+    enabled: true              # 启用按需推流（默认：true）
+    idle_timeout: 5s           # 无客户端后停止推流的时间（默认：5秒）
+    quick_reconnect_window: 10s # 快速重连窗口（默认：10秒）
 
 webrtc:
   ice_servers:
     - urls: ["stun:stun.l.google.com:19302"]
+  # 会话配置（可选）
+  session:
+    keep_alive_timeout: 30s    # ICE断开后继续推流的时间（默认：30秒）
 
 webserver:
   host: "0.0.0.0"
@@ -144,6 +154,66 @@ func main() {
 
 # The application will automatically validate the configuration on startup
 ```
+
+## Configuration Options Reference
+
+### GStreamer On-Demand Streaming (可选)
+
+按需推流功能允许应用只在有客户端连接时才启动视频捕获和编码，节省系统资源。
+
+```yaml
+gstreamer:
+  on_demand:
+    enabled: true              # 是否启用按需推流（默认：true）
+    idle_timeout: 5s           # 无客户端后多久停止推流（默认：5秒）
+    quick_reconnect_window: 10s # 快速重连窗口（默认：10秒）
+```
+
+**参数说明：**
+
+- `enabled`: 
+  - `true`: 按需启动，有客户端才推流（推荐，节省资源）
+  - `false`: 启动即推流，保持旧行为
+  - 默认值：`true`
+
+- `idle_timeout`: 
+  - 最后一个客户端离开后的等待时间
+  - 避免客户端快速重连导致频繁启停
+  - 默认值：`5s`
+  - 建议范围：5-10秒
+
+- `quick_reconnect_window`:
+  - 客户端断开后的快速重连窗口
+  - 此时间内重连不会重启GStreamer
+  - 默认值：`10s`
+  - 建议范围：10-30秒
+
+### WebRTC Session Configuration (可选)
+
+WebRTC会话配置控制连接管理和重连行为。
+
+```yaml
+webrtc:
+  session:
+    keep_alive_timeout: 30s    # ICE断开后继续推流的时间（默认：30秒）
+```
+
+**参数说明：**
+
+- `keep_alive_timeout`:
+  - WebRTC连接彻底断开后继续推流的时间
+  - 给客户端网络恢复的机会
+  - 默认值：`30s`
+  - 建议范围：30-60秒
+  - 说明：30秒后仍未恢复则停止推流
+
+**使用场景：**
+
+1. **网络不稳定环境**：增加 `keep_alive_timeout` 到 60秒
+2. **频繁重连场景**：增加 `idle_timeout` 到 10秒
+3. **资源受限环境**：禁用按需推流（`enabled: false`）
+
+**详细文档：** 参见 `docs/gstreamer-on-demand-streaming.md`
 
 ## Common Configuration Issues
 

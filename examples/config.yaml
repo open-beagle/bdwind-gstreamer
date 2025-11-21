@@ -29,6 +29,10 @@ webrtc:
   ice_servers:
     - urls: ["stun:stun.ali.wodcloud.com:3478"]
 
+  # 会话配置（可选）
+  # session:
+  #   keep_alive_timeout: 30s  # ICE断开后继续推流的时间，默认30秒
+
 # 日志配置
 logging:
   level: "info"
