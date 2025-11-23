@@ -38,6 +38,7 @@ class SignalingClient {
     this._connectionTimer = null;
     this._protocolMode = "auto"; // 'auto', 'standard', 'selkies'
     this._connectionStartTime = null;
+    this._iceServers = []; // 从服务器获取的 ICE 服务器配置
 
     // 事件回调
     this.onopen = null;
@@ -263,16 +264,35 @@ class SignalingClient {
       // Selkies 格式
       this._ws.send(JSON.stringify({ ice: candidate }));
     } else {
-      // 标准格式 - 提取候选字符串
-      const candidateString =
-        typeof candidate === "string" ? candidate : candidate.candidate;
-      this.sendMessage("ice-candidate", {
-        candidate: {
-          candidate: candidateString,
+      // 标准格式 - 构造正确的候选对象
+      let candidateData;
+      
+      if (typeof candidate === "string") {
+        // 如果是字符串，构造基本对象
+        candidateData = {
+          candidate: candidate,
           sdpMLineIndex: 0,
-          sdpMid: "video0",
-          usernameFragment: "bQPP",
-        },
+          sdpMid: "0"
+        };
+      } else if (candidate.candidate) {
+        // 如果是 RTCIceCandidate 对象，提取所需字段
+        candidateData = {
+          candidate: candidate.candidate,
+          sdpMid: candidate.sdpMid || "0",
+          sdpMLineIndex: candidate.sdpMLineIndex !== undefined ? candidate.sdpMLineIndex : 0
+        };
+        
+        // 可选字段
+        if (candidate.usernameFragment) {
+          candidateData.usernameFragment = candidate.usernameFragment;
+        }
+      } else {
+        this.logger.error('Invalid candidate format:', candidate);
+        return;
+      }
+      
+      this.sendMessage("ice-candidate", {
+        candidate: candidateData
       });
     }
   }
@@ -312,6 +332,13 @@ class SignalingClient {
       canRetry: this._retryCount < this.maxRetries,
       protocolMode: this._protocolMode,
     };
+  }
+
+  /**
+   * 获取从服务器接收的 ICE 服务器配置
+   */
+  getICEServers() {
+    return this._iceServers;
   }
 
   /**
@@ -660,7 +687,20 @@ class SignalingClient {
       }
 
       // 处理不同消息类型
-      switch (message.type || this._detectMessageType(message)) {
+      const messageType = message.type || this._detectMessageType(message);
+      
+      // 调试日志
+      if (messageType === "ice-candidate" || messageType === "ice" || message.ice) {
+        this.logger.debug("ICE message routing:", {
+          messageType,
+          hasType: !!message.type,
+          hasIce: !!message.ice,
+          hasData: !!message.data,
+          dataHasCandidate: !!(message.data && message.data.candidate)
+        });
+      }
+      
+      switch (messageType) {
         case "welcome":
           this._handleWelcome(message);
           break;
@@ -668,6 +708,7 @@ class SignalingClient {
           this._handleOffer(message);
           break;
         case "ice-candidate":
+        case "ice":  // 也处理 "ice" 类型
           this._handleIceCandidate(message);
           break;
         case "error":
@@ -684,6 +725,8 @@ class SignalingClient {
           if (message.sdp) {
             this._handleSelkiesSDP(message);
           } else if (message.ice) {
+            // 如果有 ice 字段但没有 type，可能是 Selkies 格式
+            this.logger.warn("Received message with 'ice' field but no type, treating as Selkies format");
             this._handleSelkiesICE(message);
           } else {
             this.logger.warn("Unknown message type:", message);
@@ -735,7 +778,8 @@ class SignalingClient {
    */
   _handleSelkiesICE(message) {
     if (message.ice && this.onice) {
-      this.onice(new RTCIceCandidate(message.ice));
+      // Selkies 格式的 ICE 候选，直接传递对象
+      this.onice(message.ice);
     }
   }
 
@@ -748,6 +792,13 @@ class SignalingClient {
     // 检测协议模式
     if (message.data && message.data.protocol) {
       this._protocolMode = message.data.protocol;
+    }
+
+    // 提取 ICE 服务器配置
+    if (message.data && message.data.sessionConfig && message.data.sessionConfig.iceServers) {
+      this._iceServers = message.data.sessionConfig.iceServers;
+      console.log(`🔧 [Signaling] 从服务器获取到 ${this._iceServers.length} 个 ICE 服务器配置:`, this._iceServers);
+      this._setStatus(`Received ${this._iceServers.length} ICE servers from server`);
     }
 
     // 变更状态为已连接
@@ -771,8 +822,29 @@ class SignalingClient {
    * 处理 ICE 候选
    */
   _handleIceCandidate(message) {
-    if (message.data && message.data.candidate && this.onice) {
-      this.onice(new RTCIceCandidate(message.data.candidate));
+    if (message.data && this.onice) {
+      // 服务器发送的格式：{ candidate: "candidate:...", sdpMid: "0", sdpMLineIndex: 0 }
+      // 需要构造完整的 RTCIceCandidateInit 对象
+      const candidateData = message.data;
+      
+      // 检查是否是嵌套的候选格式
+      let candidateInit;
+      if (typeof candidateData.candidate === 'string') {
+        // 直接格式：{ candidate: "candidate:...", sdpMid, sdpMLineIndex }
+        candidateInit = {
+          candidate: candidateData.candidate,
+          sdpMid: candidateData.sdpMid,
+          sdpMLineIndex: candidateData.sdpMLineIndex
+        };
+      } else if (candidateData.candidate && typeof candidateData.candidate === 'object') {
+        // 嵌套格式：{ candidate: { candidate: "...", sdpMid, sdpMLineIndex } }
+        candidateInit = candidateData.candidate;
+      } else {
+        this.logger.error('Invalid ICE candidate format:', candidateData);
+        return;
+      }
+      
+      this.onice(candidateInit);
     }
   }
 
@@ -780,9 +852,14 @@ class SignalingClient {
    * 处理错误消息
    */
   _handleError(message) {
-    const error = new Error(message.data?.message || "Server error");
-    error.code = message.data?.code;
-    error.details = message.data?.details;
+    // 添加详细日志以便调试
+    this.logger.warn("Received error message:", message);
+    
+    const errorMessage = message.data?.message || message.error?.message || "Unknown server error";
+    const error = new Error(errorMessage);
+    error.code = message.data?.code || message.error?.code;
+    error.details = message.data?.details || message.error?.details;
+    error.rawMessage = message;
 
     if (this.onerror) this.onerror(error);
   }
@@ -934,8 +1011,11 @@ class SignalingClient {
         type: "hello",
         peer_id: String(this.peerId),
         data: {
+          client_type: "ui",  // 标识为UI客户端
           client_info: this._getClientInfo(),
           capabilities: this._getClientCapabilities(),
+          supported_protocols: this.getSupportedProtocols(),
+          preferred_protocol: "gstreamer-1.0"
         },
         message_id: messageId,
         timestamp: Date.now(),

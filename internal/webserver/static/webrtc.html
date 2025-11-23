@@ -164,7 +164,7 @@
   <div class="container">
     <div class="header">
       <h1>WebRTC Desktop Capture Test</h1>
-      <p>测试桌面捕获和 WebRTC 流媒体功能</p>
+      <p>测试桌面捕获和 WebRTC 流媒体功能（使用 webrtc.js + signaling.js）</p>
     </div>
 
     <div class="video-container">
@@ -172,10 +172,48 @@
     </div>
 
     <div class="controls">
-      <button class="btn-primary" onclick="startCapture()">开始桌面捕获</button>
-      <button class="btn-danger" onclick="stopCapture()">停止捕获</button>
-      <button class="btn-secondary" onclick="clearLogs()">清除日志</button>
-      <button class="btn-secondary" onclick="toggleStats()">显示/隐藏统计</button>
+      <button class="btn-primary" onclick="app.start()">开始桌面捕获</button>
+      <button class="btn-danger" onclick="app.stop()">停止捕获</button>
+      <button class="btn-secondary" onclick="app.clearLogs()">清除日志</button>
+      <button class="btn-secondary" onclick="app.toggleStats()">显示/隐藏统计</button>
+      <button class="btn-secondary" onclick="app.toggleICEConfig()">ICE 配置</button>
+    </div>
+
+    <!-- ICE 配置面板 -->
+    <div id="iceConfigPanel" style="display: none; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 20px 0;">
+      <h3 style="margin-top: 0;">ICE 候选筛选配置</h3>
+      
+      <div style="margin-bottom: 15px;">
+        <label style="display: block; margin-bottom: 5px; font-weight: bold;">连接策略:</label>
+        <select id="iceStrategy" onchange="app.applyICEStrategy()" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+          <option value="prefer-srflx" selected>优先 SRFLX（推荐用于NAT穿透）</option>
+          <option value="only-srflx">仅 SRFLX（严格模式）- 测试 SRFLX 连接</option>
+          <option value="prefer-relay">优先 RELAY（TURN服务器）</option>
+          <option value="only-relay">仅 RELAY（强制TURN）</option>
+          <option value="all">全部类型（默认）</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom: 15px;">
+        <label style="display: flex; align-items: center;">
+          <input type="checkbox" id="blockIPv6LinkLocal" checked onchange="app.applyICEStrategy()" style="margin-right: 8px;">
+          <span>阻止 IPv6 Link-Local 地址</span>
+        </label>
+      </div>
+
+      <div style="background: #f8f9fa; padding: 10px; border-radius: 4px; font-size: 13px;">
+        <strong>当前配置:</strong>
+        <div id="currentICEConfig" style="margin-top: 5px; font-family: monospace;"></div>
+      </div>
+
+      <div style="margin-top: 15px; padding: 10px; background: #e7f3ff; border-left: 4px solid #007bff; border-radius: 4px; font-size: 13px;">
+        <strong>💡 提示:</strong>
+        <ul style="margin: 5px 0; padding-left: 20px;">
+          <li><strong>SRFLX</strong>: 通过STUN服务器获取的公网地址，适合NAT穿透</li>
+          <li><strong>RELAY</strong>: 通过TURN服务器中继，适合严格防火墙环境</li>
+          <li><strong>HOST</strong>: 本地网络地址，适合局域网连接</li>
+        </ul>
+      </div>
     </div>
 
     <div class="status">
@@ -221,385 +259,287 @@
     <div class="logs" id="logs"></div>
   </div>
 
+  <!-- 引入外部JS文件 -->
+  <script src="signaling.js?v=8"></script>
+  <script src="webrtc.js?v=8"></script>
+  
+  <!-- 应用逻辑 -->
   <script>
-    let ws = null;
-    let pc = null;
-    let serverIceServers = []; // 存储服务器提供的ICE服务器配置
-    const video = document.getElementById('remoteVideo');
-    const statusSpan = document.getElementById('status');
-    const statusIndicator = document.getElementById('statusIndicator');
-    const logsDiv = document.getElementById('logs');
-    const statsGrid = document.getElementById('statsGrid');
-
-    let statsVisible = false;
-
-    function log(message, type = 'info') {
-      const timestamp = new Date().toLocaleTimeString();
-      const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : type === 'warning' ? '⚠️' : 'ℹ️';
-      const logEntry = `[${timestamp}] ${icon} ${message}`;
-      logsDiv.innerHTML += logEntry + '<br>';
-      logsDiv.scrollTop = logsDiv.scrollHeight;
-      console.log(logEntry);
+    // 检查依赖是否加载
+    if (typeof SignalingClient === 'undefined') {
+      console.error('❌ SignalingClient 未加载！请检查 signaling.js 文件');
+      alert('错误：SignalingClient 未加载。请刷新页面或检查控制台。');
     }
-
-    function updateStatus(status, type = 'ready') {
-      statusSpan.textContent = status;
-      statusIndicator.className = `status-indicator status-${type}`;
-      log(`状态更新: ${status}`, type === 'error' ? 'error' : 'info');
+    if (typeof WebRTCManager === 'undefined') {
+      console.error('❌ WebRTCManager 未加载！请检查 webrtc.js 文件');
+      alert('错误：WebRTCManager 未加载。请刷新页面或检查控制台。');
     }
+    
+    // 应用状态
+    const app = {
+      signaling: null,
+      webrtc: null,
+      statsVisible: false,
+      statsInterval: null,
+      iceConfigVisible: false,
 
-    async function updateStats() {
-      if (!pc) return;
+      // 初始化
+      init() {
+        this.log('页面加载完成，准备开始桌面捕获测试', 'success');
+        this.log('点击 "开始桌面捕获" 按钮开始测试', 'info');
+        this.log('🔧 使用 webrtc.js + signaling.js 架构', 'info');
+        this.log('🔧 默认使用 SRFLX 优先策略（适合NAT穿透）', 'info');
+        this.updateICEConfigDisplay();
+      },
 
-      document.getElementById('connectionState').textContent = pc.connectionState;
-      document.getElementById('iceState').textContent = pc.iceConnectionState;
+      // 切换 ICE 配置面板
+      toggleICEConfig() {
+        this.iceConfigVisible = !this.iceConfigVisible;
+        document.getElementById('iceConfigPanel').style.display = 
+          this.iceConfigVisible ? 'block' : 'none';
+      },
 
-      // Count tracks
-      let videoTracks = 0;
-      let audioTracks = 0;
+      // 应用 ICE 策略
+      applyICEStrategy() {
+        const strategy = document.getElementById('iceStrategy').value;
+        const blockIPv6 = document.getElementById('blockIPv6LinkLocal').checked;
 
-      pc.getReceivers().forEach(receiver => {
-        if (receiver.track) {
-          if (receiver.track.kind === 'video') videoTracks++;
-          if (receiver.track.kind === 'audio') audioTracks++;
+        let config = {
+          blockIPv6LinkLocal: blockIPv6
+        };
+
+        switch (strategy) {
+          case 'prefer-srflx':
+            config.preferredTypes = ['srflx'];
+            config.allowedTypes = ['srflx', 'relay', 'host'];
+            config.strictMode = false;
+            break;
+          case 'only-srflx':
+            config.preferredTypes = ['srflx'];
+            config.allowedTypes = ['srflx'];
+            config.strictMode = true;
+            break;
+          case 'prefer-relay':
+            config.preferredTypes = ['relay'];
+            config.allowedTypes = ['relay', 'srflx', 'host'];
+            config.strictMode = false;
+            break;
+          case 'only-relay':
+            config.preferredTypes = ['relay'];
+            config.allowedTypes = ['relay'];
+            config.strictMode = true;
+            break;
+          case 'all':
+            config.preferredTypes = ['srflx', 'relay', 'host'];
+            config.allowedTypes = ['srflx', 'relay', 'host'];
+            config.strictMode = false;
+            break;
         }
-      });
 
-      document.getElementById('videoTracks').textContent = videoTracks;
-      document.getElementById('audioTracks').textContent = audioTracks;
-
-      // Get detailed video stats
-      try {
-        const stats = await pc.getStats();
-        let bytesReceived = 0;
-        let framesDecoded = 0;
-        let keyFramesDecoded = 0;
-        let decoderImplementation = '-';
-
-        stats.forEach(report => {
-          if (report.type === 'inbound-rtp' && report.kind === 'video') {
-            bytesReceived = report.bytesReceived || 0;
-            framesDecoded = report.framesDecoded || 0;
-            keyFramesDecoded = report.keyFramesDecoded || 0;
-            decoderImplementation = report.decoderImplementation || '-';
-            
-            // Log detailed stats for debugging
-            if (framesDecoded === 0 && bytesReceived > 0) {
-              console.warn('⚠️ 接收到数据但未解码任何帧！', {
-                bytesReceived,
-                framesDecoded,
-                keyFramesDecoded,
-                decoderImplementation,
-                fullReport: report
-              });
-            }
-          }
-        });
-
-        document.getElementById('bytesReceived').textContent = (bytesReceived / 1024).toFixed(1) + ' KB';
-        document.getElementById('framesDecoded').textContent = framesDecoded;
-        document.getElementById('keyFramesDecoded').textContent = keyFramesDecoded;
-        document.getElementById('decoderImplementation').textContent = decoderImplementation;
-      } catch (error) {
-        console.error('获取统计信息失败:', error);
-      }
-    }
-
-    function toggleStats() {
-      statsVisible = !statsVisible;
-      statsGrid.style.display = statsVisible ? 'grid' : 'none';
-      if (statsVisible) {
-        updateStats();
-        // Update stats every second when visible
-        if (!window.statsInterval) {
-          window.statsInterval = setInterval(updateStats, 1000);
+        if (this.webrtc) {
+          this.webrtc.setICEFilterConfig(config);
+          this.log(`🔧 ICE策略已更新: ${strategy}`, 'info');
         }
-      } else {
-        if (window.statsInterval) {
-          clearInterval(window.statsInterval);
-          window.statsInterval = null;
+
+        this.updateICEConfigDisplay(config);
+      },
+
+      // 更新 ICE 配置显示
+      updateICEConfigDisplay(config) {
+        if (!config) {
+          config = {
+            preferredTypes: ['srflx'],
+            allowedTypes: ['srflx', 'relay', 'host'],
+            strictMode: false,
+            blockIPv6LinkLocal: true
+          };
         }
-      }
-    }
 
-    function startCapture() {
-      log('开始桌面捕获测试...', 'info');
-      updateStatus('正在连接...', 'connecting');
+        const display = document.getElementById('currentICEConfig');
+        if (display) {
+          display.innerHTML = `
+            优先类型: ${config.preferredTypes.join(', ')}<br>
+            允许类型: ${config.allowedTypes.join(', ')}<br>
+            严格模式: ${config.strictMode ? '是' : '否'}<br>
+            阻止IPv6 Link-Local: ${config.blockIPv6LinkLocal ? '是' : '否'}
+          `;
+        }
+      },
 
-      // Connect to signaling server
-      ws = new WebSocket(`ws://${window.location.host}/api/signaling`);
-
-      ws.onopen = function () {
-        log('✅ WebSocket 连接成功', 'success');
-        updateStatus('已连接到信令服务器', 'connected');
-        log('⏳ 等待服务器配置...', 'info');
-        // 不要立即创建PeerConnection，等待welcome消息
-      };
-
-      ws.onmessage = function (event) {
+      // 开始捕获
+      async start() {
         try {
-          const message = JSON.parse(event.data);
-          log(`收到消息: ${message.type}`, 'info');
+          this.log('开始桌面捕获测试...', 'info');
+          this.updateStatus('正在连接...', 'connecting');
 
-          switch (message.type) {
-            case 'offer':
-              handleOffer(message);
-              break;
-            case 'ice-candidate':
-              handleIceCandidate(message);
-              break;
-            case 'welcome':
-              log('✅ 收到欢迎消息', 'success');
-              // 提取ICE服务器配置
-              if (message.data && message.data.session_config && message.data.session_config.ice_servers) {
-                serverIceServers = message.data.session_config.ice_servers.map(server => ({
-                  urls: server.urls,
-                  username: server.username,
-                  credential: server.credential
-                }));
-                log(`📡 服务器提供了 ${serverIceServers.length} 个 ICE 服务器`, 'success');
-                serverIceServers.forEach((server, i) => {
-                  log(`   ICE Server ${i + 1}: ${JSON.stringify(server.urls)}`, 'info');
-                });
-              } else {
-                log('⚠️ 欢迎消息中没有ICE服务器配置，将使用默认配置', 'warning');
-              }
-              
-              // 收到welcome消息后，创建PeerConnection并请求offer
-              log('🔧 使用服务器配置创建 PeerConnection...', 'info');
-              createPeerConnection();
-              
-              // Request offer after a short delay
-              setTimeout(() => {
-                log('📞 请求 WebRTC offer...', 'info');
-                ws.send(JSON.stringify({
-                  type: 'request-offer',
-                  timestamp: Date.now(),
-                  constraints: {
-                    video: true,
-                    audio: false
-                  }
-                }));
-              }, 500);
-              break;
-            case 'pong':
-              log('收到 pong 响应', 'info');
-              break;
-            case 'error':
-              log(`服务器错误: ${message.message || '未知错误'}`, 'error');
-              break;
-            default:
-              log(`未知消息类型: ${message.type}`, 'warning');
-          }
+          const video = document.getElementById('remoteVideo');
+
+          // 创建信令客户端
+          this.signaling = new SignalingClient('/api/signaling', 1, {
+            logger: console,
+            maxRetries: 3,
+            retryDelay: 3000
+          });
+
+          // 设置信令回调
+          this.signaling.onstatus = (msg) => this.log(`📡 信令: ${msg}`, 'info');
+          this.signaling.onerror = (err) => this.log(`❌ 信令错误: ${err.message}`, 'error');
+          
+          // 创建WebRTC管理器
+          this.webrtc = new WebRTCManager(this.signaling, video, 1);
+
+          // 应用当前的 ICE 策略
+          this.applyICEStrategy();
+
+          // 设置WebRTC回调
+          this.webrtc.onstatus = (msg) => this.log(`🎥 WebRTC: ${msg}`, 'info');
+          this.webrtc.ondebug = (msg) => this.log(`🐛 ${msg}`, 'info');
+          this.webrtc.onerror = (msg) => this.log(`❌ WebRTC错误: ${msg}`, 'error');
+          
+          this.webrtc.onconnectionstatechange = (state) => {
+            this.log(`🔗 连接状态: ${state}`, 'info');
+            this.updateStatus(`连接: ${state}`, state === 'connected' ? 'connected' : 'connecting');
+            
+            if (state === 'connected') {
+              this.log('✅ WebRTC 连接建立成功!', 'success');
+              this.updateStatus('桌面捕获已激活', 'connected');
+            } else if (state === 'failed') {
+              this.log('❌ WebRTC 连接失败', 'error');
+              this.updateStatus('连接失败', 'error');
+            }
+          };
+
+          // 连接
+          await this.webrtc.initialize();
+          this.webrtc.connect();
+
+          this.log('✅ 初始化完成', 'success');
+
         } catch (error) {
-          log(`解析消息失败: ${error}`, 'error');
+          this.log(`❌ 启动失败: ${error.message}`, 'error');
+          this.updateStatus('启动失败', 'error');
         }
-      };
+      },
 
-      ws.onerror = function (error) {
-        log(`WebSocket 错误: ${error}`, 'error');
-        updateStatus('WebSocket 连接错误', 'error');
-      };
+      // 停止捕获
+      stop() {
+        this.log('停止桌面捕获...', 'info');
 
-      ws.onclose = function (event) {
-        log(`WebSocket 连接关闭 (代码: ${event.code}, 原因: ${event.reason || '无'})`, 'warning');
-        updateStatus('连接已断开', 'error');
-      };
-    }
+        if (this.webrtc) {
+          this.webrtc.reset();
+          this.webrtc = null;
+        }
 
-    function createPeerConnection() {
-      log('创建 PeerConnection...', 'info');
+        if (this.signaling) {
+          this.signaling.disconnect();
+          this.signaling = null;
+        }
 
-      // 使用服务器提供的ICE服务器配置
-      const config = {
-        iceServers: serverIceServers,
-        iceCandidatePoolSize: 10,
-        iceTransportPolicy: 'all',  // 使用所有候选
-        bundlePolicy: 'max-bundle',
-        rtcpMuxPolicy: 'require'
-      };
+        const video = document.getElementById('remoteVideo');
+        video.srcObject = null;
 
-      log(`使用 ${config.iceServers.length} 个 ICE 服务器:`, 'info');
-      config.iceServers.forEach((server, i) => {
-        log(`  ICE Server ${i + 1}: ${JSON.stringify(server.urls)}`, 'info');
-      });
+        this.updateStatus('已停止', 'ready');
 
-      pc = new RTCPeerConnection(config);
+        if (this.statsInterval) {
+          clearInterval(this.statsInterval);
+          this.statsInterval = null;
+        }
+      },
 
-      pc.onicecandidate = function (event) {
-        if (event.candidate) {
-          log(`生成 ICE 候选: ${event.candidate.candidate.substring(0, 50)}...`, 'info');
-          ws.send(JSON.stringify({
-            type: 'ice-candidate',
-            data: {
-              candidate: {
-                candidate: event.candidate.candidate,
-                sdpMid: event.candidate.sdpMid,
-                sdpMLineIndex: event.candidate.sdpMLineIndex
-              }
-            }
-          }));
+      // 切换统计显示
+      toggleStats() {
+        this.statsVisible = !this.statsVisible;
+        const statsGrid = document.getElementById('statsGrid');
+        statsGrid.style.display = this.statsVisible ? 'grid' : 'none';
+
+        if (this.statsVisible) {
+          this.updateStats();
+          if (!this.statsInterval) {
+            this.statsInterval = setInterval(() => this.updateStats(), 1000);
+          }
         } else {
-          log('ICE 候选收集完成', 'success');
-        }
-      };
-
-      pc.ontrack = function (event) {
-        log('收到远程视频轨道!', 'success');
-        updateStatus('视频流已接收', 'connected');
-        video.srcObject = event.streams[0];
-
-        // Show video stats
-        const track = event.track;
-        log(`轨道信息: 类型=${track.kind}, ID=${track.id}, 状态=${track.readyState}`, 'info');
-
-        // Update video element visibility
-        video.style.display = 'block';
-      };
-
-      pc.onconnectionstatechange = function () {
-        log(`连接状态: ${pc.connectionState}`, 'info');
-        updateStatus(`连接: ${pc.connectionState}`, pc.connectionState === 'connected' ? 'connected' : 'connecting');
-
-        if (pc.connectionState === 'connected') {
-          log('WebRTC 连接建立成功!', 'success');
-          updateStatus('桌面捕获已激活', 'connected');
-        } else if (pc.connectionState === 'failed') {
-          log('WebRTC 连接失败', 'error');
-          updateStatus('连接失败', 'error');
-        }
-
-        updateStats();
-      };
-
-      pc.oniceconnectionstatechange = function () {
-        log(`ICE 连接状态: ${pc.iceConnectionState}`, 'info');
-        updateStats();
-      };
-
-      pc.onicegatheringstatechange = function () {
-        log(`ICE 收集状态: ${pc.iceGatheringState}`, 'info');
-      };
-    }
-
-    async function handleOffer(message) {
-      log('处理服务器 offer...', 'info');
-
-      try {
-        const offer = message.data.sdp || message.data;
-        log(`Offer SDP 长度: ${offer.sdp ? offer.sdp.length : 'N/A'} 字符`, 'info');
-
-        // Check SDP content
-        if (offer.sdp) {
-          const hasVideo = offer.sdp.includes('m=video');
-          const hasAudio = offer.sdp.includes('m=audio');
-          log(`SDP 内容: 视频=${hasVideo}, 音频=${hasAudio}`, hasVideo ? 'success' : 'warning');
-
-          if (!hasVideo) {
-            log('警告: SDP 中没有视频轨道，这可能是黑屏的原因!', 'warning');
+          if (this.statsInterval) {
+            clearInterval(this.statsInterval);
+            this.statsInterval = null;
           }
         }
+      },
 
-        await pc.setRemoteDescription({
-          type: 'offer',
-          sdp: offer.sdp
+      // 更新统计信息
+      async updateStats() {
+        if (!this.webrtc || !this.webrtc.peerConnection) return;
+
+        const pc = this.webrtc.peerConnection;
+        
+        document.getElementById('connectionState').textContent = pc.connectionState;
+        document.getElementById('iceState').textContent = pc.iceConnectionState;
+
+        // 统计轨道
+        let videoTracks = 0;
+        let audioTracks = 0;
+        pc.getReceivers().forEach(receiver => {
+          if (receiver.track) {
+            if (receiver.track.kind === 'video') videoTracks++;
+            if (receiver.track.kind === 'audio') audioTracks++;
+          }
         });
 
-        log('远程描述设置成功，创建 answer...', 'success');
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        document.getElementById('videoTracks').textContent = videoTracks;
+        document.getElementById('audioTracks').textContent = audioTracks;
 
-        log('发送 answer 到服务器...', 'info');
-        ws.send(JSON.stringify({
-          type: 'answer',
-          data: {
-            sdp: {
-              type: 'answer',
-              sdp: answer.sdp
+        // 获取详细统计
+        try {
+          const stats = await pc.getStats();
+          let bytesReceived = 0;
+          let framesDecoded = 0;
+          let keyFramesDecoded = 0;
+          let decoderImplementation = '-';
+
+          stats.forEach(report => {
+            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              bytesReceived = report.bytesReceived || 0;
+              framesDecoded = report.framesDecoded || 0;
+              keyFramesDecoded = report.keyFramesDecoded || 0;
+              decoderImplementation = report.decoderImplementation || '-';
             }
-          }
-        }));
+          });
 
-        updateStatus('Answer 已发送，等待连接...', 'connecting');
-      } catch (error) {
-        log(`处理 offer 失败: ${error}`, 'error');
-        updateStatus('处理 offer 错误', 'error');
+          document.getElementById('bytesReceived').textContent = (bytesReceived / 1024).toFixed(1) + ' KB';
+          document.getElementById('framesDecoded').textContent = framesDecoded;
+          document.getElementById('keyFramesDecoded').textContent = keyFramesDecoded;
+          document.getElementById('decoderImplementation').textContent = decoderImplementation;
+        } catch (error) {
+          console.error('获取统计信息失败:', error);
+        }
+      },
+
+      // 清除日志
+      clearLogs() {
+        document.getElementById('logs').innerHTML = '';
+      },
+
+      // 记录日志
+      log(message, type = 'info') {
+        const timestamp = new Date().toLocaleTimeString();
+        const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : type === 'warning' ? '⚠️' : 'ℹ️';
+        const logEntry = `[${timestamp}] ${icon} ${message}`;
+        
+        const logsDiv = document.getElementById('logs');
+        logsDiv.innerHTML += logEntry + '<br>';
+        logsDiv.scrollTop = logsDiv.scrollHeight;
+        
+        console.log(logEntry);
+      },
+
+      // 更新状态
+      updateStatus(status, type = 'ready') {
+        document.getElementById('status').textContent = status;
+        document.getElementById('statusIndicator').className = `status-indicator status-${type}`;
       }
-    }
+    };
 
-    async function handleIceCandidate(message) {
-      log(`📥 收到服务器 ICE 候选消息`, 'info');
-      
-      const candidateData = message.data;
-      
-      // 详细日志
-      log(`   完整消息: ${JSON.stringify(message, null, 2)}`, 'info');
-      log(`   candidateData类型: ${typeof candidateData}`, 'info');
-      log(`   candidateData.candidate类型: ${typeof candidateData?.candidate}`, 'info');
-      
-      // 检查数据格式
-      if (!candidateData || !candidateData.candidate) {
-        log(`❌ ICE 候选数据格式错误: ${JSON.stringify(candidateData)}`, 'error');
-        return;
-      }
-      
-      log(`   候选字符串: ${candidateData.candidate.substring(0, 80)}...`, 'info');
-      log(`   sdpMid: ${candidateData.sdpMid}`, 'info');
-      log(`   sdpMLineIndex: ${candidateData.sdpMLineIndex}`, 'info');
-
-      try {
-        await pc.addIceCandidate({
-          candidate: candidateData.candidate,
-          sdpMid: candidateData.sdpMid,
-          sdpMLineIndex: candidateData.sdpMLineIndex
-        });
-        log('✅ ICE 候选添加成功', 'success');
-      } catch (error) {
-        log(`❌ 添加 ICE 候选失败: ${error.message}`, 'error');
-        log(`   错误详情: ${JSON.stringify(error)}`, 'error');
-      }
-    }
-
-    function stopCapture() {
-      log('停止桌面捕获...', 'info');
-
-      if (pc) {
-        pc.close();
-        pc = null;
-        log('PeerConnection 已关闭', 'info');
-      }
-
-      if (ws) {
-        ws.close();
-        ws = null;
-        log('WebSocket 已关闭', 'info');
-      }
-
-      video.srcObject = null;
-      video.style.display = 'none';
-      updateStatus('已停止', 'ready');
-
-      // Clear stats interval
-      if (window.statsInterval) {
-        clearInterval(window.statsInterval);
-        window.statsInterval = null;
-      }
-    }
-
-    function clearLogs() {
-      logsDiv.innerHTML = '';
-    }
-
-    // Initialize
-    log('页面加载完成，准备开始桌面捕获测试', 'success');
-    log('点击 "开始桌面捕获" 按钮开始测试', 'info');
-
-    // Auto-update stats if visible
-    setInterval(() => {
-      if (statsVisible && pc) {
-        updateStats();
-      }
-    }, 1000);
+    // 页面加载完成后初始化
+    window.addEventListener('DOMContentLoaded', () => app.init());
   </script>
 </body>
 

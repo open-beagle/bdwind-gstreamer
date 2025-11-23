@@ -3,7 +3,6 @@ package webrtc
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -12,8 +11,8 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/sirupsen/logrus"
 
-	"github.com/open-beagle/bdwind-gstreamer/internal/common/events"
 	"github.com/open-beagle/bdwind-gstreamer/internal/common/config"
+	"github.com/open-beagle/bdwind-gstreamer/internal/common/events"
 	webrtcEvents "github.com/open-beagle/bdwind-gstreamer/internal/webrtc/events"
 )
 
@@ -249,17 +248,9 @@ func (m *WebRTCManager) setupICEHandling() {
 			if m.eventBus != nil {
 				// 将 ICECandidateInit 转换为 map[string]interface{}
 				candidateInit := candidate.ToJSON()
-
-				// 过滤IPv6候选，只使用IPv4
 				candidateStr := candidateInit.Candidate
-				if strings.Contains(candidateStr, ":") && !strings.Contains(candidateStr, ".") {
-					// 这是IPv6地址（包含:但不包含.），跳过
-					m.logger.Debugf("Skipping IPv6 candidate: %s", candidateStr[:50])
-					m.mutex.Unlock()
-					return
-				}
 
-				m.logger.Infof("📡 Publishing ICE candidate: %s", candidateStr[:80])
+				m.logger.Infof("📡 Publishing ICE candidate: %s", candidateStr[:min(80, len(candidateStr))])
 
 				candidateMap := map[string]interface{}{
 					"candidate": candidateInit.Candidate,

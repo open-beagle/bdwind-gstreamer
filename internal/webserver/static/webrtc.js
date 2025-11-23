@@ -35,6 +35,15 @@ class WebRTCManager {
     this._connected = false;
     this._send_channel = null;
     this.streams = null;
+    this._processingOffer = false;  // 防止重复处理 offer
+
+    // ICE 候选筛选配置
+    this.iceFilterConfig = {
+      preferredTypes: ['srflx'],  // 优先使用的候选类型：srflx (Server Reflexive)
+      allowedTypes: ['srflx', 'relay', 'host'],  // 允许的候选类型
+      blockIPv6LinkLocal: true,  // 阻止 IPv6 link-local 地址
+      strictMode: false  // 严格模式：true=只使用preferredTypes，false=优先使用但允许其他
+    };
 
     // 回调函数
     this.onstatus = null;
@@ -154,16 +163,8 @@ class WebRTCManager {
   connect() {
     this._setStatus("开始建立 WebRTC 连接");
 
-    this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig);
-
-    // 绑定事件处理器
-    this.peerConnection.ontrack = this._ontrack.bind(this);
-    this.peerConnection.onicecandidate = this._onPeerICE.bind(this);
-    this.peerConnection.ondatachannel = this._onPeerDataChannel.bind(this);
-    this.peerConnection.onconnectionstatechange = () => {
-      this._handleConnectionStateChange(this.peerConnection.connectionState);
-      this._setConnectionState(this.peerConnection.connectionState);
-    };
+    // 先不创建 PeerConnection，等收到服务器的 ICE 配置后再创建
+    // 这样可以确保使用服务器提供的 TURN 服务器配置
 
     if (this.signaling) {
       // 设置对等ID
@@ -175,6 +176,59 @@ class WebRTCManager {
 
     this.connectionState = "connecting";
     this._connected = false;
+  }
+
+  /**
+   * 创建 PeerConnection（在收到服务器配置后调用）
+   */
+  _createPeerConnection() {
+    if (this.peerConnection) {
+      console.log(`⚠️ [WebRTC] PeerConnection 已存在，跳过创建`);
+      return;
+    }
+
+    // 从 SignalingClient 获取 ICE 服务器配置
+    if (this.signaling && this.signaling.getICEServers) {
+      const serverICEServers = this.signaling.getICEServers();
+      if (serverICEServers && serverICEServers.length > 0) {
+        console.log(`🔧 [WebRTC] 使用服务器提供的 ${serverICEServers.length} 个 ICE 服务器:`, serverICEServers);
+        this.rtcPeerConfig.iceServers = serverICEServers;
+      } else {
+        console.log(`⚠️ [WebRTC] 服务器未提供 ICE 配置，使用默认配置:`, this.rtcPeerConfig.iceServers);
+      }
+    }
+
+    console.log(`🔧 [WebRTC] 创建 PeerConnection，ICE 配置:`, this.rtcPeerConfig);
+    this.peerConnection = new RTCPeerConnection(this.rtcPeerConfig);
+
+    // 绑定事件处理器
+    this.peerConnection.ontrack = this._ontrack.bind(this);
+    this.peerConnection.onicecandidate = this._onPeerICE.bind(this);
+    this.peerConnection.ondatachannel = this._onPeerDataChannel.bind(this);
+    this.peerConnection.onconnectionstatechange = () => {
+      this._handleConnectionStateChange(this.peerConnection.connectionState);
+      this._setConnectionState(this.peerConnection.connectionState);
+    };
+
+    // 监听 ICE 连接状态变化，查看哪些候选对正在尝试
+    this.peerConnection.oniceconnectionstatechange = () => {
+      const iceState = this.peerConnection.iceConnectionState;
+      console.log(`🧊 [ICE] ICE 连接状态变化: ${iceState}`);
+      this._setStatus(`🧊 ICE 连接状态: ${iceState}`);
+      this._setDebug(`🧊 ICE 连接状态: ${iceState}`);
+      
+      // 当 ICE 状态变化时，打印当前选中的候选对
+      if (iceState === 'connected' || iceState === 'completed') {
+        this._logSelectedCandidatePair();
+      } else if (iceState === 'failed') {
+        this._setStatus(`❌ ICE 连接失败，所有候选对都无法连接`);
+        this._logAllCandidatePairs();
+      } else if (iceState === 'checking') {
+        this._setStatus(`🔍 ICE 正在检查候选对...`);
+      }
+    };
+
+    this._setStatus("PeerConnection 已创建");
   }
 
   /**
@@ -226,20 +280,54 @@ class WebRTCManager {
    * 处理 SDP - 优化版本
    */
   _onSDP(sdp) {
+    // 如果 PeerConnection 还未创建，先创建它
+    if (!this.peerConnection) {
+      console.log(`🔧 [WebRTC] 收到 SDP，但 PeerConnection 未创建，先创建 PeerConnection`);
+      this._createPeerConnection();
+    }
+
+    if (!this.peerConnection) {
+      this._setError("Cannot process SDP: failed to create peer connection");
+      return;
+    }
+
+    // 检查当前信令状态
+    const currentState = this.peerConnection.signalingState;
+    this._setDebug(`Processing SDP offer, current signaling state: ${currentState}`);
+
+    // 严格的状态检查：只在 stable 状态下处理新的 offer
+    if (currentState !== 'stable') {
+      this._setDebug(`⚠️ Ignoring duplicate offer in state: ${currentState}`);
+      return;
+    }
+
+    // 标记正在处理 SDP，防止重复处理
+    if (this._processingOffer) {
+      this._setDebug(`⚠️ Already processing an offer, ignoring duplicate`);
+      return;
+    }
+    this._processingOffer = true;
+
     this.peerConnection
       .setRemoteDescription(sdp)
-      .then(() => this.peerConnection.createAnswer())
+      .then(() => {
+        this._setDebug(`Remote description set, creating answer...`);
+        return this.peerConnection.createAnswer();
+      })
       .then((local_sdp) => {
         // SDP 优化
         this._optimizeSDP(local_sdp);
         return this.peerConnection.setLocalDescription(local_sdp);
       })
       .then(() => {
+        this._setDebug(`Local description set, sending answer to server`);
         // 验证并发送 SDP - 兼容新旧接口
         this._sendSDP(this.peerConnection.localDescription);
+        this._processingOffer = false;
       })
       .catch((error) => {
         this._setError("Error processing SDP: " + error.message);
+        this._processingOffer = false;
       });
   }
 
@@ -326,7 +414,7 @@ class WebRTCManager {
   }
 
   /**
-   * 处理 ICE 候选 - 优化版本
+   * 处理 ICE 候选 - 优化版本（带筛选和详细日志）
    */
   _onSignalingICE(icecandidate) {
     if (!this.peerConnection) {
@@ -334,25 +422,72 @@ class WebRTCManager {
       return;
     }
 
+    // 规范化候选格式
+    // signaling.js 现在传递的是 { candidate: "...", sdpMid: "...", sdpMLineIndex: ... }
+    let candidateInit = icecandidate;
+    
+    // 如果是旧格式的 RTCIceCandidate 对象，转换为 init 格式
+    if (icecandidate.candidate && typeof icecandidate.toJSON === 'function') {
+      candidateInit = icecandidate.toJSON();
+    }
+
     // 验证 ICE 候选
-    if (!this._validateICECandidate(icecandidate)) {
-      this._setError("Invalid ICE candidate received");
+    if (!candidateInit || typeof candidateInit.candidate !== 'string') {
+      this._setError("Invalid ICE candidate received: " + JSON.stringify(icecandidate));
       return;
     }
 
-    this.peerConnection.addIceCandidate(icecandidate).catch((error) => {
+    // 解析并记录候选信息
+    const candidateInfo = this._parseICECandidate(candidateInit);
+    this._logICECandidate('received', candidateInfo);
+
+    // 筛选候选
+    console.log(`🔍 [ICE] 准备筛选远程候选:`, candidateInfo);
+    const filterResult = this._filterRemoteCandidate(candidateInfo);
+    console.log(`🔍 [ICE] 筛选结果: ${filterResult ? '通过' : '拒绝'}`);
+    
+    if (!filterResult) {
+      console.log(`⏭️ [ICE] 跳过远程候选（被筛选规则过滤）: ${candidateInfo.type} ${candidateInfo.address}`);
+      this._setDebug(`⏭️ 跳过远程候选（被筛选规则过滤）: ${candidateInfo.type} ${candidateInfo.address}`);
+      return;
+    }
+
+    console.log(`✅ [ICE] 添加远程候选到PeerConnection:`, candidateInfo.type, candidateInfo.address);
+    this.peerConnection.addIceCandidate(candidateInit).catch((error) => {
+      console.error(`❌ [ICE] 添加远程候选失败:`, error);
       this._setError("Error adding ICE candidate: " + error.message);
     });
   }
 
   /**
-   * 处理 PeerConnection ICE 候选 - 优化版本
+   * 处理 PeerConnection ICE 候选 - 优化版本（带筛选和详细日志）
    */
   _onPeerICE(event) {
-    if (event.candidate === null) return;
+    if (event.candidate === null) {
+      this._setStatus("✅ 本地ICE候选收集完成");
+      return;
+    }
+
+    const candidate = event.candidate;
+    
+    // 解析并记录候选信息
+    const candidateInfo = this._parseICECandidate(candidate);
+    this._logICECandidate('generated', candidateInfo);
+
+    // 筛选候选
+    console.log(`🔍 [ICE] 准备筛选本地候选:`, candidateInfo);
+    const filterResult = this._filterLocalCandidate(candidateInfo);
+    console.log(`🔍 [ICE] 筛选结果: ${filterResult ? '通过' : '拒绝'}`);
+    
+    if (!filterResult) {
+      console.log(`⏭️ [ICE] 跳过本地候选（被筛选规则过滤）: ${candidateInfo.type} ${candidateInfo.address}`);
+      this._setDebug(`⏭️ 跳过本地候选（被筛选规则过滤）: ${candidateInfo.type} ${candidateInfo.address}`);
+      return;
+    }
 
     // 发送 ICE 候选 - 兼容新旧接口
-    this._sendICE(event.candidate);
+    console.log(`📤 [ICE] 发送本地候选到服务器:`, candidateInfo.type, candidateInfo.address);
+    this._sendICE(candidate);
   }
 
   /**
@@ -364,6 +499,218 @@ class WebRTCManager {
       typeof candidate === "object" &&
       (typeof candidate.candidate === "string" || candidate.candidate === null)
     );
+  }
+
+  /**
+   * 解析 ICE 候选字符串
+   */
+  _parseICECandidate(candidate) {
+    const candidateStr = candidate.candidate || '';
+    
+    // 解析候选字符串
+    // 格式: candidate:foundation component protocol priority ip port typ type ...
+    const parts = candidateStr.split(' ');
+    
+    const info = {
+      raw: candidateStr,
+      foundation: parts[0]?.replace('candidate:', '') || '',
+      component: parts[1] || '',
+      protocol: parts[2] || '',
+      priority: parts[3] || '',
+      address: parts[4] || '',
+      port: parts[5] || '',
+      type: '',
+      relatedAddress: '',
+      relatedPort: '',
+      tcpType: '',
+      generation: '',
+      ufrag: '',
+      networkCost: ''
+    };
+
+    // 解析类型和其他属性
+    for (let i = 6; i < parts.length; i += 2) {
+      const key = parts[i];
+      const value = parts[i + 1];
+      
+      switch (key) {
+        case 'typ':
+          info.type = value;
+          break;
+        case 'raddr':
+          info.relatedAddress = value;
+          break;
+        case 'rport':
+          info.relatedPort = value;
+          break;
+        case 'tcptype':
+          info.tcpType = value;
+          break;
+        case 'generation':
+          info.generation = value;
+          break;
+        case 'ufrag':
+          info.ufrag = value;
+          break;
+        case 'network-cost':
+          info.networkCost = value;
+          break;
+      }
+    }
+
+    // 判断IP类型
+    info.ipVersion = this._detectIPVersion(info.address);
+    
+    return info;
+  }
+
+  /**
+   * 检测IP版本
+   */
+  _detectIPVersion(address) {
+    if (!address) return 'unknown';
+    
+    // IPv6地址包含冒号
+    if (address.includes(':')) {
+      // 排除IPv4映射的IPv6地址 (::ffff:192.168.1.1)
+      if (address.includes('.')) {
+        return 'ipv4-mapped';
+      }
+      return 'ipv6';
+    }
+    
+    // IPv4地址包含点
+    if (address.includes('.')) {
+      return 'ipv4';
+    }
+    
+    return 'unknown';
+  }
+
+  /**
+   * 记录 ICE 候选详细信息
+   */
+  _logICECandidate(direction, info) {
+    const emoji = direction === 'generated' ? '📤' : '📥';
+    const action = direction === 'generated' ? '生成本地' : '收到远程';
+    
+    this._setDebug(`${emoji} ${action} ICE 候选:`);
+    this._setDebug(`   类型: ${info.type} (${info.ipVersion})`);
+    this._setDebug(`   协议: ${info.protocol}`);
+    this._setDebug(`   地址: ${info.address}:${info.port}`);
+    this._setDebug(`   优先级: ${info.priority}`);
+    
+    if (info.relatedAddress) {
+      this._setDebug(`   相关地址: ${info.relatedAddress}:${info.relatedPort}`);
+    }
+    
+    if (info.tcpType) {
+      this._setDebug(`   TCP类型: ${info.tcpType}`);
+    }
+    
+    this._setDebug(`   完整候选: ${info.raw.substring(0, 100)}${info.raw.length > 100 ? '...' : ''}`);
+
+    // 特别标记 srflx 候选，方便调试
+    if (info.type === 'srflx') {
+      console.log(`🌐 [SRFLX ${direction === 'generated' ? '本地' : '远程'}] ${info.address}:${info.port} (优先级: ${info.priority})`);
+      this._setDebug(`🌐 [SRFLX ${direction === 'generated' ? '本地' : '远程'}] 这是通过 STUN 服务器获取的公网地址`);
+    }
+    
+    // 特别标记 relay 候选
+    if (info.type === 'relay') {
+      console.log(`🔄 [RELAY ${direction === 'generated' ? '本地' : '远程'}] ${info.address}:${info.port} (优先级: ${info.priority})`);
+      this._setDebug(`🔄 [RELAY ${direction === 'generated' ? '本地' : '远程'}] 这是通过 TURN 服务器中继的地址`);
+    }
+  }
+
+  /**
+   * 筛选本地 ICE 候选
+   * 返回 true 表示保留，false 表示过滤掉
+   */
+  _filterLocalCandidate(info) {
+    // 规则1: 过滤掉无效候选
+    if (!info.address || !info.type) {
+      this._setDebug(`   ❌ 筛选原因: 候选信息不完整`);
+      return false;
+    }
+
+    // 规则2: 过滤IPv6 link-local地址 (fe80::)
+    if (this.iceFilterConfig.blockIPv6LinkLocal && 
+        info.ipVersion === 'ipv6' && 
+        info.address.startsWith('fe80:')) {
+      this._setDebug(`   ❌ 筛选原因: IPv6 link-local地址不适用于远程连接`);
+      return false;
+    }
+
+    // 规则3: 类型筛选 - 优先使用 srflx
+    const isPreferred = this.iceFilterConfig.preferredTypes.includes(info.type);
+    const isAllowed = this.iceFilterConfig.allowedTypes.includes(info.type);
+
+    if (this.iceFilterConfig.strictMode) {
+      // 严格模式：只允许优先类型
+      if (!isPreferred) {
+        this._setDebug(`   ❌ 筛选原因: 严格模式下只接受 ${this.iceFilterConfig.preferredTypes.join(', ')} 类型`);
+        return false;
+      }
+    } else {
+      // 宽松模式：检查是否在允许列表中
+      if (!isAllowed) {
+        this._setDebug(`   ❌ 筛选原因: 候选���型 ${info.type} 不在允许列表中`);
+        return false;
+      }
+    }
+
+    if (isPreferred) {
+      this._setDebug(`   ✅ 候选通过筛选（优先类型: ${info.type}），将发送到服务器`);
+    } else {
+      this._setDebug(`   ✅ 候选通过筛选（备用类型: ${info.type}），将发送到服务器`);
+    }
+    return true;
+  }
+
+  /**
+   * 筛选远程 ICE 候选
+   * 返回 true 表示保留，false 表示过滤掉
+   */
+  _filterRemoteCandidate(info) {
+    // 规则1: 过滤掉无效候选
+    if (!info.address || !info.type) {
+      this._setDebug(`   ❌ 筛选原因: 候选信息不完整`);
+      return false;
+    }
+
+    // 规则2: 过滤IPv6 link-local地址
+    if (this.iceFilterConfig.blockIPv6LinkLocal && 
+        info.ipVersion === 'ipv6' && 
+        info.address.startsWith('fe80:')) {
+      this._setDebug(`   ❌ 筛选原因: IPv6 link-local地址不适用于远程连接`);
+      return false;
+    }
+
+    // 规则3: 类型筛选 - 优先使用 srflx
+    const isPreferred = this.iceFilterConfig.preferredTypes.includes(info.type);
+    const isAllowed = this.iceFilterConfig.allowedTypes.includes(info.type);
+
+    if (this.iceFilterConfig.strictMode) {
+      // 严格模式：只允许优先类型
+      if (!isPreferred) {
+        this._setDebug(`   ❌ 筛选原因: 严格模式下只接受 ${this.iceFilterConfig.preferredTypes.join(', ')} 类型`);
+        return false;
+      }
+    } else {
+      // 宽松模式：检查是否在允许列表中
+      if (!isAllowed) {
+        this._setDebug(`   ❌ 筛选原因: 候选类型 ${info.type} 不在允许列表中`);
+        return false;
+      }
+    }
+
+    if (isPreferred) {
+      this._setDebug(`   ✅ 候选通过筛选（优先类型: ${info.type}），将添加到PeerConnection`);
+    } else {
+      this._setDebug(`   ✅ 候选通过筛选（备用类型: ${info.type}），将添加到PeerConnection`);
+    }
+    return true;
   }
 
   /**
@@ -655,6 +1002,121 @@ class WebRTCManager {
     }
 
     return signalingState;
+  }
+
+  /**
+   * 设置 ICE 候选筛选配置
+   * @param {Object} config - 筛选配置
+   * @param {Array<string>} config.preferredTypes - 优先使用的候选类型 ['srflx', 'relay', 'host']
+   * @param {Array<string>} config.allowedTypes - 允许的候选类型
+   * @param {boolean} config.strictMode - 严格模式（只使用优先类型）
+   * @param {boolean} config.blockIPv6LinkLocal - 阻止 IPv6 link-local 地址
+   */
+  setICEFilterConfig(config) {
+    if (config.preferredTypes) {
+      this.iceFilterConfig.preferredTypes = config.preferredTypes;
+    }
+    if (config.allowedTypes) {
+      this.iceFilterConfig.allowedTypes = config.allowedTypes;
+    }
+    if (typeof config.strictMode === 'boolean') {
+      this.iceFilterConfig.strictMode = config.strictMode;
+    }
+    if (typeof config.blockIPv6LinkLocal === 'boolean') {
+      this.iceFilterConfig.blockIPv6LinkLocal = config.blockIPv6LinkLocal;
+    }
+
+    this._setStatus(`ICE筛选配置已更新: 优先=${this.iceFilterConfig.preferredTypes.join(',')}, 严格模式=${this.iceFilterConfig.strictMode}`);
+    this.eventBus?.emit("webrtc:ice-filter-config-updated", this.iceFilterConfig);
+  }
+
+  /**
+   * 获取当前 ICE 候选筛选配置
+   */
+  getICEFilterConfig() {
+    return { ...this.iceFilterConfig };
+  }
+
+  /**
+   * 打印选中的候选对信息
+   */
+  async _logSelectedCandidatePair() {
+    if (!this.peerConnection) return;
+
+    try {
+      const stats = await this.peerConnection.getStats();
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          console.log(`✅ [ICE] 成功的候选对:`, report);
+          this._setStatus(`✅ 成功的候选对: ${report.id}`);
+          this._setDebug(`✅ 成功的候选对: ${report.id}`);
+          
+          // 查找本地和远程候选的详细信息
+          stats.forEach(candidateReport => {
+            if (candidateReport.id === report.localCandidateId) {
+              console.log(`   📤 [本地候选] ${candidateReport.candidateType} ${candidateReport.address || candidateReport.ip}:${candidateReport.port} (协议: ${candidateReport.protocol})`);
+              this._setStatus(`   📤 本地: ${candidateReport.candidateType} ${candidateReport.address || candidateReport.ip}:${candidateReport.port}`);
+            }
+            if (candidateReport.id === report.remoteCandidateId) {
+              console.log(`   📥 [远程候选] ${candidateReport.candidateType} ${candidateReport.address || candidateReport.ip}:${candidateReport.port} (协议: ${candidateReport.protocol})`);
+              this._setStatus(`   📥 远程: ${candidateReport.candidateType} ${candidateReport.address || candidateReport.ip}:${candidateReport.port}`);
+            }
+          });
+        }
+      });
+    } catch (error) {
+      console.error('获取候选对信息失败:', error);
+    }
+  }
+
+  /**
+   * 打印所有候选对的状态（用于调试失败情况）
+   */
+  async _logAllCandidatePairs() {
+    if (!this.peerConnection) return;
+
+    try {
+      const stats = await this.peerConnection.getStats();
+      const candidatePairs = [];
+      const candidates = new Map();
+
+      // 收集所有候选
+      stats.forEach(report => {
+        if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+          candidates.set(report.id, report);
+        }
+      });
+
+      // 收集所有候选对
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair') {
+          const localCandidate = candidates.get(report.localCandidateId);
+          const remoteCandidate = candidates.get(report.remoteCandidateId);
+          
+          candidatePairs.push({
+            state: report.state,
+            local: localCandidate ? `${localCandidate.candidateType} ${localCandidate.address || localCandidate.ip}:${localCandidate.port}` : 'unknown',
+            remote: remoteCandidate ? `${remoteCandidate.candidateType} ${remoteCandidate.address || remoteCandidate.ip}:${remoteCandidate.port}` : 'unknown',
+            nominated: report.nominated,
+            bytesSent: report.bytesSent || 0,
+            bytesReceived: report.bytesReceived || 0
+          });
+        }
+      });
+
+      console.log(`📊 [ICE] 所有候选对状态 (共 ${candidatePairs.length} 对):`, candidatePairs);
+      this._setStatus(`📊 检查了 ${candidatePairs.length} 个候选对，但都失败了`);
+      
+      candidatePairs.forEach((pair, index) => {
+        const emoji = pair.state === 'succeeded' ? '✅' : pair.state === 'failed' ? '❌' : '⏸️';
+        console.log(`   ${emoji} 候选对 ${index + 1}: ${pair.state}`);
+        console.log(`      本地: ${pair.local}`);
+        console.log(`      远程: ${pair.remote}`);
+        this._setDebug(`   ${emoji} [${pair.state}] ${pair.local} <-> ${pair.remote}`);
+      });
+    } catch (error) {
+      console.error('获取候选对信息失败:', error);
+    }
   }
 
   // 内部方法
